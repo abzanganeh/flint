@@ -18,8 +18,15 @@ use crate::health::{checks, hardware};
 use crate::interfaces::auth::AuthToken;
 use crate::interfaces::vector::Chunk;
 use crate::keychain;
+use crate::llm::failover::FailoverManager;
+use crate::llm::groq::GroqProvider;
+use crate::llm::ollama::OllamaProvider;
+use crate::llm::provider::LLMProvider;
+use crate::llm::rate_limiter::RateLimiter;
+use crate::orchestrator::{run_orchestrator, OrchestratorConfig};
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::rag::chunker::chunk_text;
+use crate::session::memory::ConversationMemory;
 use crate::session::state::SessionState;
 use crate::state::{AppState, LiveTaskHandles};
 use crate::transcription::detector::QuestionDetector;
@@ -489,7 +496,7 @@ async fn abort_live_tasks(state: &AppState) {
     if let Some(handles) = state.live_tasks.lock().await.take() {
         let _ = handles.stop_tx.send(());
         handles.pipeline.abort();
-        handles.drain.abort();
+        handles.orchestrator.abort();
     }
 }
 
@@ -553,7 +560,7 @@ pub async fn start_session(
     // ── 3. Audio channels ─────────────────────────────────────────────────
     let (system_tx, system_rx) = tokio::sync::mpsc::channel(256);
     let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(256);
-    let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
+    let (question_tx, question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (zeroed_tx, zeroed_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -591,11 +598,83 @@ pub async fn start_session(
         .map_err(|_| "Audio capture thread exited unexpectedly.".to_string())?
         .map_err(|e| format!("Failed to start audio capture: {e}"))?;
 
-    // ── 5. Spawn background tasks ─────────────────────────────────────────
+    // ── 5. Build failover manager and conversation memory ─────────────────
 
-    // Drain detected questions silently until the orchestrator is wired (Phase 4).
-    let drain = tokio::spawn(async move {
-        while question_rx.recv().await.is_some() {}
+    let (primary_provider, context_window) = match keychain::get_api_key("groq") {
+        Ok(api_key) => {
+            match GroqProvider::new(api_key) {
+                Ok(p) => {
+                    let cw = p.context_window();
+                    (Arc::new(p) as Arc<dyn crate::llm::provider::LLMProvider>, cw)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to build Groq provider — using stub");
+                    let stub = Arc::clone(&state.llm);
+                    let cw = stub.context_window();
+                    (stub, cw)
+                }
+            }
+        }
+        Err(_) => {
+            warn!("No Groq API key in keychain — using stub LLM provider");
+            let stub = Arc::clone(&state.llm);
+            let cw = stub.context_window();
+            (stub, cw)
+        }
+    };
+
+    let local_provider = Arc::new(
+        OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
+    );
+    let rate_limiter = Arc::new(RateLimiter::new(
+        primary_provider.name(),
+        primary_provider.rate_limit().requests_per_minute,
+        primary_provider.rate_limit().tokens_per_minute,
+    ));
+    let mut failover = FailoverManager::new(
+        primary_provider,
+        Arc::clone(&local_provider),
+        rate_limiter,
+    );
+    failover.start_ping_loop(app.clone());
+    let failover = Arc::new(failover);
+
+    let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(context_window)));
+    *state.session_memory.lock().await = Some(ConversationMemory::new(context_window));
+
+    // Load compression prompt for memory management.
+    let compression_prompt = std::fs::read_to_string(
+        prompts_base_dir().join("compression").join("default.txt"),
+    )
+    .unwrap_or_else(|_| {
+        "Summarise the conversation below in 3-5 sentences.\n\n{old_turns}\n\n[Summary]"
+            .to_string()
+    });
+
+    // ── 6. Spawn background tasks ─────────────────────────────────────────
+
+    let digest = state
+        .session_digest
+        .read()
+        .await
+        .clone()
+        .ok_or_else(|| "No session digest — run ingest_context before starting a live session.".to_string())?;
+
+    let orch_config = OrchestratorConfig {
+        session_id: sid,
+        digest: Arc::new(digest),
+        prompts_dir: prompts_base_dir(),
+        failover: Arc::clone(&failover),
+        embedder: Arc::clone(&state.embedder),
+        vector_store: Arc::clone(&state.vector_store),
+        prewarm_cache: Arc::clone(&state.prewarm_cache),
+        memory,
+        compression_prompt,
+    };
+
+    let orch_app = app.clone();
+    let orchestrator = tokio::spawn(async move {
+        run_orchestrator(question_rx, orch_config, orch_app).await;
     });
 
     let pipeline = tokio::spawn(run_audio_pipeline(
@@ -603,7 +682,7 @@ pub async fn start_session(
         sid,
         whisper,
         detector,
-        question_tx,
+        question_tx.clone(),
         system_rx,
         mic_rx,
     ));
@@ -612,7 +691,8 @@ pub async fn start_session(
         stop_tx,
         zeroed_rx,
         pipeline,
-        drain,
+        orchestrator,
+        question_tx,
     });
 
     // ── 6. State transitions ──────────────────────────────────────────────
@@ -698,8 +778,11 @@ pub async fn stop_session(
         let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
 
         handles.pipeline.abort();
-        handles.drain.abort();
+        handles.orchestrator.abort();
     }
+
+    // Clear per-session memory.
+    *state.session_memory.lock().await = None;
 
     // ENDING → ENDED
     {
@@ -716,18 +799,40 @@ pub async fn stop_session(
 
 /// Manual response trigger — valid only from LIVE.
 ///
-/// The orchestrator is wired in Phase 4. In Phase 3 this is a state-guarded
-/// no-op so the frontend IPC contract is satisfied without a crash.
+/// Sends a synthetic `DetectedQuestion` directly to the orchestrator so the
+/// user can manually fire a response without waiting for VAD/Whisper.
 #[tauri::command]
-pub async fn trigger_response(state: State<'_, AppState>) -> Result<(), String> {
-    let machine = state.state_machine.lock().await;
-    if *machine.current() != SessionState::Live {
-        return Err(format!(
-            "trigger_response is only valid from LIVE (current: {})",
-            machine.current()
-        ));
+pub async fn trigger_response(
+    state: State<'_, AppState>,
+    question: String,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "trigger_response is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
     }
-    warn!("trigger_response received — orchestrator not yet wired (Phase 4)");
+
+    let guard = state.live_tasks.lock().await;
+    if let Some(handles) = guard.as_ref() {
+        let detected = DetectedQuestion {
+            text: question.clone(),
+            session_id: sid,
+            detected_at: std::time::Instant::now(),
+        };
+        handles
+            .question_tx
+            .try_send(detected)
+            .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
+        info!(session_id = %sid, question = %question, "manual trigger_response");
+    }
+
     Ok(())
 }
 

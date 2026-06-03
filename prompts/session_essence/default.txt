@@ -1,0 +1,17 @@
+[System]
+Summarise this session in under 500 tokens. Return JSON only, no preamble.
+{
+  "date": "",
+  "domain": "",
+  "role": "",
+  "company": "",
+  "questions_count": 0,
+  "topics_covered": [],
+  "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+  "key_moments": [],
+  "follow_up_actions": [],
+  "one_line_summary": ""
+}
+
+[Transcript]
+{full_transcript}

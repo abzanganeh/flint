@@ -331,7 +331,9 @@ mod tests {
 
     #[test]
     fn compression_ratio_repetitive_text_above_threshold() {
-        let repetitive = "the the the the the the the the the the the the the the the";
+        let repetitive = "the the the the the the the the the the the the the the the \
+                          the the the the the the the the the the the the the the the \
+                          the the the the the the the the the the the the the the the";
         let ratio = compression_ratio(repetitive);
         assert!(
             ratio > COMPRESSION_RATIO_THRESHOLD,
@@ -352,7 +354,9 @@ mod tests {
     #[test]
     fn per_segment_filter_does_not_cross_contaminate() {
         let normal = "Tell me about a time you led a project.";
-        let repetitive = "and and and and and and and and and and and and and and and";
+        let repetitive = "and and and and and and and and and and and and and and and \
+                          and and and and and and and and and and and and and and and \
+                          and and and and and and and and and and and and and and and";
 
         let r_normal = compression_ratio(normal);
         let r_repetitive = compression_ratio(repetitive);
