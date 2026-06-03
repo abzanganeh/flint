@@ -1,0 +1,2 @@
+-- Optional dev seed data. `supabase db reset` runs this after migrations.
+-- Keep empty for Phase 0; add fixtures here when you need repeatable local data.

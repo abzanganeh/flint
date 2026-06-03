@@ -1,0 +1,97 @@
+---
+description: TypeScript and React conventions, Tauri IPC patterns, UIState interface, and Zustand rules for Flint.
+globs: src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Flint — TypeScript & React Conventions
+
+## Strict Mode Rules
+- TypeScript strict mode always on. No `any`. No `as unknown as X`.
+- Components are functional only. No class components.
+- Props interfaces named `[ComponentName]Props`.
+- Format: Prettier defaults. Lint: ESLint with typescript-eslint strict preset.
+
+## Tauri IPC Pattern — Non-Negotiable
+
+```typescript
+// CORRECT — typed command wrapper in commands/index.ts
+export const triggerResponse = () => invoke<void>('trigger_response');
+export const startSession = (sessionId: string) => invoke<void>('start_session', { sessionId });
+export const getSessionSnapshot = () => invoke<SessionSnapshot>('get_session_snapshot');
+
+// CORRECT — typed event listener hook in hooks/
+export function useDirectionalStream() {
+  const appendToken = useUIStore(s => s.appendDirectionalToken);
+  useEffect(() => {
+    const unlisten = listen<string>('directional_token', e => appendToken(e.payload));
+    return () => { unlisten.then(f => f()); };
+  }, []);
+}
+
+// WRONG — direct invoke or listen in a component
+const MyPanel = () => {
+  const go = () => invoke('trigger_response'); // NO — use commands/
+  listen('directional_token', handler);        // NO — use hooks/
+};
+```
+
+- No raw `invoke()` calls inside components — always go through `commands/index.ts`.
+- No raw `listen()` calls inside components — always go through a hook in `hooks/`.
+- Do not import from `@tauri-apps/api` directly in component files.
+- All five live panels are independent components. They do not share state directly — each subscribes to its own Tauri event.
+
+## Zustand UI Store — UI State ONLY
+
+```typescript
+interface UIState {
+  panelLayout: PanelLayout;
+  focusedPanel: PanelId | null;
+  streamingBuffers: {
+    directional: string;
+    depth: string;
+  };
+  notificationQueue: Notification[];
+  theme: 'light' | 'dark' | 'system';
+  overlayMinimised: boolean;
+  panicHideActive: boolean;
+  // Actions
+  appendDirectionalToken: (token: string) => void;
+  appendDepthToken: (token: string) => void;
+  clearStreamingBuffers: () => void;
+  queueNotification: (n: Notification) => void;
+}
+```
+
+**Streaming token buffers live in the Zustand UI store, not in component state.**
+
+State that lives in Rust (authoritative — never duplicate in React):
+- Session config and state machine state
+- Full transcript history, response history, session cache
+- Provider health and active provider
+- Token usage counters, audio stream status
+- Pre-warm cache entries, conversation memory
+
+## Sync Pattern
+
+```
+User action (click / hotkey)
+    → React sends Tauri command via commands/index.ts
+    → Rust processes and emits Tauri event
+    → React updates UI from event payload
+    → React NEVER writes session state directly
+```
+
+React never reads session state from its own store — it reads from the last Tauri event. If a Tauri event is missed, React calls `getSessionSnapshot()` on reconnect. React never assumes state.
+
+## Confidence Colour Rendering
+
+Confidence is a **4px left border stripe only**. Never a background fill.
+
+| Score | Colour | Meaning |
+|---|---|---|
+| ≥ 0.85 | Green | High confidence |
+| ≥ 0.65 | Blue | Good confidence |
+| ≥ 0.45 | Amber | Partial — use with care |
+| ≥ 0.25 | Grey | Low — limited context |
+| < 0.25 | Red | Very low — verify manually |

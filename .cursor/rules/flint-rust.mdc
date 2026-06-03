@@ -1,0 +1,118 @@
+---
+description: Rust coding conventions, service interface contracts, error handling, HTTP retry, failover, and rate limiting patterns for Flint.
+globs: src-tauri/**/*.rs
+alwaysApply: false
+---
+
+# Flint — Rust Conventions
+
+## Error Handling & Logging
+
+- Use `anyhow::Result` for all fallible functions.
+- Use `thiserror` for defining domain-specific error types.
+- Use `tracing` (not `println!`, not `log`) for all logging.
+- All log lines include `session_id` when inside a session context.
+- Every `tokio::spawn` task has a named span: `tracing::info_span!("thread_name")`.
+- `DEBUG` logs compiled out in release (`#[cfg(debug_assertions)]`).
+- NEVER show raw Rust errors to users — map all errors to user-facing messages.
+
+```rust
+tracing::info!(
+    session_id = %session_id,
+    event = "directional_thread_complete",
+    ttft_ms = ttft,
+    provider = %provider_name,
+    cache_hit = was_cache_hit,
+    confidence = confidence_score,
+    "directional thread finished"
+);
+```
+
+## HTTP Calls
+- Always set a timeout. One immediate retry. Then fallback. No silent hangs.
+- 429 responses: honor `Retry-After` header. Queue under token-bucket limiter. Do NOT immediately failover on 429 — only on repeated budget breach.
+- Rate limiter enforces 80% of documented provider free-tier limits.
+
+## Failover Logic
+
+```
+Network failure (HTTP 5xx / timeout):
+1. One immediate retry.
+2. If retry fails: silent failover to Ollama → emit `failover_triggered`.
+3. Background ping primary every 30 seconds.
+4. On recovery: emit `primary_restored` → UI shows "Primary LLM restored. Switch back?"
+
+429 rate limiting:
+- Honor Retry-After. Queue under token-bucket. Do NOT failover on first 429.
+- Only downgrade on repeated budget breach.
+```
+
+## Thread Safety
+- Each `tokio::spawn` thread has its own error boundary (`catch_unwind` equivalent).
+- One thread failing NEVER crashes other threads or the main process.
+
+## Formatting & Lint
+- `rustfmt` defaults. Enforce with `cargo fmt --check` in CI.
+- `cargo clippy -- -D warnings` in CI. No clippy warnings in merged code.
+- SQLite: always `PRAGMA journal_mode = WAL`. NEVER use DELETE mode.
+
+## Service Interface Contracts
+
+All external dependencies are behind traits in `interfaces/`. Implementations swap without touching orchestrator or core logic.
+
+```rust
+#[async_trait]
+trait AuthInterface: Send + Sync {
+    async fn signup(&self, email: &str, password: &str) -> Result<User>;
+    async fn login(&self, email: &str, password: &str) -> Result<AuthToken>;
+    async fn logout(&self, token: &AuthToken) -> Result<()>;
+    async fn refresh(&self, refresh_token: &str) -> Result<AuthToken>;
+    async fn get_current_user(&self, token: &AuthToken) -> Result<User>;
+    async fn delete_account(&self, token: &AuthToken) -> Result<()>;
+}
+
+#[async_trait]
+trait SessionInterface: Send + Sync {
+    async fn create(&self, token: &AuthToken, config: SessionConfig) -> Result<Session>;
+    async fn get(&self, token: &AuthToken, session_id: Uuid) -> Result<Session>;
+    async fn list(&self, token: &AuthToken) -> Result<Vec<SessionSummary>>;
+    async fn save(&self, token: &AuthToken, data: SessionData) -> Result<()>;
+    async fn promote(&self, token: &AuthToken, session_id: Uuid) -> Result<()>;
+    async fn delete(&self, token: &AuthToken, session_id: Uuid) -> Result<()>;
+}
+
+#[async_trait]
+trait VectorInterface: Send + Sync {
+    async fn ingest(&self, session_id: Uuid, chunks: Vec<Chunk>) -> Result<()>;
+    async fn query(&self, session_id: Uuid, embedding: &Embedding, top_k: usize) -> Result<Vec<ScoredChunk>>;
+    async fn delete_session(&self, session_id: Uuid) -> Result<()>;
+    fn chunk_count(&self, session_id: Uuid) -> usize;
+}
+
+#[async_trait]
+trait LLMProvider: Send + Sync {
+    async fn complete_stream(
+        &self,
+        prompt: String,
+        config: CompletionConfig,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>>;
+    fn name(&self) -> &str;
+    fn is_available(&self) -> bool;
+    fn context_window(&self) -> usize;
+    fn rate_limit(&self) -> RateLimit;
+}
+```
+
+## Feature Flags Evaluation
+
+```rust
+fn is_enabled(flag: &str, user: &User) -> bool {
+    let flag_config = get_flag(flag);
+    if !flag_config.enabled { return false; }
+    if !flag_config.allowed_plans.contains(&user.plan) { return false; }
+    let hash = stable_hash(&user.id) % 100;
+    hash < flag_config.rollout_percentage
+}
+```
+
+Kill switch: If Supabase unreachable at start, use locally cached flags (24h cache). If no cache: GA features enabled, unreleased features disabled.

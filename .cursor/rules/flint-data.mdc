@@ -1,0 +1,87 @@
+---
+description: RAG rules, confidence scoring, conversation memory, Supabase schema, SQLite rules, and migration strategy for Flint.
+globs: src-tauri/src/rag/**,src-tauri/src/session/**,supabase/**
+alwaysApply: false
+---
+
+# Flint — Data Layer
+
+## RAG Rules
+
+- Each session's vectors are **isolated by `session_id`**. Every query scoped to current session. Never mix sessions.
+- Embedding model: `bge-small-en-v1.5` via `fastembed-rs`. Provider-independent. Vector dimensions fixed — do not change embedding model per-session.
+- Retrieval: dot product similarity, **top 8–10 chunks**, MMR de-duplication.
+- **Pre-warm threshold: 0.85 cosine similarity.** If score > 0.85, serve cached response.
+- Session-wide cache grows during LIVE: every answered question is added.
+- After cache hit (turn ≥ 3): show cached depth immediately as "pre-prepared", run fresh depth in parallel, replace when ready.
+- Session vectors **hard-deleted** on session expiry. No orphan vectors.
+- Cross-encoder re-ranking: **NOT in v1.** Only add in v3 if corpus > 500 chunks AND eval shows ≥ 10% relevance@5 lift vs dot-product+MMR baseline.
+
+## Confidence Scoring Formula
+
+```
+confidence =
+  0.50 × rag_grounding        (semantic similarity: top chunk score vs question)
++ 0.25 × response_quality     (heuristic: length, structure, keyword match)
++ 0.15 × model_tier           (Tier 4 cloud flagship = 1.0; Tier 1 tiny = 0.5)
+- 0.10 × cache_staleness_penalty  (pre-warm > 10 minutes old = small penalty)
+```
+
+Computed locally — **no extra LLM round-trip on the live path.**
+
+## Conversation Memory
+
+**Cloud providers (Groq, OpenAI, Anthropic) — large context windows:**
+- Inject full verbatim conversation history on every call.
+
+**Ollama local — small context windows (4K–8K):**
+- Keep last 4–6 turns verbatim.
+- Compress older turns via Conversation Compression Prompt.
+- Prepend: `"Earlier in this conversation: {summary}"`.
+- If rolling summary exceeds budget: compress recursively.
+
+Full verbatim transcript is ALWAYS stored in local SQLite and shown in the transcript panel — regardless of what was sent to the LLM.
+
+## Universal Question Bank — Pre-warm Priority Order
+
+When fewer than 5 domain-specific questions extracted from digest, pre-warm in this order:
+1. "Tell me about yourself" (highest hit rate)
+2. "What are your greatest strengths?"
+3. "Why are you interested in this role?"
+4. "Tell me about a significant challenge you faced"
+5. "Why should we hire you?"
+
+## Supabase Schema (v1 — Additive Only)
+
+```sql
+users            -- id, email, created_at, plan
+profiles         -- user_id, name, role, industry, domain, style_prefs
+sessions         -- id, user_id, name, type, domain, status, expires_at, promoted
+transcripts      -- id, session_id, speaker, content, timestamp
+responses        -- id, session_id, type, content, confidence, created_at
+session_insights -- id, session_id, usage_breakdown, low_confidence_topics, gaps
+credentials      -- id, user_id, provider, encrypted_key, iv
+templates        -- id, user_id, name, type, domain, config jsonb
+```
+
+## Migration Rules
+
+**Supabase:**
+- All migrations in `/supabase/migrations/YYYYMMDDHHMMSS_description.sql`.
+- v1 rule: **additive only**. New columns nullable with defaults. No drops, no renames.
+- Breaking changes require a feature flag gate.
+- App version N must work with Supabase schema from version N-1.
+- Every migration reviewed for RLS impact before merge.
+
+**Local SQLite:**
+- Schema version tracked via `PRAGMA user_version`.
+- Migration runner executes on every app start.
+- `PRAGMA journal_mode = WAL` — always. Never DELETE mode.
+- If `user_version < expected_version`: run pending migrations sequentially.
+- Migration failure: show error + two options — retry or reset local data (transcripts/responses only, NOT credentials).
+- Credentials stored in OS keychain are NEVER affected by SQLite migration.
+
+**sqlite-vec (Vector Store):**
+- Session-scoped: each session creates its own table tagged with `session_id`.
+- Tables dropped on session expiry.
+- Schema change: bump the create table statement — all existing sessions unaffected.

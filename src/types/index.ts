@@ -1,0 +1,73 @@
+export enum SessionState {
+  IDLE = "IDLE",
+  CONFIGURING = "CONFIGURING",
+  INGESTING = "INGESTING",
+  DIGEST_REVIEW = "DIGEST_REVIEW",
+  PRE_WARMING = "PRE_WARMING",
+  REHEARSING = "REHEARSING",
+  READY = "READY",
+  LIVE = "LIVE",
+  PAUSED = "PAUSED",
+  ENDING = "ENDING",
+  ENDED = "ENDED",
+  CRASHED = "CRASHED",
+  RECOVERING = "RECOVERING",
+}
+
+export type PanelId =
+  | "transcript"
+  | "directional"
+  | "depth"
+  | "clarifying"
+  | "context";
+
+export type Speaker = "System" | "Microphone";
+
+export type ConfidenceLevel = "green" | "blue" | "amber" | "grey" | "red";
+
+export type HardwareTier = 1 | 2 | 3 | 4;
+
+export interface TranscriptionChunk {
+  text: string;
+  speaker: Speaker;
+  timestamp: number;
+}
+
+export interface PanelLayout {
+  sizes: Record<PanelId, number>;
+  collapsed: Record<PanelId, boolean>;
+}
+
+export interface Notification {
+  id: string;
+  message: string;
+  level: "info" | "warn" | "error";
+}
+
+export interface UIState {
+  panelLayout: PanelLayout;
+  focusedPanel: PanelId | null;
+  streamingBuffers: {
+    directional: string;
+    depth: string;
+  };
+  notificationQueue: Notification[];
+  theme: "light" | "dark" | "system";
+  overlayMinimised: boolean;
+  panicHideActive: boolean;
+}
+
+export interface SessionConfig {
+  name: string;
+  type: string;
+  domain: string;
+  templateId?: string;
+}
+
+export interface SessionSummary {
+  id: string;
+  name: string;
+  domain: string;
+  createdAt: string;
+  promoted: boolean;
+}

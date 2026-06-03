@@ -1,0 +1,11 @@
+[System]
+Reply with a single word only: YES or NO. No explanation.
+Is the following statement a question or a request for information?
+Examples of YES: "Walk me through your experience." "Tell me about a challenge you faced."
+"Can you describe your approach?" "What would you do if..."
+Examples of NO: "That's interesting." "I see." "Tell me more." (statement, not seeking answer)
+
+[Statement]
+{utterance}
+
+[Answer]

@@ -1,0 +1,67 @@
+---
+description: Audio pipeline rules, VAD parameters, Whisper configuration, and RNNoise specs for Flint. Review every line here — AI-generated audio code fails silently.
+globs: src-tauri/src/audio/**,src-tauri/src/transcription/**
+alwaysApply: false
+---
+
+# Flint — Audio Pipeline
+
+> **WARNING:** Never let AI generate audio pipeline or Tauri IPC code without reviewing every line. These are the two areas where AI-generated code fails silently and is hardest to debug.
+
+## Audio Format
+- All audio processed at **16kHz PCM mono** (Whisper's required input format).
+- System audio (loopback) and microphone captured as **separate channels**.
+- Each channel gets independent RNNoise + VAD before being tagged and merged.
+- Tag: `source = "System"` (loopback = interviewer) or `source = "Microphone"` (user).
+
+## RNNoise Configuration
+| Parameter | Value |
+|---|---|
+| Frame size | 480 samples (10ms at 48kHz → downsampled to 16kHz) |
+| Latency | < 5ms per frame |
+
+## VAD Configuration (WebRTC VAD)
+| Parameter | Value | Reason |
+|---|---|---|
+| Mode | 3 (most aggressive) | Filters most background noise |
+| Frame size | 20ms | WebRTC VAD standard |
+| Sample rate | 16kHz | Whisper's required input |
+| Minimum speech duration | 200ms | Below this = noise artefact |
+| Maximum silence gap | 600ms | Triggers end-of-chunk |
+| Energy floor | -60 dBFS | Below this = definitely silence |
+| Silence threshold | -35 dBFS | Below this = silence |
+
+Silence frames are **NEVER** sent to Whisper.
+
+## Whisper.cpp Configuration
+| Parameter | Value | Reason |
+|---|---|---|
+| `beam_size` | 5 | Default, good quality/speed tradeoff |
+| `temperature` | 0.0 | Deterministic, prevents hallucination |
+| `language` | `"en"` | Locked — auto-detect adds 200–400ms latency |
+| `no_speech_threshold` | 0.6 | Above this = silence |
+| `compression_ratio_threshold` | 2.4 | Above this = repetitive hallucination, discard |
+| `logprob_threshold` | -1.0 | Below this = low-confidence, discard |
+| `word_timestamps` | `true` | Per-word timing for speaker-turn heuristics |
+| `initial_prompt` | `"Professional interview conversation."` | Improves accuracy on formal language |
+| `max_context` | -1 | No context carry-over between chunks |
+
+## Ring Buffer Rules
+- **16KB ring buffer per channel.** Never flush to disk.
+- Audio cleared on session end. Zero bytes of audio on disk — hard requirement.
+- On audio stream drop: cpal detects error → reinitialise within 5 seconds.
+- Transcript panel inserts `[audio gap - Ns missing]` marker on drop.
+
+## Channel Mixing
+- Sum to mono **after** per-channel VAD, **before** Whisper.
+- Chunk delivery: on VAD end-of-speech signal, max 1 second.
+
+## System Audio Loopback per Platform
+- **Linux (PipeWire):** loopback module loaded automatically if not present.
+- **Linux (PulseAudio):** `pactl load-module module-loopback` at session start.
+- **Linux (ALSA only):** warn user — loopback requires additional setup.
+- **Windows:** WASAPI loopback capture.
+- **macOS:** BlackHole virtual audio driver.
+  - If system audio loopback fails at health check: guide user through BlackHole install + Audio MIDI Setup multi-output device creation.
+  - If user skips: session proceeds but only mic captured — persistent amber warning: *"System audio not configured. Flint will only hear your voice."*
+- **X11 Linux:** show hard warning, block `READY → LIVE` transition.

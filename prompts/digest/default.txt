@@ -1,0 +1,25 @@
+[System]
+Extract the following structured information from the text below.
+Return JSON only — no preamble, no explanation, no markdown fences.
+
+{
+  "role": "",
+  "company": "",
+  "domain": "",
+  "key_skills": [],
+  "seniority": "",
+  "likely_questions": [],
+  "topics_to_avoid": []
+}
+
+Field guidance:
+- role: the job title or role being discussed (e.g. "Senior Software Engineer")
+- company: the organisation name if present, otherwise empty string
+- domain: the professional domain (e.g. "software engineering", "product management", "finance")
+- key_skills: list of specific skills, technologies, or competencies mentioned
+- seniority: one of "junior", "mid", "senior", "staff", "principal", "director", "vp", or "unknown"
+- likely_questions: top 5 interview questions the interviewer is most likely to ask based on the text
+- topics_to_avoid: any topics, companies, or subjects that should not be brought up
+
+[Text]
+{pasted_context}

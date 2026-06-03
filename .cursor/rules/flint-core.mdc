@@ -1,0 +1,122 @@
+---
+description: Core architecture rules, tech stack, folder structure, and v1 scope for Flint. Read before generating any code.
+alwaysApply: true
+---
+
+# Flint — Core Architecture
+
+Flint is a real-time AI co-pilot desktop app built with Tauri 2.x. It listens to live conversations (interviews etc.), transcribes locally, and surfaces parallel AI responses — invisible to the other party. All real-time processing runs locally. Cloud is only for auth and post-session persistence.
+
+## Tech Stack — Do Not Deviate
+
+| Layer | Technology |
+|---|---|
+| Desktop framework | Tauri 2.x |
+| Backend language | Rust (stable, 2021 edition) |
+| Async runtime | tokio (multi-thread) |
+| Frontend language | TypeScript (strict mode) |
+| Frontend framework | React 18 |
+| Styling | Tailwind CSS |
+| Cloud backend | Supabase (PostgreSQL 15, GoTrue, Storage) |
+| Local vector store | sqlite-vec |
+| Local DB | SQLite via rusqlite |
+| Embedding model | bge-small-en-v1.5 via fastembed-rs |
+| Transcription | whisper-rs (Whisper.cpp bindings) |
+| Audio capture | cpal |
+| Noise suppression | rnnoise-rs |
+| VAD | webrtc-vad |
+| State (React) | Zustand (UI state only — never session state) |
+| Testing (Rust) | cargo test |
+| Testing (TS) | Vitest |
+| Build/CI | GitHub Actions |
+
+## Folder Structure
+
+```
+flint/
+├── src-tauri/src/
+│   ├── main.rs             # Tauri app entry point only
+│   ├── commands.rs         # All #[tauri::command] functions
+│   ├── events.rs           # All emit_* helper functions
+│   ├── audio/              # capture.rs, rnnoise.rs, vad.rs
+│   ├── transcription/      # engine.rs, detector.rs
+│   ├── rag/                # embedder.rs, store.rs, retriever.rs
+│   ├── orchestrator/       # mod.rs, directional.rs, depth.rs, clarifying.rs, prewarm.rs
+│   ├── llm/                # provider.rs, groq.rs, openai.rs, anthropic.rs, ollama.rs
+│   ├── session/            # state.rs, memory.rs, persistence.rs, recovery.rs
+│   ├── interfaces/         # auth.rs, session.rs, storage.rs, vector.rs
+│   ├── supabase/           # auth.rs, session.rs
+│   ├── health/             # hardware.rs, checks.rs
+│   ├── confidence.rs, digest.rs, keychain.rs
+│   ├── Cargo.toml, tauri.conf.json
+├── src/                    # React + TypeScript
+│   ├── panels/             # TranscriptPanel, DirectionalPanel, DepthPanel, ClarifyingPanel, ContextPanel
+│   ├── screens/            # Onboarding, HealthCheck, SessionDesign, DigestReview, Rehearsal, SessionList
+│   ├── store/ui.ts         # Zustand — UI state ONLY
+│   ├── commands/index.ts   # Typed invoke() wrappers
+│   ├── events/index.ts     # Typed Tauri event listeners
+│   ├── components/, hooks/, types/index.ts
+├── prompts/                # directional/, depth/, clarifying/, digest/, compression/, question_detection/, session_essence/
+├── supabase/migrations/    # YYYYMMDDHHMMSS_description.sql
+├── tests/integration/, tests/e2e/, evals/
+```
+
+## Architecture Rules — Non-Negotiable
+
+### Rule 1 — React is a Dumb Renderer
+React NEVER holds authoritative session state. It ONLY renders what Rust sends via Tauri events. Zustand holds UI state only: panel layout, streaming buffers, notification queue, theme, overlay state. If a Tauri event is missed, React calls `get_session_snapshot()`. React NEVER assumes state.
+
+```typescript
+// CORRECT
+const handleTrigger = () => invoke('trigger_response');
+
+// WRONG — never write session state in React
+setSessionState({ isLive: true });
+```
+
+### Rule 2 — State Machine Lives in Rust (`session/state.rs`)
+
+Valid states: `IDLE → CONFIGURING → INGESTING → DIGEST_REVIEW → PRE_WARMING → REHEARSING → READY → LIVE → ENDING → ENDED → IDLE`
+
+Also: `LIVE → CRASHED → RECOVERING → READY`, `LIVE → PAUSED → LIVE` (v2), `ENDED → CONFIGURING` (clone).
+
+Invalid (rejected + logged): `IDLE→LIVE`, `CRASHED→LIVE`, `PRE_WARMING→LIVE`, `INGESTING→INGESTING`, `any→INGESTING from LIVE`, `REHEARSING→LIVE`.
+
+Every transition: initiated by Tauri command → validated in Rust → confirmed via Tauri event. NEVER transition from React.
+
+Current state persisted to SQLite on every transition. On app start, if state is `LIVE`, `ENDING`, or `CRASHED`, offer recovery.
+
+### Rule 3 — All External Dependencies Behind Traits
+`AuthInterface`, `SessionInterface`, `StorageInterface`, `VectorInterface`, `LLMProvider` — all in `interfaces/`. Adding a new LLM provider = implement `LLMProvider` trait + register it. No orchestrator changes.
+
+### Rule 4 — Parallel Threads via tokio::spawn — Never Sequential
+
+```rust
+// CORRECT
+let dir = tokio::spawn(run_directional(ctx.clone()));
+let dep = tokio::spawn(run_depth(ctx.clone()));
+let cla = tokio::spawn(run_clarifying(ctx.clone()));
+let (r1, r2, r3) = tokio::join!(dir, dep, cla);
+
+// WRONG
+let dir_result = run_directional(ctx.clone()).await?;
+```
+
+One thread failing NEVER affects others. Each has its own error boundary.
+
+### Rule 5 — Directional/Depth/Clarifying Fire ONLY on `source = System` Audio
+NEVER fire on `source = Microphone` (user's own voice).
+
+## Tauri Command and Event Contracts
+
+**Commands (React → Rust):**
+`start_session`, `stop_session`, `trigger_response`, `cancel_inference`, `panic_hide_overlay`, `switch_provider`, `get_session_snapshot`
+
+**Events (Rust → React):**
+`transcription_chunk { text, speaker: "System"|"Microphone", timestamp }`, `directional_token { token }`, `depth_token { token }`, `clarifying_question { question, rank }`, `confidence_score { level: "green"|"blue"|"amber"|"grey"|"red" }`, `thread_status { thread, status: "ok"|"error"|"idle" }`, `failover_triggered { from, to }`, `primary_restored { provider }`, `token_usage_update { input, output, total, cost_estimate }`, `session_state_change { state }`
+
+## v1 Scope
+
+**In v1:** Groq + Ollama, Job Interview template, system audio loopback (Linux PipeWire / Windows WASAPI / macOS BlackHole), RNNoise + VAD + Whisper, two-pass question detection, tokio parallel threads, token streaming, sqlite-vec RAG + pre-warm cache, dynamic conversation memory, five-panel stealth overlay, Ctrl+Option/Alt hotkey system, confidence colour system, SQLite persistence + crash recovery, OS keychain, hardware tier assessment, health check wizard, rehearsal mode, legal consent, token usage tracker + configurable cost cap, Ollama fallback, post-session summary.
+
+**NOT in v1 — do not implement, stub, or prepare:** file upload ingestion, URL scraping, mid-session model switching UI, voice I/O, session export (PDF/text), conversation phase tracking, mock interview mode, medical exam domain, any domain beyond job interviews, B2B features, OAuth, certificate pinning, cross-encoder re-ranking.

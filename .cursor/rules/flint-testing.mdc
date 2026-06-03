@@ -1,0 +1,91 @@
+---
+description: Testing requirements, coverage targets, integration test scenarios, eval harness gates, and CI pipeline for Flint.
+globs: tests/**,**/*.test.ts,**/*.spec.rs,evals/**
+alwaysApply: false
+---
+
+# Flint — Testing Requirements
+
+## Rust Unit Test Coverage Targets
+
+| Module | Coverage target |
+|---|---|
+| Session state machine | 100% (all valid transitions + all invalid transitions rejected) |
+| LLM orchestrator | 85% |
+| RAG engine | 85% |
+| Pre-warm cache | 90% |
+| Confidence scoring | 90% |
+| Conversation memory | 85% |
+| Failure handling | 90% |
+| Provider rate limiter | 90% |
+
+Mock LLM providers return fixtures. **No real API calls in unit tests.**
+
+## TypeScript Unit Tests (Vitest)
+
+- All five panels: render test + event handler test.
+- Tauri event handlers: mock event emitter + assert Zustand state update.
+- Panel layout: resize and collapse behaviour.
+
+## Integration Tests (Rust)
+
+| Scenario | Method |
+|---|---|
+| Audio pipeline | Mock audio file → VAD → RNNoise → Whisper → assert transcript |
+| RAG ingest + query | Sample JD text → embed → store → query → assert top chunk relevance |
+| Pre-warming | Sample digest → extract questions → fire mock provider → assert cache entries |
+| Session lifecycle | Drive full state machine: IDLE → LIVE → ENDED via Tauri commands |
+| Crash recovery | Force CRASHED → restart → assert RECOVERING → READY with transcript intact |
+| Network failure | Mock 500 → assert Ollama fallback → assert `failover_triggered` event |
+| Rate limiting | Mock 429 → assert Retry-After honoured → assert no immediate failover |
+
+## End-to-End Test (Ollama local — no API cost)
+
+Full session flow:
+1. Account creation
+2. Health check flow
+3. Session design with sample JD text
+4. Digest confirmation
+5. Pre-warming
+6. Rehearsal mode
+7. Live session (10 turns with mock audio)
+8. Session end and Supabase sync
+9. Session review
+
+## CI Performance Gates (Fail PR)
+
+| Test | Threshold | Action |
+|---|---|---|
+| P95 TTFT directional | > 900ms | **Fail PR** |
+| P95 RAG retrieval | > 60ms | **Fail PR** |
+| P95 transcription lag | > 2.5s | **Fail PR** |
+| App cold start | > 4s | Warn (not blocking) |
+| Prompt eval win rate | < 50% vs previous version | **Block merge** |
+
+## CI Pipeline — GitHub Actions
+
+**On every PR:**
+- `cargo test` (unit + integration)
+- `cargo clippy --deny warnings`
+- `cargo fmt --check`
+- `vitest run`
+- Eval harness smoke test (10 questions, latency regression gate)
+
+**On merge to main:**
+- `cargo tauri build` matrix: ubuntu-latest, windows-latest, macos-latest
+- Upload artifact per platform
+
+**On version tag (v*):**
+- Build all platforms
+- Sign macOS .dmg (Apple Developer ID + notarize)
+- Sign Windows .exe (Authenticode)
+- Upload to S3 release bucket
+- Update `latest.json` manifest
+- Create GitHub release
+
+## Eval Harness Gate
+
+Any prompt change REQUIRES an eval run. Blocks merge if:
+- Win rate < 50% vs previous version
+- Directional conciseness pass rate < 95%
+- Any domain score < 0.7 relevance

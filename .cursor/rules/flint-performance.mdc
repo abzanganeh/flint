@@ -1,0 +1,94 @@
+---
+description: Performance NFRs, CI gates, context budget, and observability requirements for Flint.
+alwaysApply: true
+---
+
+# Flint — Performance & Observability
+
+## NFR Targets (Treat as Tests)
+
+| Requirement | Target | CI Gate |
+|---|---|---|
+| Directional TTFT P95 | < 800ms | Fail PR > 900ms |
+| Depth response fully streamed P95 | < 8s | Warn |
+| RAG retrieval (sqlite-vec) P95 | < 50ms | Fail PR > 60ms |
+| Transcription lag P95 | < 2s | Fail PR > 2.5s |
+| Question detection P95 | ≤ 100ms | Auto-bypass classifier > 200ms rolling |
+| App cold start P95 | < 3s | Warn > 4s |
+| RNNoise per frame | < 5ms | — |
+| Pre-warm cache threshold | 0.85 cosine | — |
+| RAG top-k | 8–10 chunks after MMR de-dup | — |
+
+Any code path that cannot meet these targets is wrong by definition.
+
+## Context Budget Allocation (Every LLM Call)
+
+```
+Total = provider_context_window × 0.6
+RAG chunks:           40% of budget
+Conversation history: 40% of budget
+System prompt:        10% of budget
+Current question:     10% of budget
+```
+
+Budget edge case (question + min system prompt + min RAG > window):
+1. Trim RAG to minimum 2 chunks.
+2. Drop oldest conversational turns.
+3. Keep current question and system prompt intact.
+4. Emit `context_truncated` observability event.
+
+## Structured Logging Schema (Mandatory for Every LLM Request)
+
+```json
+{
+  "timestamp": "ISO8601",
+  "level": "INFO",
+  "service": "orchestrator",
+  "session_id": "uuid",
+  "event": "directional_thread_complete",
+  "ttft_ms": 412,
+  "provider": "groq",
+  "model": "llama-3.3-70b-versatile",
+  "cache_hit": false,
+  "confidence": 0.82
+}
+```
+
+Per-request metrics emitted on every LLM call: `provider`, `model`, `thread_type` (directional/depth/clarifying/detection), `ttft_ms`, `stream_complete_ms`, `rag_latency_ms`, `cache_hit`, `confidence_score`, `tokens_input`, `tokens_output`, `failover_triggered`.
+
+## Log Levels
+
+| Level | When to use |
+|---|---|
+| ERROR | Production incidents requiring immediate attention |
+| WARN | Degraded performance (TTFT > 1s, RAG > 60ms, fallback triggered) |
+| INFO | Lifecycle events (session start/end, state transitions, provider switch) |
+| DEBUG | Development only — compiled out in release builds (`#[cfg(debug_assertions)]`) |
+
+## Local Metrics
+
+- Written to `~/.flint/metrics.log`. Rotated daily. Retained 7 days locally.
+- Uploaded to telemetry endpoint on user opt-in (**off by default**).
+
+## Debug Dashboard (Dev Builds Only)
+
+Local web dashboard at `http://localhost:7373` showing: live TTFT, cache hit rate, confidence distribution, thread health, provider rate limit status, recent error log.
+
+## User-Facing Performance Alerts
+
+| Condition | UI Signal |
+|---|---|
+| TTFT > 1s directional | Amber indicator on panel |
+| TTFT > 2s directional | Orange indicator + tooltip |
+| Provider 429 rate limit | "Approaching free tier limit" toast |
+| Failover triggered | "Running locally" indicator |
+| Transcription lag > 2s | "Audio processing slow" amber indicator |
+
+## Prompts Are First-Class Artifacts
+
+- All prompts live in `/prompts/` versioned by directory.
+- Every prompt has three variants: `gpt.txt`, `claude.txt`, `llama.txt`.
+- A prompt change REQUIRES an eval harness run before merging.
+- Regression gate: win rate ≥ 50%, directional conciseness pass rate ≥ 95%, no domain score below 0.7 relevance.
+- NEVER inline a prompt as a Rust string literal. Always load from `/prompts/`.
+- Template variables: `{rag_chunks}`, `{rolling_summary_if_compressed}`, `{last_n_turns}`, `{question}`, `{session_domain}`, `{interviewer_role}`, `{interviewer_priorities}`, `{utterance}`, `{pasted_context}`, `{old_turns}`, `{full_transcript}`.

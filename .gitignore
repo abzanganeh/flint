@@ -1,0 +1,42 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+
+# Supabase CLI (local state; keys live in tauri.conf or .env)
+supabase/.branches
+supabase/.temp
+
+# Local design docs (not published to GitHub)
+docs/
+
+# Rust
+src-tauri/target/
+src-tauri/.fastembed_cache/
+
+# Whisper / other local model weights (downloaded at runtime)
+*.ggml
+*.bin
+models/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

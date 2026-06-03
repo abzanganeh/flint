@@ -1,0 +1,55 @@
+---
+description: Branch-per-chunk git workflow — create branch, commit, push at session end
+alwaysApply: true
+---
+
+# Flint — Git Workflow
+
+## Branch per meaningful chunk
+
+For every **meaningful implementation chunk** (feature, fix, refactor, or vertical slice — not drive-by edits):
+
+1. **Start on `main`** (or rebase onto latest `main` first).
+2. **Create a branch** before writing code:
+   - `feature/<short-kebab-description>` — new capability
+   - `fix/<short-kebab-description>` — bug fix
+   - `chore/<short-kebab-description>` — tooling, deps, CI only
+   - `docs/<short-kebab-description>` — README / comments only (if `docs/` is tracked elsewhere)
+3. Keep the branch **focused**: one logical change set; split if it grows past ~1 reviewable PR.
+
+Examples: `feature/audio-pipeline-vad`, `fix/whisper-model-path`, `chore/ci-rust-cache`.
+
+## During the session
+
+- Commit on the **feature branch**, not on `main`.
+- Commit when the user asks, or when a coherent unit of work is done.
+- Messages: concise, imperative, explain **why** (e.g. `Add PipeWire loopback capture for system audio`).
+- Never commit secrets (`.env`, keys, `credentials.json`).
+- Never use `--no-verify` unless the user explicitly requests it.
+
+## End of session
+
+Before finishing agent work on a chunk:
+
+1. `git status` — ensure intended files are staged; no secrets.
+2. Commit any remaining work on the branch.
+3. **Push the branch**: `git push -u origin HEAD`
+4. Tell the user the branch name and that they can open a PR to `main` (use `gh pr create` only if asked).
+
+Do **not** push directly to `main` for feature work unless the user explicitly asks.
+
+## Initial / repo setup
+
+- Remote: `https://github.com/abzanganeh/flint.git`
+- `docs/` is gitignored (local design docs only); do not add it to commits.
+
+## What counts as a “meaningful chunk”
+
+| Yes — new branch | No — stay on current branch |
+|------------------|-------------------------------|
+| New module or panel | Typo in comment |
+| New Tauri command + event contract | Formatting-only |
+| Prompt + orchestrator behavior change | Single-line fix in same PR scope |
+| Migration or RLS change | Follow-up commit same session, same PR |
+
+When unsure, prefer a **new branch** over mixing unrelated changes on one branch.

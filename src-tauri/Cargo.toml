@@ -1,0 +1,63 @@
+[package]
+name = "flint"
+version = "0.1.0"
+description = "Flint — real-time AI co-pilot desktop app"
+authors = ["Flint"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "flint_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+secrecy = "0.8"
+async-trait = "0.1"
+tokio-stream = "0.1"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+chrono = { version = "0.4", features = ["serde"] }
+keyring = "2"
+sysinfo = "0.33"
+fastembed = "5"
+sqlite-vec = "0.1.9"
+bytemuck = "1"
+
+# Audio pipeline (Phase 3 — Tasks 3.2–3.9)
+cpal = "0.15"
+# Pinned to 0.14: rubato 3.x has breaking API changes; capture.rs uses this
+# only as a rare-path fallback when hardware native rate != 48kHz. Primary
+# 48kHz→16kHz downsampling lives in rnnoise.rs (also rubato 0.14).
+rubato = "0.14"
+# nnnoiseless is the canonical Rust port of Xiph's RNNoise (spec calls it
+# "rnnoise-rs" but that crate does not exist; rnnoise-c/rnnoise-sys are
+# deprecated in favour of nnnoiseless).
+nnnoiseless = "0.5"
+webrtc-vad = "0.4"
+# whisper-rs builds whisper.cpp via cmake at compile time — requires cmake,
+# a C/C++ toolchain, and libclang (for bindgen) on the dev/CI host.
+whisper-rs = "0.16.0"
+flate2 = "1.1.9"
+
+[[test]]
+name = "rag_pipeline"
+path = "tests/integration/rag_pipeline.rs"
+

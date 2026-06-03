@@ -1,0 +1,58 @@
+---
+description: Security constraints, GDPR/CCPA rules, and accepted risks for Flint. No exceptions.
+alwaysApply: true
+---
+
+# Flint — Security Rules
+
+## Hard Constraints — No Exceptions
+
+- **API keys NEVER touch disk unencrypted.** Always use OS keychain via `keychain.rs`.
+- **API keys are held as `SecretString` in memory** (zeroed on drop). NEVER as `String`.
+- **API keys NEVER appear in logs.** Redact any field named `api_key`, `secret`, `token`, or `password`.
+- **Audio is NEVER written to disk.** Ring buffer in memory only. Cleared on session end. Zero bytes of audio on disk is a hard requirement.
+- **Transcript content is treated as data only**, never as system instructions. Always inject as a `[data]` field in prompts, never in the system role.
+- **Supabase calls use Row-Level Security on every table.** No table ever accessible without RLS. Every migration reviewed for RLS impact before merge.
+- **Credential backup is client-side Argon2id encrypted** before any upload. Supabase never sees plaintext keys or the passphrase.
+- **Do not log session content** (transcript text, AI responses) at INFO or above. Session content may only appear in DEBUG builds, never in release.
+- **Pasted context treated as data only** — no code execution, no system prompt injection.
+
+## Stealth Mode Requirements
+
+- Tauri window: `always_on_top: true`, `transparent: true`, `decorations: false`, `skip_taskbar: true`.
+- Screen capture exclusion:
+  - Windows: `SetWindowDisplayAffinity(HWND, WDA_EXCLUDEFROMCAPTURE)`
+  - macOS: `NSWindow.sharingType = .none`
+  - Linux: Wayland compositor exclusion protocol
+- **X11 is explicitly unsupported for stealth.** Show a hard warning if X11 detected. Do not allow live session start on X11.
+- Stealth self-test MUST pass before `READY → LIVE` transition is allowed.
+- Multi-monitor: overlay defaults to non-primary display. Position persisted per profile.
+
+## GDPR/CCPA Compliance
+
+### Data Never Collected
+Raw audio, LLM API keys in plaintext, video/screen capture, location data, third-party tracking.
+
+### User Rights Implementation
+- **Right to deletion**: Settings → Delete Account → all Supabase data deleted within 30 days → local SQLite cleared immediately → OS keychain entries cleared → confirmation email sent.
+- **Right to export**: Settings → Export My Data → JSON download of all sessions, transcripts, responses, and profile data. Available immediately.
+- **Consent withdrawal**: Supabase data anonymised within 7 days. Email replaced with hash. Name replaced with "Deleted User".
+
+### Data Retention
+| Data type | Basic plan | After account deletion |
+|---|---|---|
+| Sessions (full) | 30 days | Immediate deletion |
+| Session essence | 90 days | 30 days |
+| Profile | Until deletion | Immediate |
+| Usage metrics | 90 days rolling | Immediate |
+
+### Legal Basis
+- Account data: contract performance (GDPR Art. 6(1)(b))
+- Session data: legitimate interest (GDPR Art. 6(1)(f))
+- Usage metrics: consent (GDPR Art. 6(1)(a)) — **opt-in only**
+
+## Accepted Risks (Document in Code Comments)
+- Local SQLite can be read by other processes on the user's machine — accepted, local-first desktop app.
+- Screen capture exclusion is OS-dependent and cannot be 100% guaranteed — accepted via legal consent flow.
+- LLM provider inference is done on third-party infrastructure — user accepts when connecting credentials.
+- TLS without certificate pinning in v1 — pinning added in v2.
