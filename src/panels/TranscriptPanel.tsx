@@ -17,12 +17,6 @@ interface TranscriptLine {
   timestamp: number;
 }
 
-let lineIdCounter = 0;
-
-function nextId(): number {
-  return ++lineIdCounter;
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function isAudioGap(text: string): boolean {
@@ -34,6 +28,7 @@ function appendLine(
   text: string,
   speaker: Speaker,
   timestamp: number,
+  nextId: () => number,
 ): TranscriptLine[] {
   const next = [
     ...prev,
@@ -50,27 +45,40 @@ export interface TranscriptPanelProps {}
 const TranscriptPanel = (_props: TranscriptPanelProps) => {
   const [lines, setLines] = useState<TranscriptLine[]>([]);
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Per-instance counter — avoids shared module-level mutable state.
+  const lineIdRef = useRef(0);
+  const nextId = () => ++lineIdRef.current;
 
   // Subscribe to Tauri transcription_chunk events.
   useEffect(() => {
+    let cancelled = false;
     let unlisten: (() => void) | null = null;
 
     const setup = async () => {
-      unlisten = await onTranscriptionChunk(({ text, speaker, timestamp }) => {
-        setLines((prev) => appendLine(prev, text, speaker, timestamp));
+      const fn = await onTranscriptionChunk(({ text, speaker, timestamp }) => {
+        setLines((prev) => appendLine(prev, text, speaker, timestamp, nextId));
       });
+      if (cancelled) {
+        // Component unmounted while the listener was being registered.
+        fn();
+      } else {
+        unlisten = fn;
+      }
     };
 
     void setup();
 
     return () => {
+      cancelled = true;
       unlisten?.();
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-scroll to the latest line on every update.
+  // Snap to bottom on every update. Using "instant" instead of "smooth"
+  // because live transcripts receive bursts of chunks — smooth animations
+  // compete with each other and produce visible stutter.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    bottomRef.current?.scrollIntoView({ behavior: "instant" });
   }, [lines]);
 
   return (
