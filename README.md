@@ -101,4 +101,10 @@ Work happens on **feature branches** (one meaningful implementation chunk per br
 
 ## License
 
-Private / all rights reserved unless otherwise specified by the repository owner.
+Flint is licensed under the [Business Source License 1.1](LICENSE) (BSL 1.1).
+Personal, non-commercial, and internal evaluation use is permitted. Commercial
+production use requires a separate license — see [COMMERCIAL.md](COMMERCIAL.md).
+
+Source converts to [Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0) on
+the **Change Date** defined in `LICENSE` (eighth anniversary of each version’s
+first public release, subject to BSL’s standard terms).
