@@ -61,3 +61,7 @@ flate2 = "1.1.9"
 name = "rag_pipeline"
 path = "tests/integration/rag_pipeline.rs"
 
+[[test]]
+name = "audio_pipeline"
+path = "tests/integration/audio_pipeline.rs"
+
