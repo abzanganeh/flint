@@ -1,9 +1,13 @@
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::audio::capture::AudioCapture;
+use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
     DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionSnapshotDto,
@@ -17,7 +21,9 @@ use crate::keychain;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::rag::chunker::chunk_text;
 use crate::session::state::SessionState;
-use crate::state::AppState;
+use crate::state::{AppState, LiveTaskHandles};
+use crate::transcription::detector::QuestionDetector;
+use crate::transcription::engine::WhisperEngine;
 
 const GENERIC_AUTH_ERROR: &str = "Authentication failed. Please try again.";
 const KEYCHAIN_SAVE_ERROR: &str = "Could not save credentials. Please try again.";
@@ -441,35 +447,296 @@ pub async fn get_session_snapshot(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Live session stubs (Phase 3)
+// Live session commands (Phase 3)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Resolve the `prompts/` base directory.
+///
+/// Mirrors `digest.rs::prompts_base_dir()` — single source of truth for the
+/// prompt layout. The `FLINT_PROMPTS_DIR` env var overrides the default so
+/// integration tests and bundled releases can point to the right location.
+fn prompts_base_dir() -> PathBuf {
+    std::env::var("FLINT_PROMPTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("prompts")
+        })
+}
+
+/// Resolve the ggml model path for the given hardware profile.
+///
+/// Whisper model files are expected at `~/.cache/whisper/ggml-<name>.bin`
+/// (standard whisper.cpp convention). The health check (`checks.rs`) verifies
+/// the file exists before `start_session` is ever called.
+fn whisper_model_path(profile: &hardware::HardwareProfile) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let filename = format!("ggml-{}.bin", profile.recommended_whisper_model);
+    PathBuf::from(home)
+        .join(".cache")
+        .join("whisper")
+        .join(filename)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Start a live session: initialise the audio pipeline and transition to LIVE.
+///
+/// Valid from: `REHEARSING` or `READY`.
+///
+/// State path:
+/// - REHEARSING → READY (only if not already READY) → emit READY
+/// - Start audio capture on a dedicated OS thread (cpal::Stream is !Send)
+/// - Spawn pipeline and drain tasks
+/// - READY → LIVE → emit LIVE
+///
+/// If any step fails before LIVE the state is left at READY so the caller
+/// can retry without re-running pre-warming.
 #[tauri::command]
-pub async fn start_session(_session_id: String) -> Result<(), String> {
+pub async fn start_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    // Guard and record the pre-start state for the conditional transition.
+    let pre_state = {
+        let machine = state.state_machine.lock().await;
+        match *machine.current() {
+            SessionState::Rehearsing | SessionState::Ready => *machine.current(),
+            current => {
+                return Err(format!(
+                    "start_session requires REHEARSING or READY (current: {current})"
+                ));
+            }
+        }
+    };
+
+    // Refuse to start if a live session is already running.
+    if state.live_tasks.lock().await.is_some() {
+        return Err("A live session is already running.".to_string());
+    }
+
+    // ── 1. Hardware profile and Whisper model ─────────────────────────────
+    let profile = hardware::assess_hardware();
+    let model_path = whisper_model_path(&profile);
+
+    let whisper = Arc::new(
+        WhisperEngine::new(&model_path, profile.tier)
+            .map_err(|e| format!("Failed to load Whisper model ({model_path}): {e}"))?,
+    );
+
+    // ── 2. Question detector ──────────────────────────────────────────────
+    let detector = Arc::new(
+        QuestionDetector::new(
+            profile.tier,
+            Some(Arc::clone(&state.llm)),
+            &prompts_base_dir(),
+        )
+        .map_err(|e| format!("Failed to init question detector: {e}"))?,
+    );
+
+    // ── 3. Audio channels ─────────────────────────────────────────────────
+    let (system_tx, system_rx) = tokio::sync::mpsc::channel(256);
+    let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(256);
+    let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // ── 4. Audio capture on a dedicated OS thread (cpal::Stream is !Send) ─
+    //
+    // The thread owns the AudioCapture. When stop_tx fires (or is dropped),
+    // blocking_recv() returns, capture.stop() zeroes the ring buffers, and
+    // the thread exits — dropping the mpsc senders and closing the pipeline.
+    let (ready_tx, ready_rx) =
+        tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+
+    std::thread::spawn(move || {
+        match AudioCapture::start(system_tx, mic_tx) {
+            Ok(capture) => {
+                let _ = ready_tx.send(Ok(()));
+                // Block here until stop_session fires or AppState is dropped.
+                let _ = stop_rx.blocking_recv();
+                if let Err(e) = capture.stop() {
+                    tracing::warn!(error = %e, "audio capture stop error");
+                }
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+            }
+        }
+    });
+
+    // Wait up to 5 seconds for the capture thread to confirm startup.
+    tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .map_err(|_| "Audio capture startup timed out.".to_string())?
+        .map_err(|_| "Audio capture thread exited unexpectedly.".to_string())?
+        .map_err(|e| format!("Failed to start audio capture: {e}"))?;
+
+    // ── 5. Spawn background tasks ─────────────────────────────────────────
+
+    // Drain detected questions silently until the orchestrator is wired (Phase 4).
+    let drain = tokio::spawn(async move {
+        while question_rx.recv().await.is_some() {}
+    });
+
+    let pipeline = tokio::spawn(run_audio_pipeline(
+        app.clone(),
+        sid,
+        whisper,
+        detector,
+        question_tx,
+        system_rx,
+        mic_rx,
+    ));
+
+    *state.live_tasks.lock().await = Some(LiveTaskHandles {
+        stop_tx,
+        pipeline,
+        drain,
+    });
+
+    // ── 6. State transitions ──────────────────────────────────────────────
+
+    if pre_state == SessionState::Rehearsing {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::Ready)
+            .map_err(session_error)?;
+        drop(machine);
+        emit_state(&app, SessionState::Ready);
+    }
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::Live)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::Live);
+
+    info!(
+        session_id = %sid,
+        tier = profile.tier,
+        model = %profile.recommended_whisper_model,
+        "live session started",
+    );
     Ok(())
 }
 
+/// Stop the live session and zero all audio ring buffers.
+///
+/// Valid from: `LIVE`.
+///
+/// Sequence:
+/// 1. `LIVE → ENDING` — initiate shutdown; emit.
+/// 2. Signal the audio capture thread to stop → `AudioCapture::stop()`
+///    zeroes ring buffers. Abort pipeline and drain tasks.
+/// 3. `ENDING → ENDED` — cleanup confirmed; emit.
+///
+/// The caller is responsible for the final `ENDED → IDLE` (or
+/// `ENDED → CONFIGURING`) transition, which is a frontend UX decision.
 #[tauri::command]
-pub async fn stop_session() -> Result<(), String> {
+pub async fn stop_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "stop_session is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    // LIVE → ENDING
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::Ending)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::Ending);
+
+    // Signal the audio capture thread to stop. Dropping `stop_tx` has the
+    // same effect as sending `()`, so either path is safe.
+    //
+    // The pipeline task will exit naturally once the audio channels close.
+    // We also abort it explicitly as a safety measure for stuck tasks.
+    if let Some(handles) = state.live_tasks.lock().await.take() {
+        let _ = handles.stop_tx.send(());
+        handles.pipeline.abort();
+        handles.drain.abort();
+    }
+
+    // ENDING → ENDED
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::Ended)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::Ended);
+
+    info!("session stopped");
     Ok(())
 }
 
+/// Manual response trigger — valid only from LIVE.
+///
+/// The orchestrator is wired in Phase 4. In Phase 3 this is a state-guarded
+/// no-op so the frontend IPC contract is satisfied without a crash.
 #[tauri::command]
-pub async fn trigger_response() -> Result<(), String> {
+pub async fn trigger_response(state: State<'_, AppState>) -> Result<(), String> {
+    let machine = state.state_machine.lock().await;
+    if *machine.current() != SessionState::Live {
+        return Err(format!(
+            "trigger_response is only valid from LIVE (current: {})",
+            machine.current()
+        ));
+    }
+    warn!("trigger_response received — orchestrator not yet wired (Phase 4)");
     Ok(())
 }
 
+/// Cancel any running inference — valid only from LIVE.
+///
+/// No-op in Phase 3; the orchestrator's cancellation token is wired in Phase 4.
 #[tauri::command]
-pub async fn cancel_inference() -> Result<(), String> {
+pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> {
+    let machine = state.state_machine.lock().await;
+    if *machine.current() != SessionState::Live {
+        return Err(format!(
+            "cancel_inference is only valid from LIVE (current: {})",
+            machine.current()
+        ));
+    }
     Ok(())
 }
 
+/// Immediately hide the overlay window (panic hotkey path).
+///
+/// Silently succeeds even if the window is already hidden.
 #[tauri::command]
-pub async fn panic_hide_overlay() -> Result<(), String> {
+pub async fn panic_hide_overlay(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .hide()
+            .map_err(|e| format!("Failed to hide overlay: {e}"))?;
+    }
     Ok(())
 }
 
+/// Switch the active LLM provider.
+///
+/// Mid-session model switching is explicitly out of v1 scope.
+/// This command is registered so the frontend IPC contract compiles;
+/// it will always return an error.
 #[tauri::command]
 pub async fn switch_provider(_name: String) -> Result<(), String> {
-    Ok(())
+    Err("Provider switching is not available in v1. Configure your provider before starting a session.".to_string())
 }

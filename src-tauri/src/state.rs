@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tauri::{App, Manager};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::task::JoinHandle;
 
 use crate::auth_session::restore_auth_from_keychain;
 use crate::digest::Digest;
@@ -16,6 +17,26 @@ use crate::rag::store::SqliteVecStore;
 use crate::session::persistence::SessionPersistence;
 use crate::session::state::SessionStateMachine;
 use crate::supabase::SupabaseAuth;
+
+// ── Live session handles (Phase 3) ───────────────────────────────────────────
+
+/// Handles for the running audio capture thread and background tasks.
+///
+/// `AudioCapture` contains `cpal::Stream` which is `!Send`, so the capture
+/// lives on a dedicated OS thread. Communication with that thread happens via
+/// `stop_tx`: sending `()` causes the thread to call `AudioCapture::stop()`
+/// (which zeroes both ring buffers) and then exit, closing the audio channels
+/// and allowing the pipeline task to drain and terminate naturally.
+pub struct LiveTaskHandles {
+    /// Signal the audio capture thread to stop. Dropping this also triggers
+    /// the thread to stop, so dropping the whole struct is safe.
+    pub stop_tx: oneshot::Sender<()>,
+    /// Background pipeline task. Aborted on stop.
+    pub pipeline: JoinHandle<anyhow::Result<()>>,
+    /// Drain task — silently discards `DetectedQuestion`s until the
+    /// orchestrator is wired in Phase 4.
+    pub drain: JoinHandle<()>,
+}
 
 /// Shared application state for Tauri commands.
 pub struct AppState {
@@ -47,6 +68,11 @@ pub struct AppState {
     /// Active LLM provider. Defaults to `StubLLMProvider` until a real
     /// provider is configured in Phase 3.
     pub llm: Arc<dyn LLMProvider>,
+
+    // ── Live session (Phase 3) ───────────────────────────────────────────────
+    /// Audio capture thread stop signal + background task handles. `Some`
+    /// only while the session is LIVE. Cleared on `stop_session`.
+    pub live_tasks: Mutex<Option<LiveTaskHandles>>,
 }
 
 impl AppState {
@@ -114,6 +140,7 @@ impl AppState {
             embedder,
             vector_store,
             llm: Arc::new(StubLLMProvider),
+            live_tasks: Mutex::new(None),
         })
     }
 
