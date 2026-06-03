@@ -481,6 +481,18 @@ fn whisper_model_path(profile: &hardware::HardwareProfile) -> String {
         .into_owned()
 }
 
+/// Abort all live tasks and signal the capture thread to stop.
+///
+/// Called on `start_session` failure after tasks have been spawned, to prevent
+/// a hidden audio pipeline from running while the state machine is not LIVE.
+async fn abort_live_tasks(state: &AppState) {
+    if let Some(handles) = state.live_tasks.lock().await.take() {
+        let _ = handles.stop_tx.send(());
+        handles.pipeline.abort();
+        handles.drain.abort();
+    }
+}
+
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
 ///
 /// Valid from: `REHEARSING` or `READY`.
@@ -543,12 +555,13 @@ pub async fn start_session(
     let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(256);
     let (question_tx, mut question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let (zeroed_tx, zeroed_rx) = tokio::sync::oneshot::channel::<()>();
 
     // ── 4. Audio capture on a dedicated OS thread (cpal::Stream is !Send) ─
     //
     // The thread owns the AudioCapture. When stop_tx fires (or is dropped),
-    // blocking_recv() returns, capture.stop() zeroes the ring buffers, and
-    // the thread exits — dropping the mpsc senders and closing the pipeline.
+    // blocking_recv() returns, capture.stop() zeroes the ring buffers, then
+    // zeroed_tx fires so stop_session can confirm zeroing before emitting ENDED.
     let (ready_tx, ready_rx) =
         tokio::sync::oneshot::channel::<anyhow::Result<()>>();
 
@@ -561,6 +574,9 @@ pub async fn start_session(
                 if let Err(e) = capture.stop() {
                     tracing::warn!(error = %e, "audio capture stop error");
                 }
+                // Signal that ring buffers are zeroed. stop_session awaits
+                // this before emitting ENDED (security invariant).
+                let _ = zeroed_tx.send(());
             }
             Err(e) => {
                 let _ = ready_tx.send(Err(e));
@@ -594,26 +610,35 @@ pub async fn start_session(
 
     *state.live_tasks.lock().await = Some(LiveTaskHandles {
         stop_tx,
+        zeroed_rx,
         pipeline,
         drain,
     });
 
     // ── 6. State transitions ──────────────────────────────────────────────
+    //
+    // If either transition fails (e.g. SQLite persistence error), we must
+    // abort the live tasks before returning so no hidden audio pipeline runs
+    // while the state machine is still at REHEARSING/READY.
 
     if pre_state == SessionState::Rehearsing {
         let mut machine = state.state_machine.lock().await;
-        machine
-            .transition(SessionState::Ready)
-            .map_err(session_error)?;
+        if let Err(e) = machine.transition(SessionState::Ready) {
+            drop(machine);
+            abort_live_tasks(&state).await;
+            return Err(session_error(e));
+        }
         drop(machine);
         emit_state(&app, SessionState::Ready);
     }
 
     {
         let mut machine = state.state_machine.lock().await;
-        machine
-            .transition(SessionState::Live)
-            .map_err(session_error)?;
+        if let Err(e) = machine.transition(SessionState::Live) {
+            drop(machine);
+            abort_live_tasks(&state).await;
+            return Err(session_error(e));
+        }
     }
     emit_state(&app, SessionState::Live);
 
@@ -662,13 +687,16 @@ pub async fn stop_session(
     }
     emit_state(&app, SessionState::Ending);
 
-    // Signal the audio capture thread to stop. Dropping `stop_tx` has the
-    // same effect as sending `()`, so either path is safe.
-    //
-    // The pipeline task will exit naturally once the audio channels close.
-    // We also abort it explicitly as a safety measure for stuck tasks.
+    // Signal the audio capture thread to stop, then wait for it to confirm
+    // that AudioCapture::stop() has completed (ring buffers zeroed).
+    // Only then do we emit ENDED so the "cleared on session end" invariant holds.
     if let Some(handles) = state.live_tasks.lock().await.take() {
         let _ = handles.stop_tx.send(());
+
+        // 2-second timeout — capture.stop() is drops + fill(0.0), ~0ms in
+        // practice. Timeout guards against a hung capture thread.
+        let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
+
         handles.pipeline.abort();
         handles.drain.abort();
     }

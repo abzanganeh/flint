@@ -31,6 +31,10 @@ pub struct LiveTaskHandles {
     /// Signal the audio capture thread to stop. Dropping this also triggers
     /// the thread to stop, so dropping the whole struct is safe.
     pub stop_tx: oneshot::Sender<()>,
+    /// Becomes ready when `AudioCapture::stop()` has returned and both ring
+    /// buffers have been zeroed. `stop_session` awaits this before emitting
+    /// ENDED so the security invariant ("cleared on session end") is met.
+    pub zeroed_rx: oneshot::Receiver<()>,
     /// Background pipeline task. Aborted on stop.
     pub pipeline: JoinHandle<anyhow::Result<()>>,
     /// Drain task — silently discards `DetectedQuestion`s until the
