@@ -56,6 +56,7 @@ webrtc-vad = "0.4"
 # a C/C++ toolchain, and libclang (for bindgen) on the dev/CI host.
 whisper-rs = "0.16.0"
 flate2 = "1.1.9"
+tauri-plugin-global-shortcut = "2"
 
 [dev-dependencies]
 tempfile = "3"

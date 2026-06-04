@@ -44,6 +44,23 @@ export interface Notification {
   level: "info" | "warn" | "error";
 }
 
+export interface ClarifyingQuestion {
+  question: string;
+  rank: number;
+}
+
+export interface RagChunk {
+  text: string;
+  score: number;
+}
+
+export interface TokenUsage {
+  input: number;
+  output: number;
+  total: number;
+  costEstimate: number;
+}
+
 export interface UIState {
   panelLayout: PanelLayout;
   focusedPanel: PanelId | null;
@@ -51,10 +68,15 @@ export interface UIState {
     directional: string;
     depth: string;
   };
+  confidenceLevel: ConfidenceLevel | null;
+  clarifyingQuestions: ClarifyingQuestion[];
+  ragChunks: RagChunk[];
+  tokenUsage: TokenUsage;
   notificationQueue: Notification[];
   theme: "light" | "dark" | "system";
   overlayMinimised: boolean;
   panicHideActive: boolean;
+  answerNowMode: boolean;
 }
 
 export interface SessionConfig {

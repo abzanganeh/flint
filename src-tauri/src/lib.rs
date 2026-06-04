@@ -6,6 +6,7 @@ pub mod digest;
 mod dto;
 mod events;
 mod health;
+mod hotkeys;
 pub mod interfaces;
 mod keychain;
 pub mod llm;
@@ -18,11 +19,13 @@ pub mod transcription;
 
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use tauri::Manager;
+use tauri_plugin_global_shortcut;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             health::hardware::assess_hardware();
             let app_state = state::AppState::new(app)?;
@@ -36,6 +39,7 @@ pub fn run() {
                 );
             }
             app.manage(app_state);
+            hotkeys::register_hotkeys(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
