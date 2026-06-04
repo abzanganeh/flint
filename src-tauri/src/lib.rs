@@ -20,7 +20,6 @@ pub mod transcription;
 
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use tauri::Manager;
-use tauri_plugin_global_shortcut;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -72,6 +71,14 @@ pub fn run() {
             commands::cancel_inference,
             commands::panic_hide_overlay,
             commands::switch_provider,
+            // Phase 6 — crash recovery + post-session
+            commands::check_crash_recovery,
+            commands::resume_crashed_session,
+            commands::discard_crashed_session,
+            commands::generate_session_summary,
+            commands::list_sessions,
+            commands::promote_session,
+            commands::delete_session,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

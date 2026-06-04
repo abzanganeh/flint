@@ -98,7 +98,7 @@ pub struct RecoveryData {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -149,6 +149,36 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         info!("sqlite schema migrated to version 1");
     }
 
+    if current < 2 {
+        // Add promotion tracking and explicit 30-day expiry. sessions rows created
+        // in v1 get `promoted = 0` and expire 30 days from their `created_at`.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN promoted  INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN expires_at INTEGER NOT NULL
+                DEFAULT (strftime('%s','now') + 2592000);
+
+            PRAGMA user_version = 2;
+            ",
+        )
+        .context("schema migration v2")?;
+        info!("sqlite schema migrated to version 2");
+    }
+
+    if current < 3 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN name         TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN session_type TEXT NOT NULL DEFAULT 'interview';
+            ALTER TABLE sessions ADD COLUMN domain       TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 3;
+            ",
+        )
+        .context("schema migration v3")?;
+        info!("sqlite schema migrated to version 3");
+    }
+
     Ok(())
 }
 
@@ -192,6 +222,33 @@ impl SessionPersistence {
     }
 
     // ── State ────────────────────────────────────────────────────────────────
+
+    /// Persist initial session row with metadata. Called once at session
+    /// creation time from `create_session`. Separate from state transitions
+    /// because it carries name/type/domain that don't change after creation.
+    pub fn create_session_row(
+        &self,
+        session_id: Uuid,
+        name: &str,
+        session_type: &str,
+        domain: &str,
+    ) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "INSERT INTO sessions (id, state, name, session_type, domain)
+             VALUES (?1, 'CONFIGURING', ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                 name = excluded.name,
+                 session_type = excluded.session_type,
+                 domain = excluded.domain,
+                 updated_at = strftime('%s','now')",
+            params![sid, name, session_type, domain],
+        )
+        .context("create session row with metadata")?;
+        debug!(session_id = %session_id, name = %name, "session row created");
+        Ok(())
+    }
 
     /// Persist a state transition. Creates the session row if it doesn't exist
     /// (UPSERT), updates `sessions.state`, and appends to the audit log.
@@ -395,6 +452,103 @@ impl SessionPersistence {
         }))
     }
 
+    /// Load transcript chunks and responses for any session, regardless of
+    /// its current state. Used by Supabase sync (after ENDED) and by
+    /// `generate_session_summary`.
+    ///
+    /// Unlike `load_session_for_recovery`, this does NOT filter by state.
+    pub fn load_session_data(&self, session_id: Uuid) -> Result<Option<RecoveryData>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+
+        let state_str: Option<String> = conn
+            .query_row(
+                "SELECT state FROM sessions WHERE id = ?1 LIMIT 1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("query session by id")?;
+
+        let state_str = match state_str {
+            None => return Ok(None),
+            Some(s) => s,
+        };
+
+        let state = parse_session_state(&state_str)?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, speaker, text, timestamp_ms
+                 FROM transcript_chunks
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare transcript query (load_session_data)")?;
+
+        let transcript_chunks = stmt
+            .query_map(params![sid], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .context("query transcript chunks (load_session_data)")?
+            .map(|row| {
+                let (id, speaker, text, ts) = row.context("read transcript row")?;
+                Ok(TranscriptChunk {
+                    id: Uuid::parse_str(&id).context("parse chunk uuid")?,
+                    session_id,
+                    speaker,
+                    text,
+                    timestamp_ms: ts,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, response_type, content, confidence
+                 FROM responses
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare responses query (load_session_data)")?;
+
+        let responses = stmt
+            .query_map(params![sid], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, f64>(3)?,
+                ))
+            })
+            .context("query responses (load_session_data)")?
+            .map(|row| {
+                let (id, rt, content, conf) = row.context("read response row")?;
+                let response_type = ResponseType::from_str(&rt)
+                    .ok_or_else(|| anyhow::anyhow!("unknown response_type: {rt}"))?;
+                Ok(Response {
+                    id: Uuid::parse_str(&id).context("parse response uuid")?,
+                    session_id,
+                    response_type,
+                    content,
+                    confidence: conf as f32,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Some(RecoveryData {
+            session_id,
+            state,
+            transcript_chunks,
+            responses,
+        }))
+    }
+
     /// Find any incomplete session (LIVE/ENDING/CRASHED) regardless of ID.
     ///
     /// Used on app startup to detect crash-interrupted sessions proactively.
@@ -414,6 +568,68 @@ impl SessionPersistence {
 
         row.map(|s| Uuid::parse_str(&s).context("parse session uuid from DB"))
             .transpose()
+    }
+
+    /// List all sessions in the database, most recent first.
+    ///
+    /// Returns lightweight rows suitable for the SessionList screen — no
+    /// transcript or response data is loaded.
+    pub fn list_sessions(&self) -> Result<Vec<crate::dto::SessionSummaryDto>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let now = chrono::Utc::now().timestamp();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, state, created_at, expires_at, promoted, name, session_type, domain
+                 FROM sessions
+                 ORDER BY created_at DESC",
+            )
+            .context("prepare list_sessions")?;
+
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                ))
+            })
+            .context("query list_sessions")?
+            .map(|row| {
+                let (id, state, created_at, expires_at, promoted, name, session_type, domain) =
+                    row.context("read sessions row")?;
+                Ok(crate::dto::SessionSummaryDto {
+                    id,
+                    state,
+                    created_at,
+                    expires_in_secs: expires_at - now,
+                    promoted: promoted != 0,
+                    name,
+                    session_type,
+                    domain,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(rows)
+    }
+
+    /// Mark a session as promoted so it is exempt from the 30-day auto-expiry.
+    pub fn promote_session(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET promoted = 1 WHERE id = ?1",
+            params![sid],
+        )
+        .context("promote session")?;
+        debug!(session_id = %session_id, "session promoted");
+        Ok(())
     }
 
     /// Delete all persisted data for `session_id`.

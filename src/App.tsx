@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 
 import {
+  checkCrashRecovery,
   getCurrentUser,
   getLegalConsentAccepted,
   setSessionState,
+  type RecoveryOffer,
 } from "./commands";
 import { SessionState } from "./types";
 import "./App.css";
@@ -11,14 +13,18 @@ import DigestReview from "./screens/DigestReview";
 import HealthCheck from "./screens/HealthCheck";
 import LiveOverlay from "./screens/LiveOverlay";
 import Onboarding from "./screens/Onboarding";
+import { Recovery } from "./screens/Recovery";
 import Rehearsal from "./screens/Rehearsal";
 import SessionDesign from "./screens/SessionDesign";
+import { SessionList } from "./screens/SessionList";
 
 type AppScreen =
   | "loading"
   | "onboarding"
   | "health"
+  | "recovery"
   | "session-design"
+  | "session-list"
   | "digest-review"
   | "rehearsal"
   | "live";
@@ -27,6 +33,7 @@ function App() {
   const [screen, setScreen] = useState<AppScreen>("loading");
   const [onboardingStep, setOnboardingStep] = useState<"legal" | "auth">("legal");
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [recoveryOffer, setRecoveryOffer] = useState<RecoveryOffer | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -39,6 +46,16 @@ function App() {
         if (!consentAccepted) {
           setOnboardingStep("legal");
           setScreen("onboarding");
+          return;
+        }
+
+        // Crash recovery check runs before auth — local SQLite data is
+        // independent of Supabase login state.
+        const offer = await checkCrashRecovery().catch(() => null);
+        if (cancelled) return;
+        if (offer) {
+          setRecoveryOffer(offer);
+          setScreen("recovery");
           return;
         }
 
@@ -84,8 +101,29 @@ function App() {
     );
   }
 
+  if (screen === "recovery" && recoveryOffer) {
+    return (
+      <Recovery
+        offer={recoveryOffer}
+        onResume={() => {
+          setSessionId(recoveryOffer.sessionId);
+          setRecoveryOffer(null);
+          setScreen("live");
+        }}
+        onDiscard={() => {
+          setRecoveryOffer(null);
+          setScreen("health");
+        }}
+      />
+    );
+  }
+
   if (screen === "health") {
     return <HealthCheck onComplete={() => setScreen("session-design")} />;
+  }
+
+  if (screen === "session-list") {
+    return <SessionList onBack={() => setScreen("session-design")} />;
   }
 
   if (screen === "session-design") {
@@ -95,6 +133,7 @@ function App() {
           setSessionId(sid);
           setScreen("digest-review");
         }}
+        onViewSessions={() => setScreen("session-list")}
       />
     );
   }

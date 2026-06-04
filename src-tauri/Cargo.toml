@@ -73,3 +73,7 @@ path = "tests/integration/audio_pipeline.rs"
 name = "orchestrator"
 path = "tests/integration/orchestrator.rs"
 
+[[test]]
+name = "crash_recovery"
+path = "tests/integration/crash_recovery.rs"
+

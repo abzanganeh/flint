@@ -75,7 +75,6 @@ pub struct AppState {
     pub prewarm_cache: Arc<Mutex<PreWarmCache>>,
     /// Write-through SQLite persistence for state transitions, transcript
     /// chunks, and responses. WAL mode enforced at open time.
-    #[allow(dead_code)] // used by commands after Phase 2.9 integration
     pub persistence: Arc<SessionPersistence>,
     /// bge-small-en-v1.5 embedder — initialised once at startup.
     pub embedder: Arc<Embedder>,

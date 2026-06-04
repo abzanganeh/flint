@@ -164,3 +164,53 @@ export const getDigest = (sessionId: string): Promise<DigestDto> =>
 /** Return the full session state snapshot for React resync. */
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 6 — crash recovery + post-session
+// ──────────────────────────────────────────────────────────────────────────────
+
+export interface RecoveryOffer {
+  sessionId: string;
+  interruptedState: string;
+  transcriptChunkCount: number;
+  responseCount: number;
+}
+
+export interface SessionSummaryDto {
+  id: string;
+  state: string;
+  createdAt: number;
+  expiresInSecs: number;
+  promoted: boolean;
+  name: string;
+  sessionType: string;
+  domain: string;
+}
+
+/** On app startup: check for a crashed session. Returns null if none. */
+export const checkCrashRecovery = (): Promise<RecoveryOffer | null> =>
+  invoke<RecoveryOffer | null>("check_crash_recovery");
+
+/** Resume a crashed session: RECOVERING → READY. */
+export const resumeCrashedSession = (): Promise<void> =>
+  invoke<void>("resume_crashed_session");
+
+/** Discard a crashed session and return to IDLE. */
+export const discardCrashedSession = (): Promise<void> =>
+  invoke<void>("discard_crashed_session");
+
+/** Generate a structured post-session summary using the session_essence prompt. */
+export const generateSessionSummary = (): Promise<string> =>
+  invoke<string>("generate_session_summary");
+
+/** List all sessions stored locally. */
+export const listSessions = (): Promise<SessionSummaryDto[]> =>
+  invoke<SessionSummaryDto[]>("list_sessions");
+
+/** Mark a session as promoted (exempt from 30-day expiry). */
+export const promoteSession = (sessionId: string): Promise<void> =>
+  invoke<void>("promote_session", { sessionId });
+
+/** Delete a session and all its data from local SQLite. */
+export const deleteSession = (sessionId: string): Promise<void> =>
+  invoke<void>("delete_session", { sessionId });

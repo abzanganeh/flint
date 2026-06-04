@@ -21,12 +21,13 @@ use crate::keychain;
 use crate::llm::failover::FailoverManager;
 use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
-use crate::llm::provider::LLMProvider;
+use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
 use crate::session::memory::ConversationMemory;
+use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::state::{AppState, LiveTaskHandles};
 use crate::transcription::detector::QuestionDetector;
@@ -236,6 +237,12 @@ pub async fn create_session(
     *state.prewarm_cache.lock().await = PreWarmCache::new();
     *state.rehearsal_turn.lock().await = 0;
     *state.session_memory.lock().await = None;
+
+    // Persist session row with metadata for the session list.
+    state
+        .persistence
+        .create_session_row(session_id, &config.name, &config.session_type, &config.domain)
+        .map_err(session_error)?;
 
     info!(
         session_id = %session_id,
@@ -516,13 +523,15 @@ async fn build_failover_stack(
             Err(e) => {
                 warn!(error = %e, "Failed to build Groq provider — using stub");
                 let stub = Arc::clone(&state.llm);
-                (stub, stub.context_window())
+                let cw = stub.context_window();
+                (stub, cw)
             }
         },
         Err(_) => {
             warn!("No Groq API key in keychain — using stub LLM provider");
             let stub = Arc::clone(&state.llm);
-            (stub, stub.context_window())
+            let cw = stub.context_window();
+            (stub, cw)
         }
     };
 
@@ -622,6 +631,7 @@ pub async fn run_rehearsal_turn(
         load_compression_prompt(),
         turn_cancel,
         local_provider,
+        Arc::clone(&state.persistence),
         app,
     )
     .await
@@ -788,6 +798,7 @@ pub async fn start_session(
         compression_prompt,
         local_llm: local_provider,
         turn_cancel_slot: Arc::clone(&turn_cancel_slot),
+        persistence: Arc::clone(&state.persistence),
     };
 
     let orch_app = app.clone();
@@ -803,6 +814,7 @@ pub async fn start_session(
         question_tx.clone(),
         system_rx,
         mic_rx,
+        Arc::clone(&state.persistence),
     ));
 
     *state.live_tasks.lock().await = Some(LiveTaskHandles {
@@ -886,13 +898,61 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
     *state.session_memory.lock().await = None;
 
     // ENDING → ENDED
-    {
+    let session_id = {
         let mut machine = state.state_machine.lock().await;
+        let sid = machine.session_id();
         machine
             .transition(SessionState::Ended)
             .map_err(session_error)?;
-    }
+        sid
+    };
     emit_state(&app, SessionState::Ended);
+
+    // Post-session Supabase sync — fire-and-forget, non-fatal on failure.
+    if let Some(sid) = session_id {
+        let token_opt = state.auth_token().await;
+        let digest_opt = state.session_digest.read().await.clone();
+        if let Some(token) = token_opt {
+            let plugins = state.plugins.clone();
+            let persistence = Arc::clone(&state.persistence);
+            tokio::spawn(async move {
+                let metadata = crate::supabase::SessionMetadata {
+                    name: digest_opt
+                        .as_ref()
+                        .map(|d| d.role.clone())
+                        .unwrap_or_else(|| "Interview Session".to_string()),
+                    session_type: "interview".to_string(),
+                    domain: digest_opt
+                        .as_ref()
+                        .map(|d| d.domain.clone())
+                        .unwrap_or_else(|| "general".to_string()),
+                };
+                match (
+                    plugins.get("supabase"),
+                    serde_json::from_value::<serde_json::Value>(
+                        plugins.get("supabase").cloned().unwrap_or_default(),
+                    ),
+                ) {
+                    (Some(_), Ok(cfg)) => {
+                        let url = cfg["url"].as_str().unwrap_or("").to_string();
+                        let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
+                        if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
+                            if let Err(e) =
+                                sync.sync_session(sid, &token, &persistence, &metadata).await
+                            {
+                                warn!(session_id = %sid, error = %e, "Supabase session sync failed");
+                            }
+                        }
+                    }
+                    _ => {
+                        warn!("Supabase not configured — skipping session sync");
+                    }
+                }
+            });
+        } else {
+            warn!("No auth token — skipping session sync");
+        }
+    }
 
     info!("session stopped");
     Ok(())
@@ -1011,4 +1071,204 @@ pub async fn panic_hide_overlay(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 pub async fn switch_provider(_name: String) -> Result<(), String> {
     Err("Provider switching is not available in v1. Configure your provider before starting a session.".to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 6.2 — Crash recovery
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// On app startup: scan SQLite for an incomplete session.
+///
+/// Returns `Some(RecoveryOffer)` if one is found and the state machine has
+/// moved to `RECOVERING`, or `None` if the previous session ended cleanly.
+#[tauri::command]
+pub async fn check_crash_recovery(
+    state: State<'_, AppState>,
+) -> Result<Option<recovery::RecoveryOffer>, String> {
+    recovery::check_for_recovery(&state.persistence, &state.state_machine)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Resume a crashed session: `RECOVERING → READY`.
+#[tauri::command]
+pub async fn resume_crashed_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    recovery::resume_session(&state.state_machine)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let current = *state.state_machine.lock().await.current();
+    emit_state(&app, current);
+    Ok(())
+}
+
+/// Discard a crashed session: delete local data and return to `IDLE`.
+#[tauri::command]
+pub async fn discard_crashed_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    recovery::discard_session(Arc::clone(&state.persistence), &state.state_machine)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    emit_state(&app, SessionState::Idle);
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 6.4 — Post-session summary
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Generate a structured post-session summary using the `session_essence` prompt.
+///
+/// Loads the full transcript from SQLite, passes it through the LLM prompt
+/// defined in `/prompts/session_essence/`, and returns a JSON summary blob.
+/// Only callable after the session has reached `ENDED`.
+#[tauri::command]
+pub async fn generate_session_summary(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let sid = {
+        let machine = state.state_machine.lock().await;
+        machine.session_id().ok_or("No session to summarise.")?
+    };
+
+    // Load the session_essence prompt — must come from file, never inlined.
+    let prompt_template =
+        std::fs::read_to_string(prompts_base_dir().join("session_essence").join("default.txt"))
+            .map_err(|e| format!("Failed to load session_essence prompt: {e}"))?;
+
+    // Fetch transcript rows from SQLite and build a flat string.
+    let transcript_text = {
+        let data = state
+            .persistence
+            .load_session_data(sid)
+            .map_err(|e| e.to_string())?;
+        match data {
+            Some(d) => d
+                .transcript_chunks
+                .iter()
+                .map(|c| format!("[{}] {}", c.speaker, c.text))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            None => {
+                // Session was already cleared — return an empty summary.
+                return Ok(serde_json::json!({
+                    "date": "",
+                    "domain": "",
+                    "role": "",
+                    "company": "",
+                    "questions_count": 0,
+                    "topics_covered": [],
+                    "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+                    "key_moments": [],
+                    "follow_up_actions": [],
+                    "one_line_summary": "No transcript data available."
+                })
+                .to_string());
+            }
+        }
+    };
+
+    let prompt = prompt_template.replace("{full_transcript}", &transcript_text);
+
+    // Reject if a live session is running.
+    {
+        let guard = state.live_tasks.lock().await;
+        if guard.is_some() {
+            return Err("Cannot generate summary while a session is live.".to_string());
+        }
+    }
+
+    // Build a one-shot provider for the summary call.
+    let provider: Arc<dyn LLMProvider> = match keychain::get_api_key("groq") {
+        Ok(api_key) => match GroqProvider::new(api_key) {
+            Ok(p) => Arc::new(p),
+            Err(_) => Arc::clone(&state.llm),
+        },
+        Err(_) => Arc::clone(&state.llm),
+    };
+
+    let summary = provider
+        .complete(
+            prompt,
+            CompletionConfig {
+                max_tokens: Some(600),
+                temperature: 0.0,
+                stream: false,
+            },
+        )
+        .await
+        .map_err(|e| format!("LLM summary call failed: {e}"))?;
+
+    info!(session_id = %sid, "post-session summary generated");
+    Ok(summary)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 6.5 — Session list management
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// List all sessions stored in the local SQLite database.
+#[tauri::command]
+pub async fn list_sessions(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::dto::SessionSummaryDto>, String> {
+    state
+        .persistence
+        .list_sessions()
+        .map_err(|e| e.to_string())
+}
+
+/// Mark a session as promoted (exempted from 30-day expiry).
+#[tauri::command]
+pub async fn promote_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+    state
+        .persistence
+        .promote_session(sid)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a session and all its data from local SQLite and Supabase.
+#[tauri::command]
+pub async fn delete_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+
+    // Delete locally first (always succeeds even if Supabase is unreachable).
+    state
+        .persistence
+        .clear_session(sid)
+        .map_err(|e| e.to_string())?;
+
+    // Best-effort Supabase deletion — non-fatal on failure.
+    let token_opt = state.auth_token().await;
+    if let Some(token) = token_opt {
+        let plugins = state.plugins.clone();
+        tokio::spawn(async move {
+            if let Some(cfg_val) = plugins.get("supabase") {
+                if let Ok(cfg) = serde_json::from_value::<serde_json::Value>(cfg_val.clone()) {
+                    let url = cfg["url"].as_str().unwrap_or("").to_string();
+                    let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
+                    if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
+                        if let Err(e) = sync.delete_session(sid, &token).await {
+                            warn!(session_id = %sid, error = %e, "Supabase session delete failed");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(())
 }

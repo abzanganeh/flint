@@ -164,6 +164,21 @@ impl SessionStateMachine {
         self.session_id
     }
 
+    /// Restore state directly without going through the transition guard.
+    ///
+    /// Only called from `session::recovery::check_for_recovery` at app startup
+    /// when re-anchoring the in-memory machine to a persisted crashed session.
+    /// All normal state changes must go through `transition`.
+    pub fn restore_state_for_recovery(&mut self, state: SessionState, session_id: Uuid) {
+        self.current = state;
+        self.session_id = Some(session_id);
+        tracing::info!(
+            state = %self.current,
+            session_id = %session_id,
+            "state machine restored for crash recovery"
+        );
+    }
+
     /// Drive the machine to `to`.
     ///
     /// Order of operations:

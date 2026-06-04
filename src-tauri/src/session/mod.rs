@@ -5,4 +5,5 @@
 
 pub mod memory;
 pub mod persistence;
+pub mod recovery;
 pub mod state;
