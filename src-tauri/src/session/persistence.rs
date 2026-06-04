@@ -98,7 +98,7 @@ pub struct RecoveryData {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -147,6 +147,22 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v1")?;
         info!("sqlite schema migrated to version 1");
+    }
+
+    if current < 2 {
+        // Add promotion tracking and explicit 30-day expiry. sessions rows created
+        // in v1 get `promoted = 0` and expire 30 days from their `created_at`.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN promoted  INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE sessions ADD COLUMN expires_at INTEGER NOT NULL
+                DEFAULT (strftime('%s','now') + 2592000);
+
+            PRAGMA user_version = 2;
+            ",
+        )
+        .context("schema migration v2")?;
+        info!("sqlite schema migrated to version 2");
     }
 
     Ok(())
@@ -414,6 +430,62 @@ impl SessionPersistence {
 
         row.map(|s| Uuid::parse_str(&s).context("parse session uuid from DB"))
             .transpose()
+    }
+
+    /// List all sessions in the database, most recent first.
+    ///
+    /// Returns lightweight rows suitable for the SessionList screen — no
+    /// transcript or response data is loaded.
+    pub fn list_sessions(&self) -> Result<Vec<crate::dto::SessionSummaryDto>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let now = chrono::Utc::now().timestamp();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, state, created_at, expires_at, promoted
+                 FROM sessions
+                 ORDER BY created_at DESC",
+            )
+            .context("prepare list_sessions")?;
+
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .context("query list_sessions")?
+            .map(|row| {
+                let (id, state, created_at, expires_at, promoted) =
+                    row.context("read sessions row")?;
+                Ok(crate::dto::SessionSummaryDto {
+                    id,
+                    state,
+                    created_at,
+                    expires_in_secs: expires_at - now,
+                    promoted: promoted != 0,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(rows)
+    }
+
+    /// Mark a session as promoted so it is exempt from the 30-day auto-expiry.
+    pub fn promote_session(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET promoted = 1 WHERE id = ?1",
+            params![sid],
+        )
+        .context("promote session")?;
+        debug!(session_id = %session_id, "session promoted");
+        Ok(())
     }
 
     /// Delete all persisted data for `session_id`.

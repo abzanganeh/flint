@@ -48,6 +48,7 @@ use crate::orchestrator::prewarm::PreWarmCache;
 use crate::rag::embedder::Embedder;
 use crate::rag::retriever::retrieve;
 use crate::session::memory::{ContextBudget, ConversationMemory, MemoryContext, Turn};
+use crate::session::persistence::{Response, ResponseType, SessionPersistence};
 use crate::state::TurnCancelFlag;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -130,6 +131,8 @@ pub struct OrchestratorConfig {
     pub local_llm: Arc<dyn LLMProvider>,
     /// Shared with `LiveTaskHandles` — replaced on each turn dispatch.
     pub turn_cancel_slot: Arc<Mutex<Option<TurnCancelFlag>>>,
+    /// Write-through SQLite persistence for crash recovery.
+    pub persistence: Arc<SessionPersistence>,
 }
 
 /// Receive detected questions and run the three parallel response threads.
@@ -185,6 +188,7 @@ pub async fn run_orchestrator<R: Runtime>(
             turn_number: turn,
             turn_cancel,
             local_llm: Arc::clone(&config.local_llm),
+            persistence: Arc::clone(&config.persistence),
         };
 
         let span = info_span!(
@@ -238,6 +242,7 @@ struct OrchestratorTurnConfig {
     turn_number: usize,
     turn_cancel: TurnCancelFlag,
     local_llm: Arc<dyn LLMProvider>,
+    persistence: Arc<SessionPersistence>,
 }
 
 async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
@@ -495,7 +500,34 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         );
     }
 
-    // ── 7. Update conversation memory ─────────────────────────────────────
+    // ── 7. Persist responses — crash-recovery insurance ───────────────────
+    if !directional_text.is_empty() {
+        let r = Response {
+            id: Uuid::new_v4(),
+            session_id: cfg.session_id,
+            response_type: ResponseType::Directional,
+            content: directional_text.clone(),
+            confidence: 0.0,
+        };
+        if let Err(e) = cfg.persistence.write_response(&r) {
+            warn!(session_id = %cfg.session_id, error = %e, "directional persist failed");
+        }
+    }
+
+    if !depth_text.is_empty() {
+        let r = Response {
+            id: Uuid::new_v4(),
+            session_id: cfg.session_id,
+            response_type: ResponseType::Depth,
+            content: depth_text.clone(),
+            confidence: 0.0,
+        };
+        if let Err(e) = cfg.persistence.write_response(&r) {
+            warn!(session_id = %cfg.session_id, error = %e, "depth persist failed");
+        }
+    }
+
+    // ── 8. Update conversation memory ─────────────────────────────────────
     {
         let mut mem = cfg.memory.lock().await;
         mem.push_turn(Turn {
@@ -540,6 +572,7 @@ pub async fn dispatch_turn<R: Runtime>(
     compression_prompt: String,
     turn_cancel: TurnCancelFlag,
     local_llm: Arc<dyn LLMProvider>,
+    persistence: Arc<SessionPersistence>,
     app: AppHandle<R>,
 ) -> Result<()> {
     run_turn(
@@ -557,6 +590,7 @@ pub async fn dispatch_turn<R: Runtime>(
             turn_number,
             turn_cancel,
             local_llm,
+            persistence,
         },
         app,
     )

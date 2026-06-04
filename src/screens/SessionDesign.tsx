@@ -39,9 +39,11 @@ const CHAR_WARN_THRESHOLD = 3_000;
 export interface SessionDesignProps {
   /** Called with the new session UUID once the digest is ready. */
   onComplete: (sessionId: string) => void;
+  /** Navigate to the past sessions list. */
+  onViewSessions?: () => void;
 }
 
-export default function SessionDesign({ onComplete }: SessionDesignProps) {
+export default function SessionDesign({ onComplete, onViewSessions }: SessionDesignProps) {
   const [name, setName] = useState("");
   const [sessionType, setSessionType] = useState("interview");
   const [domain, setDomain] = useState("software engineering");
@@ -227,6 +229,16 @@ export default function SessionDesign({ onComplete }: SessionDesignProps) {
           >
             Extract Digest
           </button>
+          {onViewSessions && (
+            <button
+              type="button"
+              className="sd-btn-secondary"
+              onClick={onViewSessions}
+              disabled={isLoading}
+            >
+              Past Sessions
+            </button>
+          )}
         </div>
       </div>
     </div>

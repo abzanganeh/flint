@@ -44,6 +44,7 @@ use crate::audio::vad::VadChunker;
 use crate::events::{
     emit_thread_status, emit_transcription_chunk, ThreadStatusPayload, TranscriptionChunkPayload,
 };
+use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
 
@@ -95,6 +96,7 @@ impl ChannelProcessor {
 ///
 /// The function returns when both input channels are closed (i.e. when
 /// `AudioCapture::stop()` has been called and all senders have dropped).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_audio_pipeline(
     app_handle: AppHandle,
     session_id: Uuid,
@@ -103,22 +105,21 @@ pub async fn run_audio_pipeline(
     question_tx: mpsc::Sender<DetectedQuestion>,
     mut system_rx: mpsc::Receiver<AudioFrame>,
     mut mic_rx: mpsc::Receiver<AudioFrame>,
+    persistence: Arc<SessionPersistence>,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new()?;
     let mut mic_proc = ChannelProcessor::new()?;
 
     loop {
         let frame = tokio::select! {
-            // Bias toward the system channel so interviewer audio is never
-            // starved when both channels are active simultaneously.
             biased;
             f = system_rx.recv() => match f {
                 Some(frame) => frame,
-                None => break, // system capture stopped
+                None => break,
             },
             f = mic_rx.recv() => match f {
                 Some(frame) => frame,
-                None => break, // mic capture stopped
+                None => break,
             },
         };
 
@@ -135,6 +136,7 @@ pub async fn run_audio_pipeline(
             &whisper,
             &detector,
             &question_tx,
+            &persistence,
         )
         .await
         {
@@ -150,6 +152,7 @@ pub async fn run_audio_pipeline(
 // Per-frame processing
 // ────────────────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn process_frame(
     mut frame: AudioFrame,
     proc: &mut ChannelProcessor,
@@ -158,6 +161,7 @@ async fn process_frame(
     whisper: &Arc<WhisperEngine>,
     detector: &Arc<QuestionDetector>,
     question_tx: &mpsc::Sender<DetectedQuestion>,
+    persistence: &Arc<SessionPersistence>,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -182,7 +186,7 @@ async fn process_frame(
         return Ok(()); // silence or hallucination — discarded by engine
     };
 
-    // ── Step 4b: emit transcription_chunk immediately ─────────────────────
+    // ── Step 4b: emit + persist transcript chunk ──────────────────────────
     let speaker = match source {
         AudioSource::System => "System",
         AudioSource::Microphone => "Microphone",
@@ -196,6 +200,17 @@ async fn process_frame(
             timestamp,
         },
     );
+    // Persist every chunk immediately — crash-recovery insurance.
+    let chunk = TranscriptChunk {
+        id: Uuid::new_v4(),
+        session_id,
+        speaker: speaker.to_string(),
+        text: result.text.clone(),
+        timestamp_ms: timestamp,
+    };
+    if let Err(e) = persistence.write_transcript_chunk(&chunk) {
+        tracing::warn!(error = %e, "transcript chunk persist failed — continuing");
+    }
 
     // ── Steps 4c/4d: question detection on System audio only ──────────────
     if source == AudioSource::Microphone {

@@ -166,3 +166,20 @@ pub struct SessionSnapshotDto {
     pub state: String,
     pub digest: Option<DigestDto>,
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Session list DTOs (Phase 6)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// One row in the session list screen.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummaryDto {
+    pub id: String,
+    pub state: String,
+    pub created_at: i64,
+    /// Seconds until this session's data expires (negative = already expired).
+    pub expires_in_secs: i64,
+    /// If `true`, this session is pinned and won't be auto-deleted at expiry.
+    pub promoted: bool,
+}
