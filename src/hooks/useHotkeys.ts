@@ -15,6 +15,7 @@ export function useHotkeys(
 ): void {
   const setAnswerNowMode = useUIStore((s) => s.setAnswerNowMode);
   const setPanicHideActive = useUIStore((s) => s.setPanicHideActive);
+  const clearStreamingBuffers = useUIStore((s) => s.clearStreamingBuffers);
   const lastPressRef = useRef(0);
   const tapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const holdTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -43,6 +44,7 @@ export function useHotkeys(
         if (now - lastPressRef.current < DOUBLE_TAP_MS) {
           clearTimers();
           lastPressRef.current = 0;
+          setAnswerNowMode(false);
           void cancelInference();
           return;
         }
@@ -52,9 +54,11 @@ export function useHotkeys(
 
         tapTimeoutRef.current = setTimeout(() => {
           if (lastQuestion.trim()) {
+            setAnswerNowMode(false);
+            clearStreamingBuffers();
             void triggerResponse(lastQuestion, sessionId);
           }
-          holdTimeoutRef.current = null;
+          tapTimeoutRef.current = null;
         }, TAP_DEBOUNCE_MS);
 
         holdTimeoutRef.current = setTimeout(() => {
@@ -63,11 +67,16 @@ export function useHotkeys(
             tapTimeoutRef.current = null;
           }
           setAnswerNowMode(true);
+          if (lastQuestion.trim()) {
+            clearStreamingBuffers();
+            void triggerResponse(lastQuestion, sessionId);
+          }
         }, HOLD_MS);
       });
 
       const fnOverlay = await onOverlayVisibility(({ hidden }) => {
         setPanicHideActive(hidden);
+        if (hidden) setAnswerNowMode(false);
       });
 
       if (cancelled) {
@@ -87,5 +96,12 @@ export function useHotkeys(
       unlistenHotkey?.();
       unlistenOverlay?.();
     };
-  }, [enabled, lastQuestion, sessionId, setAnswerNowMode, setPanicHideActive]);
+  }, [
+    enabled,
+    lastQuestion,
+    sessionId,
+    setAnswerNowMode,
+    setPanicHideActive,
+    clearStreamingBuffers,
+  ]);
 }

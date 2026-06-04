@@ -3,6 +3,11 @@ import { useDirectionalStream } from "../hooks/useDirectionalStream";
 import { useUIStore } from "../store/ui";
 import type { ConfidenceLevel } from "../types";
 
+const clearBuffersForNewTurn = (): void => {
+  useUIStore.getState().clearStreamingBuffers();
+  useUIStore.getState().setAnswerNowMode(false);
+};
+
 const CONFIDENCE_BORDER: Record<ConfidenceLevel, string> = {
   green: "#22c55e",
   blue: "#3b82f6",
@@ -45,11 +50,13 @@ const DirectionalPanel = ({ sessionId }: DirectionalPanelProps) => {
 
   const handleTrigger = () => {
     if (!lastManualQuestion.trim()) return;
+    clearBuffersForNewTurn();
     void triggerResponse(lastManualQuestion, sessionId);
   };
 
   const handleRephrase = () => {
     if (!lastManualQuestion.trim()) return;
+    clearBuffersForNewTurn();
     void rephraseResponse(lastManualQuestion, sessionId);
   };
 

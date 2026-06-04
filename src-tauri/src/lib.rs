@@ -14,6 +14,7 @@ pub mod orchestrator;
 pub mod rag;
 pub mod session;
 mod state;
+mod stealth;
 mod supabase;
 pub mod transcription;
 
@@ -40,6 +41,8 @@ pub fn run() {
             }
             app.manage(app_state);
             hotkeys::register_hotkeys(app.handle());
+            stealth::apply_capture_exclusion(app.handle());
+            stealth::place_on_non_primary_monitor(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
