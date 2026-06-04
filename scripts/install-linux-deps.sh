@@ -19,6 +19,7 @@ sudo apt-get install -y \
   wget \
   file \
   pkg-config \
+  libasound2-dev \
   libssl-dev \
   libclang-dev \
   patchelf \

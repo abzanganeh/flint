@@ -41,7 +41,7 @@ Or install manually:
 ```bash
 sudo apt update
 sudo apt install -y libwebkit2gtk-4.1-dev build-essential libssl-dev \
-  libgtk-3-dev libpango1.0-dev libgdk-pixbuf-2.0-dev libatk1.0-dev \
+  libasound2-dev libgtk-3-dev libpango1.0-dev libgdk-pixbuf-2.0-dev libatk1.0-dev \
   libsoup-3.0-dev libjavascriptcoregtk-4.1-dev librsvg2-dev patchelf \
   libxdo-dev libayatana-appindicator3-dev
 ```
