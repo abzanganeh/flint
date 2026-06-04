@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import OverlayLayout from "../components/OverlayLayout";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
+import WaylandCaptureHint from "../components/WaylandCaptureHint";
 import { startSession, stopSession } from "../commands";
 import { onSessionStateChange } from "../events";
 import { useHotkeys } from "../hooks/useHotkeys";
@@ -135,6 +136,8 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
           {error}
         </div>
       )}
+
+      <WaylandCaptureHint />
 
       <div style={{ flex: 1, overflow: "hidden" }}>
         <OverlayLayout
