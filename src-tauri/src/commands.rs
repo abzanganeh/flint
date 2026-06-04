@@ -24,7 +24,7 @@ use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::LLMProvider;
 use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
-use crate::orchestrator::{run_orchestrator, OrchestratorConfig};
+use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
 use crate::session::memory::ConversationMemory;
 use crate::session::state::SessionState;
@@ -234,6 +234,8 @@ pub async fn create_session(
     // Clear stale digest / cache from any previous session.
     *state.session_digest.write().await = None;
     *state.prewarm_cache.lock().await = PreWarmCache::new();
+    *state.rehearsal_turn.lock().await = 0;
+    *state.session_memory.lock().await = None;
 
     info!(
         session_id = %session_id,
@@ -500,18 +502,170 @@ async fn abort_live_tasks(state: &AppState) {
     }
 }
 
+/// Build the failover manager and local LLM provider used by live and rehearsal paths.
+async fn build_failover_stack(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(Arc<FailoverManager>, Arc<dyn LLMProvider>, usize), String> {
+    let (primary_provider, context_window) = match keychain::get_api_key("groq") {
+        Ok(api_key) => match GroqProvider::new(api_key) {
+            Ok(p) => {
+                let cw = p.context_window();
+                (Arc::new(p) as Arc<dyn LLMProvider>, cw)
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to build Groq provider — using stub");
+                let stub = Arc::clone(&state.llm);
+                (stub, stub.context_window())
+            }
+        },
+        Err(_) => {
+            warn!("No Groq API key in keychain — using stub LLM provider");
+            let stub = Arc::clone(&state.llm);
+            (stub, stub.context_window())
+        }
+    };
+
+    let local_provider: Arc<dyn LLMProvider> =
+        Arc::new(OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?);
+    let rate_limiter = Arc::new(RateLimiter::new(
+        primary_provider.name(),
+        primary_provider.rate_limit().requests_per_minute,
+        primary_provider.rate_limit().tokens_per_minute,
+    ));
+    let mut failover =
+        FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
+    failover.start_ping_loop(app.clone());
+    Ok((
+        Arc::new(failover),
+        local_provider,
+        context_window,
+    ))
+}
+
+fn load_compression_prompt() -> String {
+    std::fs::read_to_string(prompts_base_dir().join("compression").join("default.txt"))
+        .unwrap_or_else(|_| {
+            "Summarise the conversation below in 3-5 sentences.\n\n{old_turns}\n\n[Summary]"
+                .to_string()
+        })
+}
+
+/// Whether the user completed the mandatory rehearsal on this device.
+#[tauri::command]
+pub fn get_rehearsal_completed() -> bool {
+    keychain::is_rehearsal_completed()
+}
+
+/// Fire a single orchestrator turn during rehearsal (no audio pipeline).
+#[tauri::command]
+pub async fn run_rehearsal_turn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+    rephrase: Option<bool>,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "run_rehearsal_turn is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let digest = state.session_digest.read().await.clone().ok_or_else(|| {
+        "No session digest — complete digest review before rehearsal.".to_string()
+    })?;
+
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
+
+    let memory = {
+        let mut guard = state.session_memory.lock().await;
+        if guard.is_none() {
+            *guard = Some(Arc::new(tokio::sync::Mutex::new(
+                ConversationMemory::new(context_window),
+            )));
+        }
+        Arc::clone(guard.as_ref().unwrap())
+    };
+
+    let turn_number = {
+        let mut turn = state.rehearsal_turn.lock().await;
+        *turn += 1;
+        *turn
+    };
+
+    let question_text = if rephrase.unwrap_or(false) {
+        format!("Rephrase your previous answer to: {question}")
+    } else {
+        question
+    };
+
+    let turn_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    dispatch_turn(
+        sid,
+        question_text,
+        turn_number,
+        Arc::new(digest),
+        prompts_base_dir(),
+        failover,
+        Arc::clone(&state.embedder),
+        Arc::clone(&state.vector_store),
+        Arc::clone(&state.prewarm_cache),
+        memory,
+        load_compression_prompt(),
+        turn_cancel,
+        local_provider,
+        app,
+    )
+    .await
+    .map_err(|e| format!("Rehearsal turn failed: {e}"))?;
+
+    Ok(())
+}
+
+/// Complete mandatory rehearsal and transition to READY.
+#[tauri::command]
+pub async fn complete_rehearsal(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "complete_rehearsal is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    keychain::set_rehearsal_completed().map_err(|_| KEYCHAIN_SAVE_ERROR.to_string())?;
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::Ready)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::Ready);
+
+    info!(session_id = %session_id, "rehearsal completed");
+    Ok(())
+}
+
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
 ///
-/// Valid from: `REHEARSING` or `READY`.
-///
-/// State path:
-/// - REHEARSING → READY (only if not already READY) → emit READY
-/// - Start audio capture on a dedicated OS thread (cpal::Stream is !Send)
-/// - Spawn pipeline and drain tasks
-/// - READY → LIVE → emit LIVE
-///
-/// If any step fails before LIVE the state is left at READY so the caller
-/// can retry without re-running pre-warming.
+/// Valid from: `READY` only (rehearsal must be completed first).
 #[tauri::command]
 pub async fn start_session(
     app: AppHandle,
@@ -520,18 +674,23 @@ pub async fn start_session(
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
 
-    // Guard and record the pre-start state for the conditional transition.
-    let pre_state = {
+    if !keychain::is_rehearsal_completed() {
+        return Err(
+            "Complete rehearsal before starting a live session.".to_string(),
+        );
+    }
+
+    checks::run_stealth_self_test()?;
+
+    {
         let machine = state.state_machine.lock().await;
-        match *machine.current() {
-            SessionState::Rehearsing | SessionState::Ready => *machine.current(),
-            current => {
-                return Err(format!(
-                    "start_session requires REHEARSING or READY (current: {current})"
-                ));
-            }
+        if *machine.current() != SessionState::Ready {
+            return Err(format!(
+                "start_session requires READY (current: {})",
+                machine.current()
+            ));
         }
-    };
+    }
 
     // Refuse to start if a live session is already running.
     if state.live_tasks.lock().await.is_some() {
@@ -599,42 +758,7 @@ pub async fn start_session(
 
     // ── 5. Build failover manager and conversation memory ─────────────────
 
-    let (primary_provider, context_window) = match keychain::get_api_key("groq") {
-        Ok(api_key) => match GroqProvider::new(api_key) {
-            Ok(p) => {
-                let cw = p.context_window();
-                (
-                    Arc::new(p) as Arc<dyn crate::llm::provider::LLMProvider>,
-                    cw,
-                )
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to build Groq provider — using stub");
-                let stub = Arc::clone(&state.llm);
-                let cw = stub.context_window();
-                (stub, cw)
-            }
-        },
-        Err(_) => {
-            warn!("No Groq API key in keychain — using stub LLM provider");
-            let stub = Arc::clone(&state.llm);
-            let cw = stub.context_window();
-            (stub, cw)
-        }
-    };
-
-    let local_provider: Arc<dyn LLMProvider> = Arc::new(
-        OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
-    );
-    let rate_limiter = Arc::new(RateLimiter::new(
-        primary_provider.name(),
-        primary_provider.rate_limit().requests_per_minute,
-        primary_provider.rate_limit().tokens_per_minute,
-    ));
-    let mut failover =
-        FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
-    failover.start_ping_loop(app.clone());
-    let failover = Arc::new(failover);
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
 
     let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
         context_window,
@@ -644,13 +768,7 @@ pub async fn start_session(
     let turn_cancel_slot: Arc<tokio::sync::Mutex<Option<crate::state::TurnCancelFlag>>> =
         Arc::new(tokio::sync::Mutex::new(None));
 
-    // Load compression prompt for memory management.
-    let compression_prompt =
-        std::fs::read_to_string(prompts_base_dir().join("compression").join("default.txt"))
-            .unwrap_or_else(|_| {
-                "Summarise the conversation below in 3-5 sentences.\n\n{old_turns}\n\n[Summary]"
-                    .to_string()
-            });
+    let compression_prompt = load_compression_prompt();
 
     // ── 6. Spawn background tasks ─────────────────────────────────────────
 
@@ -696,22 +814,7 @@ pub async fn start_session(
         turn_cancel: turn_cancel_slot,
     });
 
-    // ── 6. State transitions ──────────────────────────────────────────────
-    //
-    // If either transition fails (e.g. SQLite persistence error), we must
-    // abort the live tasks before returning so no hidden audio pipeline runs
-    // while the state machine is still at REHEARSING/READY.
-
-    if pre_state == SessionState::Rehearsing {
-        let mut machine = state.state_machine.lock().await;
-        if let Err(e) = machine.transition(SessionState::Ready) {
-            drop(machine);
-            abort_live_tasks(&state).await;
-            return Err(session_error(e));
-        }
-        drop(machine);
-        emit_state(&app, SessionState::Ready);
-    }
+    // ── 7. State transition READY → LIVE ──────────────────────────────────
 
     {
         let mut machine = state.state_machine.lock().await;
@@ -804,6 +907,7 @@ pub async fn trigger_response(
     state: State<'_, AppState>,
     question: String,
     session_id: String,
+    rephrase: Option<bool>,
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
 
@@ -817,10 +921,16 @@ pub async fn trigger_response(
         }
     }
 
+    let question_text = if rephrase.unwrap_or(false) {
+        format!("Rephrase your previous answer to: {question}")
+    } else {
+        question
+    };
+
     let guard = state.live_tasks.lock().await;
     if let Some(handles) = guard.as_ref() {
         let detected = DetectedQuestion {
-            text: question.clone(),
+            text: question_text.clone(),
             session_id: sid,
             detected_at: std::time::Instant::now(),
         };
@@ -828,7 +938,7 @@ pub async fn trigger_response(
             .question_tx
             .try_send(detected)
             .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
-        info!(session_id = %sid, question = %question, "manual trigger_response");
+        info!(session_id = %sid, question = %question_text, "manual trigger_response");
     }
 
     Ok(())
@@ -861,17 +971,36 @@ pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> 
     Ok(())
 }
 
-/// Immediately hide the overlay window (panic hotkey path).
-///
-/// Silently succeeds even if the window is already hidden.
+/// Toggle overlay visibility (panic hotkey path).
 #[tauri::command]
-pub async fn panic_hide_overlay(app: AppHandle) -> Result<(), String> {
+pub async fn panic_hide_overlay(app: AppHandle) -> Result<bool, String> {
+    use crate::events::{emit_overlay_visibility, OverlayVisibilityPayload};
+
     if let Some(window) = app.get_webview_window("main") {
-        window
-            .hide()
-            .map_err(|e| format!("Failed to hide overlay: {e}"))?;
+        let visible = window.is_visible().unwrap_or(true);
+        if visible {
+            window
+                .hide()
+                .map_err(|e| format!("Failed to hide overlay: {e}"))?;
+            emit_overlay_visibility(
+                &app,
+                OverlayVisibilityPayload { hidden: true },
+            );
+            Ok(true)
+        } else {
+            window
+                .show()
+                .map_err(|e| format!("Failed to show overlay: {e}"))?;
+            let _ = window.set_focus();
+            emit_overlay_visibility(
+                &app,
+                OverlayVisibilityPayload { hidden: false },
+            );
+            Ok(false)
+        }
+    } else {
+        Ok(false)
     }
-    Ok(())
 }
 
 /// Switch the active LLM provider.

@@ -65,6 +65,32 @@ pub struct ContextTruncatedPayload {
     pub session_id: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RagChunkPayload {
+    pub text: String,
+    pub score: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RagChunksUpdatePayload {
+    pub chunks: Vec<RagChunkPayload>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResponseMetadataPayload {
+    pub pre_prepared: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OverlayVisibilityPayload {
+    pub hidden: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HotkeyTriggerPayload {
+    pub action: String,
+}
+
 pub fn emit_transcription_chunk<R: Runtime>(
     app: &AppHandle<R>,
     payload: TranscriptionChunkPayload,
@@ -103,9 +129,24 @@ pub fn emit_primary_restored<R: Runtime>(app: &AppHandle<R>, payload: PrimaryRes
     let _ = app.emit("primary_restored", payload);
 }
 
-#[allow(dead_code)]
 pub fn emit_token_usage_update<R: Runtime>(app: &AppHandle<R>, payload: TokenUsageUpdatePayload) {
     let _ = app.emit("token_usage_update", payload);
+}
+
+pub fn emit_rag_chunks_update<R: Runtime>(app: &AppHandle<R>, payload: RagChunksUpdatePayload) {
+    let _ = app.emit("rag_chunks_update", payload);
+}
+
+pub fn emit_response_metadata<R: Runtime>(app: &AppHandle<R>, payload: ResponseMetadataPayload) {
+    let _ = app.emit("response_metadata", payload);
+}
+
+pub fn emit_overlay_visibility<R: Runtime>(app: &AppHandle<R>, payload: OverlayVisibilityPayload) {
+    let _ = app.emit("overlay_visibility", payload);
+}
+
+pub fn emit_hotkey_trigger<R: Runtime>(app: &AppHandle<R>, payload: HotkeyTriggerPayload) {
+    let _ = app.emit("hotkey_trigger", payload);
 }
 
 pub fn emit_session_state_change<R: Runtime>(

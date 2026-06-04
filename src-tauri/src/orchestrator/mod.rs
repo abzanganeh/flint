@@ -36,8 +36,10 @@ use crate::audio::pipeline::DetectedQuestion;
 use crate::confidence::{compute_confidence, ConfidenceLevel, ConfidenceSignals};
 use crate::digest::Digest;
 use crate::events::{
-    emit_confidence_score, emit_context_truncated, emit_thread_status, ConfidenceScorePayload,
-    ContextTruncatedPayload, ThreadStatusPayload,
+    emit_confidence_score, emit_context_truncated, emit_rag_chunks_update,
+    emit_response_metadata, emit_thread_status, emit_token_usage_update, ConfidenceScorePayload,
+    ContextTruncatedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
+    ThreadStatusPayload, TokenUsageUpdatePayload,
 };
 use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::llm::failover::FailoverManager;
@@ -283,6 +285,29 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     let rag_chunks = retrieve_rag(&cfg, &embedding).await?;
     let rag_latency_ms = rag_start.elapsed().as_millis() as u64;
 
+    emit_rag_chunks_update(
+        &app,
+        RagChunksUpdatePayload {
+            chunks: rag_chunks
+                .iter()
+                .take(10)
+                .map(|c| RagChunkPayload {
+                    text: c.chunk.text.clone(),
+                    score: c.score,
+                })
+                .collect(),
+        },
+    );
+
+    if from_cache {
+        emit_response_metadata(
+            &app,
+            ResponseMetadataPayload {
+                pre_prepared: true,
+            },
+        );
+    }
+
     // ── 3. Build memory context ───────────────────────────────────────────
     let using_local = cfg.failover.is_using_local();
     let compression_llm: Option<Arc<dyn LLMProvider>> = if using_local {
@@ -475,12 +500,67 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         let mut mem = cfg.memory.lock().await;
         mem.push_turn(Turn {
             question: cfg.question_text.clone(),
-            directional_response: directional_text,
-            depth_response: depth_text,
+            directional_response: directional_text.clone(),
+            depth_response: depth_text.clone(),
         });
     }
 
+    // ── 8. Token usage estimate (4 chars ≈ 1 token) ───────────────────────
+    let turn_input = (cfg.question_text.len() as u64 + 500) / 4;
+    let turn_output =
+        (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
+    let total = turn_input + turn_output;
+    let cost_estimate = total as f64 * 0.0000002;
+    emit_token_usage_update(
+        &app,
+        TokenUsageUpdatePayload {
+            input: turn_input,
+            output: turn_output,
+            total,
+            cost_estimate,
+        },
+    );
+
     Ok(())
+}
+
+/// Run a single orchestrator turn (rehearsal or direct dispatch).
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_turn<R: Runtime>(
+    session_id: Uuid,
+    question_text: String,
+    turn_number: usize,
+    digest: Arc<Digest>,
+    prompts_dir: PathBuf,
+    failover: Arc<FailoverManager>,
+    embedder: Arc<Embedder>,
+    vector_store: Arc<dyn VectorInterface>,
+    prewarm_cache: Arc<Mutex<PreWarmCache>>,
+    memory: Arc<Mutex<ConversationMemory>>,
+    compression_prompt: String,
+    turn_cancel: TurnCancelFlag,
+    local_llm: Arc<dyn LLMProvider>,
+    app: AppHandle<R>,
+) -> Result<()> {
+    run_turn(
+        OrchestratorTurnConfig {
+            session_id,
+            question_text,
+            digest,
+            prompts_dir,
+            failover,
+            embedder,
+            vector_store,
+            prewarm_cache,
+            memory,
+            compression_prompt,
+            turn_number,
+            turn_cancel,
+            local_llm,
+        },
+        app,
+    )
+    .await
 }
 
 async fn retrieve_rag(cfg: &OrchestratorTurnConfig, embedding: &[f32]) -> Result<Vec<ScoredChunk>> {

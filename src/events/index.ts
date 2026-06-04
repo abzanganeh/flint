@@ -56,6 +56,27 @@ export interface ContextTruncatedEventPayload {
   session_id: string;
 }
 
+export interface RagChunkEventPayload {
+  text: string;
+  score: number;
+}
+
+export interface RagChunksUpdateEventPayload {
+  chunks: RagChunkEventPayload[];
+}
+
+export interface ResponseMetadataEventPayload {
+  pre_prepared: boolean;
+}
+
+export interface OverlayVisibilityEventPayload {
+  hidden: boolean;
+}
+
+export interface HotkeyTriggerEventPayload {
+  action: string;
+}
+
 export const onTranscriptionChunk = (
   handler: (payload: TranscriptionChunkEventPayload) => void,
 ): Promise<UnlistenFn> =>
@@ -130,5 +151,33 @@ export const onContextTruncated = (
   handler: (payload: ContextTruncatedEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<ContextTruncatedEventPayload>("context_truncated", (event) =>
+    handler(event.payload),
+  );
+
+export const onRagChunksUpdate = (
+  handler: (payload: RagChunksUpdateEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<RagChunksUpdateEventPayload>("rag_chunks_update", (event) =>
+    handler(event.payload),
+  );
+
+export const onResponseMetadata = (
+  handler: (payload: ResponseMetadataEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<ResponseMetadataEventPayload>("response_metadata", (event) =>
+    handler(event.payload),
+  );
+
+export const onOverlayVisibility = (
+  handler: (payload: OverlayVisibilityEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<OverlayVisibilityEventPayload>("overlay_visibility", (event) =>
+    handler(event.payload),
+  );
+
+export const onHotkeyTrigger = (
+  handler: (payload: HotkeyTriggerEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<HotkeyTriggerEventPayload>("hotkey_trigger", (event) =>
     handler(event.payload),
   );

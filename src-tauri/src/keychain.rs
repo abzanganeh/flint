@@ -16,6 +16,7 @@ const AUTH_ACCESS_ENTRY: &str = "auth_token_access";
 const AUTH_REFRESH_ENTRY: &str = "auth_token_refresh";
 const AUTH_EXPIRES_ENTRY: &str = "auth_token_expires_at";
 const LEGAL_CONSENT_ENTRY: &str = "legal_consent_accepted";
+const REHEARSAL_COMPLETED_ENTRY: &str = "rehearsal_completed";
 
 const READ_CREDENTIALS_MSG: &str = "Could not read credentials. Please log in again.";
 const SAVE_CREDENTIALS_MSG: &str = "Could not save credentials. Please try again.";
@@ -100,6 +101,18 @@ pub fn set_legal_consent_accepted() -> Result<()> {
 /// Whether the legal disclaimer was accepted on this device.
 pub fn is_legal_consent_accepted() -> bool {
     get_password(LEGAL_CONSENT_ENTRY)
+        .map(|v| v.expose_secret() == "1")
+        .unwrap_or(false)
+}
+
+/// Record that the user completed the mandatory rehearsal before going live.
+pub fn set_rehearsal_completed() -> Result<()> {
+    store_password(REHEARSAL_COMPLETED_ENTRY, &SecretString::new("1".into()))
+}
+
+/// Whether the user has completed rehearsal at least once on this device.
+pub fn is_rehearsal_completed() -> bool {
+    get_password(REHEARSAL_COMPLETED_ENTRY)
         .map(|v| v.expose_secret() == "1")
         .unwrap_or(false)
 }

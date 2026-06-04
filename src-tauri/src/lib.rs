@@ -6,6 +6,7 @@ pub mod digest;
 mod dto;
 mod events;
 mod health;
+mod hotkeys;
 pub mod interfaces;
 mod keychain;
 pub mod llm;
@@ -13,16 +14,19 @@ pub mod orchestrator;
 pub mod rag;
 pub mod session;
 mod state;
+mod stealth;
 mod supabase;
 pub mod transcription;
 
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use tauri::Manager;
+use tauri_plugin_global_shortcut;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             health::hardware::assess_hardware();
             let app_state = state::AppState::new(app)?;
@@ -36,6 +40,9 @@ pub fn run() {
                 );
             }
             app.manage(app_state);
+            hotkeys::register_hotkeys(app.handle());
+            stealth::apply_capture_exclusion(app.handle());
+            stealth::place_on_non_primary_monitor(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -55,7 +62,10 @@ pub fn run() {
             commands::confirm_digest,
             commands::get_digest,
             commands::get_session_snapshot,
-            // Live session stubs (Phase 3)
+            commands::get_rehearsal_completed,
+            commands::run_rehearsal_turn,
+            commands::complete_rehearsal,
+            // Live session (Phase 3+)
             commands::start_session,
             commands::stop_session,
             commands::trigger_response,

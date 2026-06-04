@@ -93,6 +93,8 @@ pub struct AppState {
     /// Shared orchestrator conversation memory. Same `Arc` as passed to
     /// `OrchestratorConfig` — not a duplicate instance.
     pub session_memory: Arc<Mutex<Option<Arc<Mutex<ConversationMemory>>>>>,
+    /// Turn counter for rehearsal-mode orchestrator dispatches.
+    pub rehearsal_turn: Mutex<usize>,
 }
 
 impl AppState {
@@ -160,6 +162,7 @@ impl AppState {
             llm: Arc::new(StubLLMProvider),
             live_tasks: Mutex::new(None),
             session_memory: Arc::new(Mutex::new(None)),
+            rehearsal_turn: Mutex::new(0),
         })
     }
 

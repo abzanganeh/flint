@@ -556,6 +556,15 @@ fn command_output_contains(program: &str, args: &[&str], needle: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Stealth gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
+pub fn run_stealth_self_test() -> Result<(), String> {
+    let result = check_stealth_api();
+    match result.status {
+        CheckStatus::Pass | CheckStatus::Warn => Ok(()),
+        CheckStatus::Fail => Err(result.message),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
