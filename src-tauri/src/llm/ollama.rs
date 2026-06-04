@@ -252,9 +252,7 @@ mod tests {
 
     #[test]
     fn build_request_uses_configured_model() {
-        let provider = OllamaProvider::new()
-            .unwrap()
-            .with_model("llama3.2:3b");
+        let provider = OllamaProvider::new().unwrap().with_model("llama3.2:3b");
         let req = provider.build_request("Hello", true);
         assert_eq!(req.model, "llama3.2:3b");
         assert!(req.stream);

@@ -307,8 +307,8 @@ impl AudioCapture {
         let mic_dev = host
             .default_input_device()
             .ok_or_else(|| anyhow!("No default microphone input device found"))?;
-        let (mic_cfg, mic_rate) = select_stream_config(&mic_dev)
-            .context("Failed to select microphone stream config")?;
+        let (mic_cfg, mic_rate) =
+            select_stream_config(&mic_dev).context("Failed to select microphone stream config")?;
         let mic_state = Arc::new(Mutex::new(
             StreamState::new(mic_rate).context("Failed to init microphone StreamState")?,
         ));
@@ -439,7 +439,9 @@ impl AudioCapture {
             tx,
             Arc::clone(&recovering_flag),
         )?;
-        new_stream.play().context("Failed to start reinitialised stream")?;
+        new_stream
+            .play()
+            .context("Failed to start reinitialised stream")?;
 
         // ── Clear recovery flag ───────────────────────────────────────────
         recovering_flag.store(false, Ordering::SeqCst);

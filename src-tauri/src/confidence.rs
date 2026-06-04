@@ -196,10 +196,7 @@ pub fn compute_confidence(signals: &ConfidenceSignals) -> (f32, ConfidenceLevel)
     let rq = response_quality(&signals.response_text, &signals.rag_texts);
     let tier = model_tier_score(&signals.provider_name);
 
-    let score = (0.50 * signals.rag_grounding)
-        + (0.25 * rq)
-        + (0.15 * tier)
-        - staleness_penalty;
+    let score = (0.50 * signals.rag_grounding) + (0.25 * rq) + (0.15 * tier) - staleness_penalty;
 
     let score = score.clamp(0.0, 1.0);
 
@@ -226,7 +223,13 @@ mod tests {
 
     /// Test signal builder — responses overlap with RAG vocabulary so that
     /// `lexical_overlap` is high (1.0 in these fixtures).
-    fn signals(rag: f32, response: &str, provider: &str, cache_stale: bool, turn: usize) -> ConfidenceSignals {
+    fn signals(
+        rag: f32,
+        response: &str,
+        provider: &str,
+        cache_stale: bool,
+        turn: usize,
+    ) -> ConfidenceSignals {
         ConfidenceSignals {
             rag_grounding: rag,
             response_text: response.to_string(),
@@ -242,14 +245,16 @@ mod tests {
     fn green_band_high_quality_groq() {
         // rag=0.90, quality blended (hedge=1.0 × 0.6 + overlap=1.0 × 0.4 = 1.0),
         // tier=0.85; score = 0.45 + 0.25 + 0.1275 = 0.8275
-        let (score, level) = compute_confidence(&signals(0.90, "The answer is X.", "groq", false, 1));
+        let (score, level) =
+            compute_confidence(&signals(0.90, "The answer is X.", "groq", false, 1));
         assert!(score >= 0.75, "score={score}");
         assert_eq!(level, ConfidenceLevel::Green);
     }
 
     #[test]
     fn blue_band_medium_rag() {
-        let (score, level) = compute_confidence(&signals(0.60, "The answer is Y.", "groq", false, 2));
+        let (score, level) =
+            compute_confidence(&signals(0.60, "The answer is Y.", "groq", false, 2));
         assert!((0.55..0.75).contains(&score), "score={score}");
         assert_eq!(level, ConfidenceLevel::Blue);
     }
@@ -259,8 +264,13 @@ mod tests {
         // rag=0.20, hedge_score=0.70 (two hedges), overlap=1.0,
         // quality = 0.6×0.70 + 0.4×1.0 = 0.82
         // score = 0.50×0.20 + 0.25×0.82 + 0.15×0.85 = 0.10 + 0.205 + 0.1275 = 0.4325
-        let (score, level) =
-            compute_confidence(&signals(0.20, "I'm not sure, it depends.", "groq", false, 1));
+        let (score, level) = compute_confidence(&signals(
+            0.20,
+            "I'm not sure, it depends.",
+            "groq",
+            false,
+            1,
+        ));
         assert!((0.35..0.55).contains(&score), "score={score}");
         assert_eq!(level, ConfidenceLevel::Amber);
     }
@@ -284,7 +294,10 @@ mod tests {
         sig.rag_texts = vec!["completely different vocabulary here".to_string()];
         let (score, _) = compute_confidence(&sig);
         // Lower than the matching-overlap green-test because overlap drags quality down.
-        assert!(score < 0.65, "expected reduced score with no overlap, got {score}");
+        assert!(
+            score < 0.65,
+            "expected reduced score with no overlap, got {score}"
+        );
     }
 
     #[test]
@@ -302,14 +315,20 @@ mod tests {
         let fresh = compute_confidence(&signals(0.80, "Answer.", "groq", true, 2));
         let stale = compute_confidence(&signals(0.80, "Answer.", "groq", true, 4));
         assert!(fresh.0 > stale.0, "staleness penalty not applied");
-        assert!((fresh.0 - stale.0 - 0.10).abs() < 0.01, "penalty magnitude wrong");
+        assert!(
+            (fresh.0 - stale.0 - 0.10).abs() < 0.01,
+            "penalty magnitude wrong"
+        );
     }
 
     #[test]
     fn staleness_penalty_not_applied_on_turn_3_or_earlier() {
         let at_turn_3 = compute_confidence(&signals(0.80, "Answer.", "groq", true, 3));
         let no_cache = compute_confidence(&signals(0.80, "Answer.", "groq", false, 3));
-        assert_eq!(at_turn_3.0, no_cache.0, "turn 3 should not incur staleness penalty");
+        assert_eq!(
+            at_turn_3.0, no_cache.0,
+            "turn 3 should not incur staleness penalty"
+        );
     }
 
     #[test]

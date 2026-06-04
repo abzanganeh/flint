@@ -36,16 +36,16 @@ use crate::audio::pipeline::DetectedQuestion;
 use crate::confidence::{compute_confidence, ConfidenceLevel, ConfidenceSignals};
 use crate::digest::Digest;
 use crate::events::{
-    emit_confidence_score, emit_context_truncated, emit_thread_status,
-    ConfidenceScorePayload, ContextTruncatedPayload, ThreadStatusPayload,
+    emit_confidence_score, emit_context_truncated, emit_thread_status, ConfidenceScorePayload,
+    ContextTruncatedPayload, ThreadStatusPayload,
 };
+use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::LLMProvider;
+use crate::orchestrator::prewarm::PreWarmCache;
 use crate::rag::embedder::Embedder;
 use crate::rag::retriever::retrieve;
-use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::session::memory::{ContextBudget, ConversationMemory, MemoryContext, Turn};
-use crate::orchestrator::prewarm::PreWarmCache;
 use crate::state::TurnCancelFlag;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -145,7 +145,6 @@ pub async fn run_orchestrator<R: Runtime>(
     let mut turn_number: usize = 0;
 
     while let Some(first) = question_rx.recv().await {
-
         // ── Silence debounce ─────────────────────────────────────────────────
         // Drain additional questions that arrive within the debounce window,
         // keeping only the last one (most complete utterance).
@@ -294,11 +293,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 
     let memory_ctx = {
         let mem = cfg.memory.lock().await;
-        let budget = ContextBudget::from_window(if using_local {
-            4_096
-        } else {
-            128_000
-        });
+        let budget = ContextBudget::from_window(if using_local { 4_096 } else { 128_000 });
         mem.build_context(
             &budget,
             compression_llm.as_ref(),
@@ -488,10 +483,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     Ok(())
 }
 
-async fn retrieve_rag(
-    cfg: &OrchestratorTurnConfig,
-    embedding: &[f32],
-) -> Result<Vec<ScoredChunk>> {
+async fn retrieve_rag(cfg: &OrchestratorTurnConfig, embedding: &[f32]) -> Result<Vec<ScoredChunk>> {
     let chunks = retrieve(
         cfg.vector_store.as_ref(),
         cfg.session_id,
@@ -560,7 +552,12 @@ mod tests {
             score,
         };
 
-        let chunks = vec![make_chunk(0.9), make_chunk(0.8), make_chunk(0.7), make_chunk(0.6)];
+        let chunks = vec![
+            make_chunk(0.9),
+            make_chunk(0.8),
+            make_chunk(0.7),
+            make_chunk(0.6),
+        ];
         let score = mean_rag_score(&chunks);
         // top 3: (0.9 + 0.8 + 0.7) / 3 = 0.8
         assert!((score - 0.8).abs() < 0.01, "score={score}");

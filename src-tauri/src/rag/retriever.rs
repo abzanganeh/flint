@@ -80,9 +80,7 @@ pub async fn retrieve(
         return Ok(vec![]);
     }
 
-    let candidates = store
-        .query(session_id, query_embedding, 2 * top_k)
-        .await?;
+    let candidates = store.query(session_id, query_embedding, 2 * top_k).await?;
 
     if candidates.is_empty() {
         return Ok(vec![]);
@@ -138,7 +136,11 @@ pub async fn retrieve(
     }
 
     // Sort by original relevance score, highest first.
-    selected.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    selected.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     tracing::debug!(
         top_k,

@@ -279,7 +279,8 @@ mod tests {
     fn drive(transitions: &[SessionState]) -> SessionStateMachine {
         let mut sm = SessionStateMachine::new();
         for &s in transitions {
-            sm.transition(s).unwrap_or_else(|e| panic!("drive failed at {s}: {e}"));
+            sm.transition(s)
+                .unwrap_or_else(|e| panic!("drive failed at {s}: {e}"));
         }
         sm
     }
@@ -621,7 +622,10 @@ mod tests {
         let mut sm = SessionStateMachine::new();
         let result = sm.transition(SessionState::Live);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Idle);
     }
 
@@ -638,7 +642,10 @@ mod tests {
         ]);
         let result = sm.transition(SessionState::Live);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Crashed);
     }
 
@@ -652,7 +659,10 @@ mod tests {
         ]);
         let result = sm.transition(SessionState::Live);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::PreWarming);
     }
 
@@ -661,7 +671,10 @@ mod tests {
         let mut sm = drive(&[SessionState::Configuring, SessionState::Ingesting]);
         let result = sm.transition(SessionState::Ingesting);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Ingesting);
     }
 
@@ -677,7 +690,10 @@ mod tests {
         ]);
         let result = sm.transition(SessionState::Ingesting);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Live);
     }
 
@@ -692,7 +708,10 @@ mod tests {
         ]);
         let result = sm.transition(SessionState::Live);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Rehearsing);
     }
 
@@ -714,7 +733,10 @@ mod tests {
         ]);
         let result = sm.transition(SessionState::Live);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Ended);
     }
 
@@ -731,7 +753,10 @@ mod tests {
         ]);
         let result = sm.transition(SessionState::Ended);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Paused);
     }
 
@@ -740,7 +765,10 @@ mod tests {
         let mut sm = drive(&[SessionState::Configuring]);
         let result = sm.transition(SessionState::Live);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid transition"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid transition"));
         assert_eq!(*sm.current(), SessionState::Configuring);
     }
 

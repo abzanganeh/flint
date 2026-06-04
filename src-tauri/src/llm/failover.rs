@@ -22,7 +22,8 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use crate::events::{
-    emit_failover_triggered, emit_primary_restored, FailoverTriggeredPayload, PrimaryRestoredPayload,
+    emit_failover_triggered, emit_primary_restored, FailoverTriggeredPayload,
+    PrimaryRestoredPayload,
 };
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
@@ -145,10 +146,7 @@ impl FailoverManager {
         estimated_tokens: u32,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         if self.using_local.load(Ordering::Acquire) {
-            return self
-                .local
-                .complete_stream(prompt, config)
-                .await;
+            return self.local.complete_stream(prompt, config).await;
         }
 
         // Acquire rate-limit slot before calling primary.
@@ -166,10 +164,7 @@ impl FailoverManager {
                     self.rate_limiter.set_retry_after(secs).await;
                     // Re-acquire with the updated Retry-After then retry once.
                     self.rate_limiter.acquire(estimated_tokens).await;
-                    return self
-                        .primary
-                        .complete_stream(prompt, config)
-                        .await;
+                    return self.primary.complete_stream(prompt, config).await;
                 }
                 CallError::Hard => {
                     warn!(
@@ -246,7 +241,10 @@ mod tests {
             .clone()
     }
 
-    fn make_failover(primary: Arc<dyn LLMProvider>, local: Arc<dyn LLMProvider>) -> FailoverManager {
+    fn make_failover(
+        primary: Arc<dyn LLMProvider>,
+        local: Arc<dyn LLMProvider>,
+    ) -> FailoverManager {
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
         FailoverManager::new(primary, local, rl)
     }

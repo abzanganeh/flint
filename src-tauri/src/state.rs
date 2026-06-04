@@ -108,8 +108,7 @@ impl AppState {
             .path()
             .app_data_dir()
             .context("Cannot determine app data directory")?;
-        std::fs::create_dir_all(&data_dir)
-            .context("Cannot create app data directory")?;
+        std::fs::create_dir_all(&data_dir).context("Cannot create app data directory")?;
 
         let persistence_path = data_dir.join("flint.db");
         let vec_db_path = data_dir.join("flint_vec.db");
@@ -139,14 +138,13 @@ impl AppState {
         // The model is cached locally after the first run; subsequent startups
         // take < 1 s.
         let embedder = Arc::new(
-            Embedder::new().context("Failed to initialise embedder — check network on first run")?,
+            Embedder::new()
+                .context("Failed to initialise embedder — check network on first run")?,
         );
 
         // ── State machine wired to persistence ───────────────────────────────
         let persister = Arc::clone(&persistence) as Arc<dyn crate::session::state::StatePersister>;
-        let state_machine = Arc::new(Mutex::new(
-            SessionStateMachine::with_persister(persister),
-        ));
+        let state_machine = Arc::new(Mutex::new(SessionStateMachine::with_persister(persister)));
 
         Ok(Self {
             auth,

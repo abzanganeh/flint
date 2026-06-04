@@ -33,9 +33,8 @@ impl LLMProvider for DelayedMockLLMProvider {
         &self,
         _prompt: String,
         _config: CompletionConfig,
-    ) -> anyhow::Result<
-        std::pin::Pin<Box<dyn futures::Stream<Item = anyhow::Result<String>> + Send>>,
-    > {
+    ) -> anyhow::Result<std::pin::Pin<Box<dyn futures::Stream<Item = anyhow::Result<String>> + Send>>>
+    {
         tokio::time::sleep(self.delay).await;
         let response = self.response.clone();
         let stream = futures::stream::once(async move { Ok(response) });

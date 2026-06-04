@@ -37,7 +37,9 @@ fn store_password(user: &str, secret: &SecretString) -> Result<()> {
 
 fn get_password(user: &str) -> Result<SecretString> {
     let entry = Entry::new(SERVICE, user).map_err(|_| anyhow!(READ_CREDENTIALS_MSG))?;
-    let value = entry.get_password().map_err(|_| anyhow!(READ_CREDENTIALS_MSG))?;
+    let value = entry
+        .get_password()
+        .map_err(|_| anyhow!(READ_CREDENTIALS_MSG))?;
     Ok(SecretString::new(value))
 }
 

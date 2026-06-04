@@ -37,8 +37,7 @@ impl Embedder {
     /// (download + ONNX load). Download is skipped when the cache is warm.
     pub fn new() -> Result<Self> {
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15)
-                .with_show_download_progress(false),
+            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
         )
         .context("failed to load bge-small-en-v1.5 embedding model")?;
 
@@ -107,7 +106,11 @@ mod tests {
         let embedding = embedder
             .embed_one("test sentence")
             .expect("embed_one should succeed");
-        assert_eq!(embedding.len(), 384, "bge-small-en-v1.5 must produce 384-dim vectors");
+        assert_eq!(
+            embedding.len(),
+            384,
+            "bge-small-en-v1.5 must produce 384-dim vectors"
+        );
         assert_eq!(embedder.dimensions(), 384);
     }
 
@@ -115,7 +118,9 @@ mod tests {
     fn test_embed_batch_returns_one_vector_per_input() {
         let embedder = shared_embedder();
         let texts = ["hello world", "distributed systems", "Rust programming"];
-        let results = embedder.embed_batch(&texts).expect("batch embed should succeed");
+        let results = embedder
+            .embed_batch(&texts)
+            .expect("batch embed should succeed");
         assert_eq!(results.len(), 3);
         for vec in &results {
             assert_eq!(vec.len(), 384);
@@ -150,7 +155,9 @@ mod tests {
     #[test]
     fn test_empty_batch_returns_empty_vec() {
         let embedder = shared_embedder();
-        let results = embedder.embed_batch(&[]).expect("empty batch should not error");
+        let results = embedder
+            .embed_batch(&[])
+            .expect("empty batch should not error");
         assert!(results.is_empty());
     }
 }

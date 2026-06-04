@@ -1,10 +1,11 @@
-mod auth_session;
 pub mod audio;
+mod auth_session;
 mod commands;
 pub mod confidence;
 pub mod digest;
 mod dto;
 mod events;
+mod health;
 pub mod interfaces;
 mod keychain;
 pub mod llm;
@@ -13,7 +14,6 @@ pub mod rag;
 pub mod session;
 mod state;
 mod supabase;
-mod health;
 pub mod transcription;
 
 use crate::events::{emit_session_state_change, SessionStateChangePayload};

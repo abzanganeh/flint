@@ -354,7 +354,7 @@ mod tests {
 
     // Frame counts derived from §26 timing constants
     const SPEECH_FRAMES_200MS: usize = 10; // 200ms / 20ms = 10 frames
-    const SPEECH_FRAMES_150MS: usize = 7;  // 140ms < 200ms threshold
+    const SPEECH_FRAMES_150MS: usize = 7; // 140ms < 200ms threshold
     const SILENCE_FRAMES_700MS: usize = 35; // 700ms / 20ms = 35 > 30 (600ms)
 
     fn run_frames(
@@ -378,12 +378,8 @@ mod tests {
         let mut chunker = VadChunker::new_for_testing().unwrap();
         let mut chunks: Vec<VadChunk> = Vec::new();
 
-        let speech: Vec<Vec<f32>> = (0..SPEECH_FRAMES_200MS)
-            .map(speech_frame)
-            .collect();
-        let silence: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS)
-            .map(|_| silence_frame())
-            .collect();
+        let speech: Vec<Vec<f32>> = (0..SPEECH_FRAMES_200MS).map(speech_frame).collect();
+        let silence: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS).map(|_| silence_frame()).collect();
 
         run_frames(&mut chunker, &speech, AudioSource::System, &mut chunks);
         run_frames(&mut chunker, &silence, AudioSource::System, &mut chunks);
@@ -404,12 +400,8 @@ mod tests {
         let mut chunker = VadChunker::new_for_testing().unwrap();
         let mut chunks: Vec<VadChunk> = Vec::new();
 
-        let speech: Vec<Vec<f32>> = (0..SPEECH_FRAMES_150MS)
-            .map(speech_frame)
-            .collect();
-        let silence: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS)
-            .map(|_| silence_frame())
-            .collect();
+        let speech: Vec<Vec<f32>> = (0..SPEECH_FRAMES_150MS).map(speech_frame).collect();
+        let silence: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS).map(|_| silence_frame()).collect();
 
         run_frames(&mut chunker, &speech, AudioSource::System, &mut chunks);
         run_frames(&mut chunker, &silence, AudioSource::System, &mut chunks);
@@ -429,28 +421,31 @@ mod tests {
         let mut chunks: Vec<VadChunk> = Vec::new();
 
         // First segment
-        let speech1: Vec<Vec<f32>> = (0..SPEECH_FRAMES_200MS)
-            .map(speech_frame)
-            .collect();
-        let silence1: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS)
-            .map(|_| silence_frame())
-            .collect();
+        let speech1: Vec<Vec<f32>> = (0..SPEECH_FRAMES_200MS).map(speech_frame).collect();
+        let silence1: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS).map(|_| silence_frame()).collect();
         run_frames(&mut chunker, &speech1, AudioSource::System, &mut chunks);
         run_frames(&mut chunker, &silence1, AudioSource::System, &mut chunks);
 
-        assert_eq!(chunks.len(), 1, "First segment: expected 1 chunk after silence");
+        assert_eq!(
+            chunks.len(),
+            1,
+            "First segment: expected 1 chunk after silence"
+        );
 
         // Second segment
         let speech2: Vec<Vec<f32>> = (SPEECH_FRAMES_200MS..SPEECH_FRAMES_200MS * 2)
             .map(speech_frame)
             .collect();
-        let silence2: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS)
-            .map(|_| silence_frame())
-            .collect();
+        let silence2: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS).map(|_| silence_frame()).collect();
         run_frames(&mut chunker, &speech2, AudioSource::System, &mut chunks);
         run_frames(&mut chunker, &silence2, AudioSource::System, &mut chunks);
 
-        assert_eq!(chunks.len(), 2, "Expected 2 total chunks, got {}", chunks.len());
+        assert_eq!(
+            chunks.len(),
+            2,
+            "Expected 2 total chunks, got {}",
+            chunks.len()
+        );
     }
 
     // ── Source tagging ────────────────────────────────────────────────────

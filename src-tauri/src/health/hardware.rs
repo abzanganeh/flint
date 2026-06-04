@@ -305,9 +305,9 @@ fn read_vram_bytes(device: &std::path::Path) -> Option<u64> {
 
 fn classify_pci_vendor(vendor: Option<u32>) -> (bool, bool) {
     match vendor {
-        Some(0x10de) => (true, true),  // NVIDIA
-        Some(0x1002) | Some(0x1022) => (true, true), // AMD
-        Some(0x8086) => (true, false), // Intel integrated
+        Some(0x10de) => (true, true),                                 // NVIDIA
+        Some(0x1002) | Some(0x1022) => (true, true),                  // AMD
+        Some(0x8086) => (true, false),                                // Intel integrated
         Some(0x1414) | Some(0x1af4) | Some(0x1b36) => (false, false), // virtual/basic
         Some(_) => (true, false),
         None => (false, false),

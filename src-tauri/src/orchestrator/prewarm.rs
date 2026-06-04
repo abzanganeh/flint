@@ -117,16 +117,13 @@ impl PreWarmCache {
                 let sim = dot_product(&entry.embedding, embedding);
                 Some((entry, sim))
             })
-            .fold(
-                (None, f32::NEG_INFINITY),
-                |(best_e, best_s), (e, s)| {
-                    if s > best_s {
-                        (Some(e), s)
-                    } else {
-                        (best_e, best_s)
-                    }
-                },
-            );
+            .fold((None, f32::NEG_INFINITY), |(best_e, best_s), (e, s)| {
+                if s > best_s {
+                    (Some(e), s)
+                } else {
+                    (best_e, best_s)
+                }
+            });
 
         if best_sim >= HIT_THRESHOLD {
             best_entry
@@ -165,11 +162,9 @@ fn load_prompt(category: &str, provider_name: &str) -> Result<String> {
     let default = base.join(category).join("default.txt");
 
     if specific.exists() {
-        std::fs::read_to_string(&specific)
-            .with_context(|| format!("read {}", specific.display()))
+        std::fs::read_to_string(&specific).with_context(|| format!("read {}", specific.display()))
     } else {
-        std::fs::read_to_string(&default)
-            .with_context(|| format!("read {}", default.display()))
+        std::fs::read_to_string(&default).with_context(|| format!("read {}", default.display()))
     }
 }
 
@@ -210,12 +205,7 @@ pub async fn run_prewarm(
     embedder: Arc<Embedder>,
     cache: Arc<Mutex<PreWarmCache>>,
 ) -> Result<()> {
-    let questions: Vec<String> = digest
-        .likely_questions
-        .iter()
-        .take(5)
-        .cloned()
-        .collect();
+    let questions: Vec<String> = digest.likely_questions.iter().take(5).cloned().collect();
 
     if questions.is_empty() {
         warn!("digest has no likely_questions — pre-warm skipped");
@@ -227,8 +217,8 @@ pub async fn run_prewarm(
     // Load prompt templates once (outside the spawn tasks).
     let dir_template = load_prompt("directional", &provider_name)
         .context("failed to load directional pre-warm prompt")?;
-    let dep_template = load_prompt("depth", &provider_name)
-        .context("failed to load depth pre-warm prompt")?;
+    let dep_template =
+        load_prompt("depth", &provider_name).context("failed to load depth pre-warm prompt")?;
 
     // Embed all questions in one batch off the async runtime.
     let questions_for_embed = questions.clone();
@@ -366,9 +356,9 @@ fn dot_product(a: &[f32], b: &[f32]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::OnceLock;
     use futures::stream;
     use std::pin::Pin;
+    use std::sync::OnceLock;
 
     use super::*;
     use crate::llm::provider::{LLMProvider, RateLimit};
@@ -377,8 +367,7 @@ mod tests {
 
     fn embedder() -> Arc<Embedder> {
         Arc::clone(
-            EMBEDDER
-                .get_or_init(|| Arc::new(Embedder::new().expect("embedder should load"))),
+            EMBEDDER.get_or_init(|| Arc::new(Embedder::new().expect("embedder should load"))),
         )
     }
 
@@ -415,16 +404,27 @@ mod tests {
             let r = self.response.clone();
             Ok(Box::pin(stream::once(async move { Ok(r) })))
         }
-        fn name(&self) -> &str { "default" }
-        fn is_available(&self) -> bool { true }
-        fn context_window(&self) -> usize { 128_000 }
+        fn name(&self) -> &str {
+            "default"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn context_window(&self) -> usize {
+            128_000
+        }
         fn rate_limit(&self) -> RateLimit {
-            RateLimit { requests_per_minute: 60, tokens_per_minute: 60_000 }
+            RateLimit {
+                requests_per_minute: 60,
+                tokens_per_minute: 60_000,
+            }
         }
     }
 
     fn mock_llm(response: &str) -> Arc<dyn LLMProvider> {
-        Arc::new(FastMockLLM { response: response.to_string() })
+        Arc::new(FastMockLLM {
+            response: response.to_string(),
+        })
     }
 
     // ── PreWarmCache ─────────────────────────────────────────────────────────
@@ -469,7 +469,10 @@ mod tests {
         });
 
         let result = cache.lookup(&unrelated_emb);
-        assert!(result.is_none(), "unrelated query must not hit the interview cache");
+        assert!(
+            result.is_none(),
+            "unrelated query must not hit the interview cache"
+        );
     }
 
     #[test]
@@ -549,10 +552,7 @@ mod tests {
                 !entry.directional_response.is_empty(),
                 "directional must be populated"
             );
-            assert!(
-                !entry.depth_response.is_empty(),
-                "depth must be populated"
-            );
+            assert!(!entry.depth_response.is_empty(), "depth must be populated");
         }
     }
 
@@ -625,6 +625,9 @@ mod tests {
         let hit = cache.lookup(&related_emb);
         // "Can you tell me about yourself?" and "Tell me about yourself" are
         // semantically very similar — expect a cache hit.
-        assert!(hit.is_some(), "semantically equivalent question should hit cache");
+        assert!(
+            hit.is_some(),
+            "semantically equivalent question should hit cache"
+        );
     }
 }

@@ -266,14 +266,18 @@ pub fn emit_audio_thread_error(app_handle: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audio::vad::VAD_FRAME_SAMPLES;
     use crate::audio::rnnoise::RNNOISE_FRAME_SIZE;
+    use crate::audio::vad::VAD_FRAME_SAMPLES;
 
     #[test]
     fn channel_processor_initialises() {
         // Verify all three processors can be constructed on the test host.
         let proc = ChannelProcessor::new();
-        assert!(proc.is_ok(), "ChannelProcessor failed to initialise: {:?}", proc.err());
+        assert!(
+            proc.is_ok(),
+            "ChannelProcessor failed to initialise: {:?}",
+            proc.err()
+        );
     }
 
     #[test]

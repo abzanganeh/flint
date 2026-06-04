@@ -65,7 +65,10 @@ pub struct ContextTruncatedPayload {
     pub session_id: String,
 }
 
-pub fn emit_transcription_chunk<R: Runtime>(app: &AppHandle<R>, payload: TranscriptionChunkPayload) {
+pub fn emit_transcription_chunk<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: TranscriptionChunkPayload,
+) {
     let _ = app.emit("transcription_chunk", payload);
 }
 
@@ -77,7 +80,10 @@ pub fn emit_depth_token<R: Runtime>(app: &AppHandle<R>, payload: DepthTokenPaylo
     let _ = app.emit("depth_token", payload);
 }
 
-pub fn emit_clarifying_question<R: Runtime>(app: &AppHandle<R>, payload: ClarifyingQuestionPayload) {
+pub fn emit_clarifying_question<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: ClarifyingQuestionPayload,
+) {
     let _ = app.emit("clarifying_question", payload);
 }
 
@@ -102,7 +108,10 @@ pub fn emit_token_usage_update<R: Runtime>(app: &AppHandle<R>, payload: TokenUsa
     let _ = app.emit("token_usage_update", payload);
 }
 
-pub fn emit_session_state_change<R: Runtime>(app: &AppHandle<R>, payload: SessionStateChangePayload) {
+pub fn emit_session_state_change<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: SessionStateChangePayload,
+) {
     let _ = app.emit("session_state_change", payload);
 }
 

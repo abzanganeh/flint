@@ -153,9 +153,12 @@ fn emit_cached_depth_tokens<R: Runtime>(
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        emit_depth_token(app, DepthTokenPayload {
-            token: word.to_string(),
-        });
+        emit_depth_token(
+            app,
+            DepthTokenPayload {
+                token: word.to_string(),
+            },
+        );
     }
     text.to_string()
 }
@@ -165,8 +168,8 @@ fn build_prompt(
     provider_name: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
-    let template = load_prompt("depth", provider_name, prompts_dir)
-        .context("failed to load depth prompt")?;
+    let template =
+        load_prompt("depth", provider_name, prompts_dir).context("failed to load depth prompt")?;
 
     let rag_text = ctx
         .rag_chunks

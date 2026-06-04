@@ -263,7 +263,10 @@ mod tests {
     #[test]
     fn parse_sse_line_extracts_token() {
         let line = r#"data: {"id":"1","choices":[{"delta":{"content":"Hello"}}]}"#;
-        assert_eq!(GroqProvider::parse_sse_line(line), Some("Hello".to_string()));
+        assert_eq!(
+            GroqProvider::parse_sse_line(line),
+            Some("Hello".to_string())
+        );
     }
 
     #[test]

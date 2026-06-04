@@ -197,11 +197,7 @@ impl SessionPersistence {
     /// (UPSERT), updates `sessions.state`, and appends to the audit log.
     ///
     /// Called by the [`StatePersister`] impl on every successful transition.
-    pub fn write_state_transition(
-        &self,
-        session_id: Uuid,
-        state: &SessionState,
-    ) -> Result<()> {
+    pub fn write_state_transition(&self, session_id: Uuid, state: &SessionState) -> Result<()> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         let state_str = state.as_str();
@@ -292,10 +288,7 @@ impl SessionPersistence {
     ///
     /// Called on app startup. If `Some(data)` is returned the orchestrator
     /// offers the user the option to resume or discard the session.
-    pub fn load_session_for_recovery(
-        &self,
-        session_id: Uuid,
-    ) -> Result<Option<RecoveryData>> {
+    pub fn load_session_for_recovery(&self, session_id: Uuid) -> Result<Option<RecoveryData>> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
 
@@ -431,8 +424,11 @@ impl SessionPersistence {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
 
-        conn.execute("DELETE FROM transcript_chunks WHERE session_id = ?1", params![sid])
-            .context("delete transcript chunks")?;
+        conn.execute(
+            "DELETE FROM transcript_chunks WHERE session_id = ?1",
+            params![sid],
+        )
+        .context("delete transcript chunks")?;
         conn.execute("DELETE FROM responses WHERE session_id = ?1", params![sid])
             .context("delete responses")?;
         conn.execute(
@@ -525,7 +521,11 @@ mod tests {
 
         let conn = db.db.lock().unwrap();
         let state: String = conn
-            .query_row("SELECT state FROM sessions WHERE id = ?1", params![sid.to_string()], |r| r.get(0))
+            .query_row(
+                "SELECT state FROM sessions WHERE id = ?1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(state, "CONFIGURING");
     }
@@ -534,13 +534,20 @@ mod tests {
     fn test_write_state_transition_updates_existing_row() {
         let db = new_db();
         let sid = Uuid::new_v4();
-        db.write_state_transition(sid, &SessionState::Configuring).unwrap();
-        db.write_state_transition(sid, &SessionState::Ingesting).unwrap();
-        db.write_state_transition(sid, &SessionState::DigestReview).unwrap();
+        db.write_state_transition(sid, &SessionState::Configuring)
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::Ingesting)
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::DigestReview)
+            .unwrap();
 
         let conn = db.db.lock().unwrap();
         let state: String = conn
-            .query_row("SELECT state FROM sessions WHERE id = ?1", params![sid.to_string()], |r| r.get(0))
+            .query_row(
+                "SELECT state FROM sessions WHERE id = ?1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(state, "DIGEST_REVIEW");
 
@@ -565,7 +572,11 @@ mod tests {
 
         let conn = db.db.lock().unwrap();
         let state: String = conn
-            .query_row("SELECT state FROM sessions WHERE id = ?1", params![sid.to_string()], |r| r.get(0))
+            .query_row(
+                "SELECT state FROM sessions WHERE id = ?1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(state, "READY");
     }
@@ -644,10 +655,15 @@ mod tests {
         let session_id = Uuid::new_v4();
         {
             let db = SessionPersistence::new(db_path_str).unwrap();
-            db.write_state_transition(session_id, &SessionState::Live).unwrap();
+            db.write_state_transition(session_id, &SessionState::Live)
+                .unwrap();
             for i in 0..3 {
-                db.write_transcript_chunk(&sample_chunk(session_id, i * 500, &format!("chunk {i}")))
-                    .unwrap();
+                db.write_transcript_chunk(&sample_chunk(
+                    session_id,
+                    i * 500,
+                    &format!("chunk {i}"),
+                ))
+                .unwrap();
             }
             // db is dropped here — simulating a crash (connection closes).
         }
@@ -675,7 +691,8 @@ mod tests {
     fn test_load_session_for_recovery_returns_none_for_clean_session() {
         let db = new_db();
         let sid = Uuid::new_v4();
-        db.write_state_transition(sid, &SessionState::Ended).unwrap();
+        db.write_state_transition(sid, &SessionState::Ended)
+            .unwrap();
         let result = db.load_session_for_recovery(sid).unwrap();
         assert!(result.is_none(), "ENDED session must not trigger recovery");
     }
@@ -685,8 +702,10 @@ mod tests {
         let db = new_db();
         let sid = Uuid::new_v4();
         db.write_state_transition(sid, &SessionState::Live).unwrap();
-        db.write_transcript_chunk(&sample_chunk(sid, 100, "a question")).unwrap();
-        db.write_transcript_chunk(&sample_chunk(sid, 200, "another")).unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 100, "a question"))
+            .unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 200, "another"))
+            .unwrap();
         db.write_response(&sample_response(sid)).unwrap();
 
         let recovery = db.load_session_for_recovery(sid).unwrap();
@@ -702,7 +721,8 @@ mod tests {
     fn test_load_session_for_recovery_covers_crashed_state() {
         let db = new_db();
         let sid = Uuid::new_v4();
-        db.write_state_transition(sid, &SessionState::Crashed).unwrap();
+        db.write_state_transition(sid, &SessionState::Crashed)
+            .unwrap();
         let result = db.load_session_for_recovery(sid).unwrap();
         assert!(result.is_some(), "CRASHED session must trigger recovery");
     }
@@ -711,7 +731,8 @@ mod tests {
     fn test_load_session_for_recovery_covers_ending_state() {
         let db = new_db();
         let sid = Uuid::new_v4();
-        db.write_state_transition(sid, &SessionState::Ending).unwrap();
+        db.write_state_transition(sid, &SessionState::Ending)
+            .unwrap();
         let result = db.load_session_for_recovery(sid).unwrap();
         assert!(result.is_some(), "ENDING session must trigger recovery");
     }
@@ -723,13 +744,17 @@ mod tests {
         let db = new_db();
         let sid = Uuid::new_v4();
         db.write_state_transition(sid, &SessionState::Live).unwrap();
-        db.write_transcript_chunk(&sample_chunk(sid, 100, "text")).unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 100, "text"))
+            .unwrap();
         db.write_response(&sample_response(sid)).unwrap();
 
         db.clear_session(sid).unwrap();
 
         let result = db.load_session_for_recovery(sid).unwrap();
-        assert!(result.is_none(), "cleared session must return None for recovery");
+        assert!(
+            result.is_none(),
+            "cleared session must return None for recovery"
+        );
 
         let conn = db.db.lock().unwrap();
         let tc: i64 = conn
@@ -765,7 +790,8 @@ mod tests {
     fn test_find_incomplete_session_returns_none_when_all_clean() {
         let db = new_db();
         let sid = Uuid::new_v4();
-        db.write_state_transition(sid, &SessionState::Ended).unwrap();
+        db.write_state_transition(sid, &SessionState::Ended)
+            .unwrap();
         let found = db.find_incomplete_session().unwrap();
         assert_eq!(found, None);
     }

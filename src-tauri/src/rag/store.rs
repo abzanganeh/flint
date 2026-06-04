@@ -90,8 +90,7 @@ impl SqliteVecStore {
     pub fn new(db_path: &str) -> Result<Self> {
         register_vec_extension();
 
-        let conn =
-            rusqlite::Connection::open(db_path).context("failed to open vector store DB")?;
+        let conn = rusqlite::Connection::open(db_path).context("failed to open vector store DB")?;
 
         // WAL mode for durability and concurrent read access.
         let mode: String = conn
@@ -128,10 +127,7 @@ impl SqliteVecStore {
     }
 
     /// Create the session's `vec0` virtual table if it does not yet exist.
-    fn ensure_vec_table(
-        conn: &rusqlite::Connection,
-        session_id: Uuid,
-    ) -> Result<()> {
+    fn ensure_vec_table(conn: &rusqlite::Connection, session_id: Uuid) -> Result<()> {
         let table = Self::vec_table(session_id);
         conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS {table}
@@ -271,8 +267,7 @@ impl VectorInterface for SqliteVecStore {
 
                     ScoredChunk {
                         chunk: Chunk {
-                            id: Uuid::parse_str(&chunk_uuid)
-                                .unwrap_or_else(|_| Uuid::nil()),
+                            id: Uuid::parse_str(&chunk_uuid).unwrap_or_else(|_| Uuid::nil()),
                             text,
                             embedding,
                             session_id,
@@ -370,9 +365,7 @@ mod tests {
         let chunk = make_chunk("distributed systems and fault tolerance", session, emb);
         store.ingest(session, vec![chunk]).await.unwrap();
 
-        let query = emb
-            .embed_one("Tell me about distributed systems")
-            .unwrap();
+        let query = emb.embed_one("Tell me about distributed systems").unwrap();
         let results = store.query(session, &query, 5).await.unwrap();
 
         assert_eq!(results.len(), 1);
