@@ -159,18 +159,15 @@ impl LLMProvider for StubLLMProvider {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Test helpers
+// Test / mock providers
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Mock provider that returns a fixed string for every completion call.
-/// Useful in unit tests that need an `LLMProvider` without hitting a real API.
-#[cfg(test)]
 pub struct MockLLMProvider {
     pub response: String,
     pub provider_name: String,
 }
 
-#[cfg(test)]
 #[async_trait]
 impl LLMProvider for MockLLMProvider {
     async fn complete_stream(
@@ -181,6 +178,39 @@ impl LLMProvider for MockLLMProvider {
         let response = self.response.clone();
         let stream = futures::stream::once(async move { Ok(response) });
         Ok(Box::pin(stream))
+    }
+
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn context_window(&self) -> usize {
+        128_000
+    }
+    fn rate_limit(&self) -> RateLimit {
+        RateLimit {
+            requests_per_minute: 60,
+            tokens_per_minute: 6_000,
+        }
+    }
+}
+
+/// Mock provider that always fails with a hard error (for failover tests).
+pub struct FailingMockLLMProvider {
+    pub provider_name: String,
+    pub error_message: String,
+}
+
+#[async_trait]
+impl LLMProvider for FailingMockLLMProvider {
+    async fn complete_stream(
+        &self,
+        _prompt: String,
+        _config: CompletionConfig,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        Err(anyhow::anyhow!("{}", self.error_message))
     }
 
     fn name(&self) -> &str {

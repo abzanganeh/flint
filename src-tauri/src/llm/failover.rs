@@ -24,7 +24,6 @@ use tracing::{info, warn};
 use crate::events::{
     emit_failover_triggered, emit_primary_restored, FailoverTriggeredPayload, PrimaryRestoredPayload,
 };
-use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
 
@@ -65,7 +64,7 @@ fn classify_error(err: &anyhow::Error) -> CallError {
 /// Wrap in `Arc` and share across orchestrator threads.
 pub struct FailoverManager {
     primary: Arc<dyn LLMProvider>,
-    local: Arc<OllamaProvider>,
+    local: Arc<dyn LLMProvider>,
     rate_limiter: Arc<RateLimiter>,
     /// `true` when the local Ollama fallback is currently active.
     using_local: Arc<AtomicBool>,
@@ -78,7 +77,7 @@ impl FailoverManager {
     /// begin monitoring the primary.
     pub fn new(
         primary: Arc<dyn LLMProvider>,
-        local: Arc<OllamaProvider>,
+        local: Arc<dyn LLMProvider>,
         rate_limiter: Arc<RateLimiter>,
     ) -> Self {
         Self {
@@ -93,7 +92,6 @@ impl FailoverManager {
     /// Spawn the background ping loop. Must be called once from an async context.
     pub fn start_ping_loop(&mut self, app: AppHandle) {
         let primary = Arc::clone(&self.primary);
-        let local = Arc::clone(&self.local);
         let using_local = Arc::clone(&self.using_local);
 
         let handle = tokio::spawn(async move {
@@ -126,11 +124,6 @@ impl FailoverManager {
                         tracing::debug!(error = %e, "primary still unavailable");
                         let _ = e;
                     }
-                }
-
-                // Also check if local is still healthy.
-                if !local.check_health().await {
-                    warn!("Ollama fallback also unreachable");
                 }
             }
         });
@@ -212,7 +205,7 @@ impl FailoverManager {
             app,
             FailoverTriggeredPayload {
                 from: self.primary.name().to_string(),
-                to: "ollama".to_string(),
+                to: self.local.name().to_string(),
             },
         );
 
@@ -227,7 +220,7 @@ impl FailoverManager {
     /// Provider name string — primary when healthy, "ollama" during fallback.
     pub fn active_provider_name(&self) -> &str {
         if self.is_using_local() {
-            "ollama"
+            self.local.name()
         } else {
             self.primary.name()
         }
@@ -241,22 +234,34 @@ impl FailoverManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::provider::MockLLMProvider;
+    use crate::llm::provider::{FailingMockLLMProvider, MockLLMProvider};
+    use futures::StreamExt;
+    use tauri::test::{mock_builder, mock_context, noop_assets};
 
-    fn make_failover(primary_response: &str) -> (FailoverManager, Arc<OllamaProvider>) {
-        let primary = Arc::new(MockLLMProvider {
-            response: primary_response.to_string(),
-            provider_name: "mock".to_string(),
-        });
-        let local = Arc::new(OllamaProvider::new().unwrap());
+    fn mock_app_handle() -> tauri::AppHandle {
+        mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock app")
+            .handle()
+            .clone()
+    }
+
+    fn make_failover(primary: Arc<dyn LLMProvider>, local: Arc<dyn LLMProvider>) -> FailoverManager {
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-        let manager = FailoverManager::new(primary, Arc::clone(&local), rl);
-        (manager, local)
+        FailoverManager::new(primary, local, rl)
     }
 
     #[test]
     fn active_provider_name_before_failover() {
-        let (manager, _) = make_failover("hello");
+        let primary = Arc::new(MockLLMProvider {
+            response: "hello".to_string(),
+            provider_name: "mock".to_string(),
+        });
+        let local = Arc::new(MockLLMProvider {
+            response: "local".to_string(),
+            provider_name: "ollama".to_string(),
+        });
+        let manager = make_failover(primary, local);
         assert_eq!(manager.active_provider_name(), "mock");
         assert!(!manager.is_using_local());
     }
@@ -277,5 +282,102 @@ mod tests {
     fn classify_missing_retry_after_defaults_to_ten() {
         let err = anyhow::anyhow!("rate_limit:not_a_number");
         assert_eq!(classify_error(&err), CallError::RateLimit(10));
+    }
+
+    #[tokio::test]
+    async fn hard_failure_fails_over_to_local() {
+        let primary = Arc::new(FailingMockLLMProvider {
+            provider_name: "groq".to_string(),
+            error_message: "connection refused".to_string(),
+        });
+        let local = Arc::new(MockLLMProvider {
+            response: "fallback answer".to_string(),
+            provider_name: "ollama".to_string(),
+        });
+        let manager = make_failover(primary, Arc::clone(&local));
+
+        // No real AppHandle — failover event emission is best-effort (let _ = emit).
+        let app = mock_app_handle();
+
+        let config = CompletionConfig {
+            max_tokens: Some(50),
+            temperature: 0.0,
+            stream: true,
+        };
+        let mut stream = manager
+            .complete_stream("test prompt".to_string(), config, &app, 100)
+            .await
+            .expect("failover should route to local");
+
+        assert!(manager.is_using_local());
+        let token = stream.next().await.unwrap().unwrap();
+        assert_eq!(token, "fallback answer");
+    }
+
+    #[tokio::test]
+    async fn rate_limit_retries_primary_without_failover() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct RateLimitThenOk {
+            calls: AtomicU32,
+            provider_name: String,
+        }
+
+        #[async_trait::async_trait]
+        impl LLMProvider for RateLimitThenOk {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    return Err(anyhow::anyhow!("rate_limit:0"));
+                }
+                let stream = futures::stream::once(async move { Ok("ok".to_string()) });
+                Ok(Box::pin(stream))
+            }
+            fn name(&self) -> &str {
+                &self.provider_name
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> crate::llm::provider::RateLimit {
+                crate::llm::provider::RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 6_000,
+                }
+            }
+        }
+
+        let primary = Arc::new(RateLimitThenOk {
+            calls: AtomicU32::new(0),
+            provider_name: "groq".to_string(),
+        });
+        let local = Arc::new(FailingMockLLMProvider {
+            provider_name: "ollama".to_string(),
+            error_message: "should not be called".to_string(),
+        });
+        let manager = make_failover(primary, local);
+
+        let app = mock_app_handle();
+
+        let config = CompletionConfig {
+            max_tokens: Some(50),
+            temperature: 0.0,
+            stream: true,
+        };
+        let mut stream = manager
+            .complete_stream("test".to_string(), config, &app, 100)
+            .await
+            .expect("429 retry should succeed on primary");
+
+        assert!(!manager.is_using_local());
+        let token = stream.next().await.unwrap().unwrap();
+        assert_eq!(token, "ok");
     }
 }

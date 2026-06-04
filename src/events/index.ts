@@ -52,6 +52,10 @@ export interface SessionStateChangeEventPayload {
   state: SessionState;
 }
 
+export interface ContextTruncatedEventPayload {
+  session_id: string;
+}
+
 export const onTranscriptionChunk = (
   handler: (payload: TranscriptionChunkEventPayload) => void,
 ): Promise<UnlistenFn> =>
@@ -119,5 +123,12 @@ export const onSessionStateChange = (
   handler: (payload: SessionStateChangeEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<SessionStateChangeEventPayload>("session_state_change", (event) =>
+    handler(event.payload),
+  );
+
+export const onContextTruncated = (
+  handler: (payload: ContextTruncatedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<ContextTruncatedEventPayload>("context_truncated", (event) =>
     handler(event.payload),
   );

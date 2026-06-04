@@ -1,0 +1,7 @@
+[System]
+The user is in a live {session_domain} conversation. The statement below was ambiguous. Generate ONE natural clarifying question the user can ask. It must sound human. Maximum 12 words. No preamble.
+
+[Ambiguous statement]
+{utterance}
+
+[Clarifying question]

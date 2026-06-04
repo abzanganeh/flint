@@ -100,3 +100,12 @@ pub fn emit_token_usage_update(app: &AppHandle, payload: TokenUsageUpdatePayload
 pub fn emit_session_state_change(app: &AppHandle, payload: SessionStateChangePayload) {
     let _ = app.emit("session_state_change", payload);
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ContextTruncatedPayload {
+    pub session_id: String,
+}
+
+pub fn emit_context_truncated(app: &AppHandle, payload: ContextTruncatedPayload) {
+    let _ = app.emit("context_truncated", payload);
+}

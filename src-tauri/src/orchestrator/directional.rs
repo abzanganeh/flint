@@ -4,14 +4,14 @@
 //! Prompt loaded from `/prompts/directional/{provider}.txt` or `default.txt`.
 
 use std::path::Path;
-use std::time::Instant;
-
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use tauri::AppHandle;
-use tracing::{info, warn};
+use tracing::{info, info_span, warn};
 
 use crate::events::{
     emit_directional_token, emit_thread_status, DirectionalTokenPayload, ThreadStatusPayload,
@@ -32,7 +32,40 @@ pub async fn run_directional(
     prompts_dir: &Path,
     app: AppHandle,
 ) -> Result<String> {
+    let _span = info_span!(
+        "directional_thread",
+        session_id = %ctx.session_id,
+        turn = ctx.turn_number,
+    )
+    .entered();
+
     let ttft_start = Instant::now();
+    let provider_name = failover.active_provider_name().to_string();
+
+    // Pre-warm cache hit — serve cached response without an LLM round-trip.
+    if let Some(cached) = ctx.cached_directional {
+        let text = emit_cached_tokens(&cached, &app, &ctx.turn_cancel, emit_directional_token);
+        let ttft_ms = ttft_start.elapsed().as_millis() as u64;
+        info!(
+            session_id = %ctx.session_id,
+            event = "directional_thread_complete",
+            thread_type = "directional",
+            ttft_ms,
+            stream_complete_ms = ttft_ms,
+            provider = %provider_name,
+            cache_hit = true,
+            model = %provider_name,
+            "directional served from pre-warm cache"
+        );
+        emit_thread_status(
+            &app,
+            ThreadStatusPayload {
+                thread: "directional".to_string(),
+                status: "ok".to_string(),
+            },
+        );
+        return Ok(text);
+    }
 
     let prompt = build_prompt(&ctx, failover.active_provider_name(), prompts_dir)?;
 
@@ -48,11 +81,13 @@ pub async fn run_directional(
         .await
         .context("directional stream failed")?;
 
-    let provider_name = failover.active_provider_name().to_string();
     let mut full_response = String::new();
     let mut first_token = true;
 
     while let Some(token_result) = stream.next().await {
+        if ctx.turn_cancel.load(Ordering::Acquire) {
+            break;
+        }
         let token = token_result.context("directional token error")?;
 
         if first_token {
@@ -60,8 +95,10 @@ pub async fn run_directional(
             info!(
                 session_id = %ctx.session_id,
                 event = "directional_ttft",
+                thread_type = "directional",
                 ttft_ms,
                 provider = %provider_name,
+                model = %provider_name,
                 "directional first token"
             );
             if ttft_ms > 900 {
@@ -82,8 +119,10 @@ pub async fn run_directional(
     info!(
         session_id = %ctx.session_id,
         event = "directional_thread_complete",
+        thread_type = "directional",
         stream_complete_ms = stream_ms,
         provider = %provider_name,
+        model = %provider_name,
         cache_hit = ctx.from_cache,
         "directional thread finished"
     );
@@ -97,6 +136,24 @@ pub async fn run_directional(
     );
 
     Ok(full_response)
+}
+
+/// Emit cached text word-by-word as token events for incremental UI rendering.
+pub(crate) fn emit_cached_tokens(
+    text: &str,
+    app: &AppHandle,
+    cancel: &Arc<std::sync::atomic::AtomicBool>,
+    emit_fn: fn(&AppHandle, DirectionalTokenPayload),
+) -> String {
+    for word in text.split_inclusive(' ') {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
+        emit_fn(app, DirectionalTokenPayload {
+            token: word.to_string(),
+        });
+    }
+    text.to_string()
 }
 
 fn build_prompt(

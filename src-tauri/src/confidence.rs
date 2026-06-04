@@ -77,6 +77,8 @@ pub struct ConfidenceSignals {
     pub rag_grounding: f32,
     /// Raw response text — used to detect hedging and refusal patterns.
     pub response_text: String,
+    /// Top RAG chunk texts — used for lexical overlap scoring.
+    pub rag_texts: Vec<String>,
     /// Name of the active LLM provider/model (matched against the tier table).
     pub provider_name: String,
     /// Whether this response was served from the pre-warm cache AND more than
@@ -122,12 +124,33 @@ const REFUSAL_PATTERNS: &[&str] = &[
     "outside my knowledge",
 ];
 
+/// Compute lexical overlap between response words and RAG chunk vocabulary.
+fn lexical_overlap(response: &str, rag_texts: &[String]) -> f32 {
+    if rag_texts.is_empty() {
+        return 0.5;
+    }
+    let rag_lower: Vec<String> = rag_texts
+        .iter()
+        .flat_map(|t| t.to_lowercase().split_whitespace().map(str::to_string))
+        .collect();
+    if rag_lower.is_empty() {
+        return 0.5;
+    }
+    let resp_words: Vec<&str> = response.to_lowercase().split_whitespace().collect();
+    if resp_words.is_empty() {
+        return 0.0;
+    }
+    let hits = resp_words
+        .iter()
+        .filter(|w| rag_lower.iter().any(|r| r == *w))
+        .count();
+    hits as f32 / resp_words.len() as f32
+}
+
 /// Compute a response quality signal (0.0–1.0) from the response text.
 ///
-/// Starts at 1.0 and subtracts:
-///  - 0.15 per hedge phrase (capped at −0.30 total)
-///  - 0.40 per refusal phrase (capped at −0.40 total)
-fn response_quality(text: &str) -> f32 {
+/// Blends hedge/refusal heuristics with lexical overlap against RAG chunks.
+fn response_quality(text: &str, rag_texts: &[String]) -> f32 {
     let lower = text.to_lowercase();
 
     let hedge_hits = HEDGE_PATTERNS
@@ -143,7 +166,9 @@ fn response_quality(text: &str) -> f32 {
     let hedge_penalty = (hedge_hits as f32 * 0.15).min(0.30);
     let refusal_penalty = (refusal_hits as f32 * 0.40).min(0.40);
 
-    (1.0_f32 - hedge_penalty - refusal_penalty).max(0.0)
+    let hedge_score = (1.0_f32 - hedge_penalty - refusal_penalty).max(0.0);
+    let overlap = lexical_overlap(text, rag_texts);
+    (0.6 * hedge_score + 0.4 * overlap).clamp(0.0, 1.0)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -162,7 +187,7 @@ pub fn compute_confidence(signals: &ConfidenceSignals) -> (f32, ConfidenceLevel)
         0.0
     };
 
-    let rq = response_quality(&signals.response_text);
+    let rq = response_quality(&signals.response_text, &signals.rag_texts);
     let tier = model_tier_score(&signals.provider_name);
 
     let score = (0.50 * signals.rag_grounding)
@@ -197,6 +222,7 @@ mod tests {
         ConfidenceSignals {
             rag_grounding: rag,
             response_text: response.to_string(),
+            rag_texts: vec!["distributed systems".to_string(), "kafka".to_string()],
             provider_name: provider.to_string(),
             cache_stale,
             local_fallback_active: false,

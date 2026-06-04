@@ -623,7 +623,7 @@ pub async fn start_session(
         }
     };
 
-    let local_provider = Arc::new(
+    let local_provider: Arc<dyn LLMProvider> = Arc::new(
         OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
     );
     let rate_limiter = Arc::new(RateLimiter::new(
@@ -640,7 +640,10 @@ pub async fn start_session(
     let failover = Arc::new(failover);
 
     let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(context_window)));
-    *state.session_memory.lock().await = Some(ConversationMemory::new(context_window));
+    *state.session_memory.lock().await = Some(Arc::clone(&memory));
+
+    let turn_cancel_slot: Arc<tokio::sync::Mutex<Option<crate::state::TurnCancelFlag>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     // Load compression prompt for memory management.
     let compression_prompt = std::fs::read_to_string(
@@ -670,6 +673,8 @@ pub async fn start_session(
         prewarm_cache: Arc::clone(&state.prewarm_cache),
         memory,
         compression_prompt,
+        local_llm: local_provider,
+        turn_cancel_slot: Arc::clone(&turn_cancel_slot),
     };
 
     let orch_app = app.clone();
@@ -693,6 +698,7 @@ pub async fn start_session(
         pipeline,
         orchestrator,
         question_tx,
+        turn_cancel: turn_cancel_slot,
     });
 
     // ── 6. State transitions ──────────────────────────────────────────────
@@ -838,16 +844,28 @@ pub async fn trigger_response(
 
 /// Cancel any running inference — valid only from LIVE.
 ///
-/// No-op in Phase 3; the orchestrator's cancellation token is wired in Phase 4.
+/// Sets the active turn's cancellation flag so in-flight token streams stop.
 #[tauri::command]
 pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> {
-    let machine = state.state_machine.lock().await;
-    if *machine.current() != SessionState::Live {
-        return Err(format!(
-            "cancel_inference is only valid from LIVE (current: {})",
-            machine.current()
-        ));
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "cancel_inference is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
     }
+
+    let guard = state.live_tasks.lock().await;
+    if let Some(handles) = guard.as_ref() {
+        let slot = handles.turn_cancel.lock().await;
+        if let Some(flag) = slot.as_ref() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            info!("cancel_inference: active turn cancelled");
+        }
+    }
+
     Ok(())
 }
 
