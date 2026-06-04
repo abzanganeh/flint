@@ -1,5 +1,7 @@
 # Flint
-
+<p align="center">
+  <img src="src/assets/flint-hero.png" alt="Flint hero" width="720" />
+</p>
 Real-time AI co-pilot desktop app for live conversations (e.g. job interviews). Flint listens to system audio, transcribes locally, and surfaces parallel AI guidance in a stealth overlay — invisible to the other party.
 
 **Repository:** [github.com/abzanganeh/flint](https://github.com/abzanganeh/flint)
