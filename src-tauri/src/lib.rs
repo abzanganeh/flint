@@ -59,7 +59,10 @@ pub fn run() {
             commands::confirm_digest,
             commands::get_digest,
             commands::get_session_snapshot,
-            // Live session stubs (Phase 3)
+            commands::get_rehearsal_completed,
+            commands::run_rehearsal_turn,
+            commands::complete_rehearsal,
+            // Live session (Phase 3+)
             commands::start_session,
             commands::stop_session,
             commands::trigger_response,

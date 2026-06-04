@@ -1,11 +1,7 @@
-import { useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-
-import { onDirectionalToken, onConfidenceScore } from "../events";
+import { rephraseResponse, triggerResponse } from "../commands";
+import { useDirectionalStream } from "../hooks/useDirectionalStream";
 import { useUIStore } from "../store/ui";
 import type { ConfidenceLevel } from "../types";
-
-// ── Confidence colour map ─────────────────────────────────────────────────────
 
 const CONFIDENCE_BORDER: Record<ConfidenceLevel, string> = {
   green: "#22c55e",
@@ -25,17 +21,18 @@ const CONFIDENCE_LABEL: Record<ConfidenceLevel, string> = {
   red: "⚡ Local",
 };
 
-// ── Component ────────────────────────────────────────────────────────────────
+export interface DirectionalPanelProps {
+  sessionId: string;
+}
 
-export interface DirectionalPanelProps {}
+const DirectionalPanel = ({ sessionId }: DirectionalPanelProps) => {
+  useDirectionalStream();
 
-const DirectionalPanel = (_props: DirectionalPanelProps) => {
   const {
     streamingBuffers,
     confidenceLevel,
-    appendDirectionalToken,
-    setConfidenceLevel,
     answerNowMode,
+    lastManualQuestion,
   } = useUIStore();
 
   const text = streamingBuffers.directional;
@@ -46,35 +43,15 @@ const DirectionalPanel = (_props: DirectionalPanelProps) => {
   const confidenceLabel =
     confidenceLevel != null ? CONFIDENCE_LABEL[confidenceLevel] : null;
 
-  useEffect(() => {
-    let cancelled = false;
-    let unlistenToken: (() => void) | null = null;
-    let unlistenConf: (() => void) | null = null;
+  const handleTrigger = () => {
+    if (!lastManualQuestion.trim()) return;
+    void triggerResponse(lastManualQuestion, sessionId);
+  };
 
-    const setup = async () => {
-      const fnToken = await onDirectionalToken(({ token }) => {
-        appendDirectionalToken(token);
-      });
-      const fnConf = await onConfidenceScore(({ level }) => {
-        setConfidenceLevel(level);
-      });
-      if (cancelled) {
-        fnToken();
-        fnConf();
-      } else {
-        unlistenToken = fnToken;
-        unlistenConf = fnConf;
-      }
-    };
-
-    void setup();
-
-    return () => {
-      cancelled = true;
-      unlistenToken?.();
-      unlistenConf?.();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const handleRephrase = () => {
+    if (!lastManualQuestion.trim()) return;
+    void rephraseResponse(lastManualQuestion, sessionId);
+  };
 
   return (
     <div
@@ -88,12 +65,9 @@ const DirectionalPanel = (_props: DirectionalPanelProps) => {
         fontFamily: "'Inter', 'SF Pro Text', system-ui, sans-serif",
         fontSize: "13px",
         borderLeft: `4px solid ${borderColor}`,
-        // In answer-now mode the panel expands to fill full width; the layout
-        // parent handles the sizing, we just increase font here.
         ...(answerNowMode ? { fontSize: "16px" } : {}),
       }}
     >
-      {/* Header */}
       <div
         style={{
           display: "flex",
@@ -127,7 +101,6 @@ const DirectionalPanel = (_props: DirectionalPanelProps) => {
         )}
       </div>
 
-      {/* Streaming text */}
       <div
         style={{
           flex: 1,
@@ -150,7 +123,6 @@ const DirectionalPanel = (_props: DirectionalPanelProps) => {
         )}
       </div>
 
-      {/* Action buttons */}
       {text.length > 0 && (
         <div
           style={{
@@ -161,13 +133,10 @@ const DirectionalPanel = (_props: DirectionalPanelProps) => {
             flexShrink: 0,
           }}
         >
-          <ActionButton
-            label="Answer This"
-            onClick={() => void invoke("trigger_response")}
-          />
+          <ActionButton label="Answer This" onClick={handleTrigger} />
           <ActionButton
             label="Rephrase"
-            onClick={() => void invoke("trigger_response")}
+            onClick={handleRephrase}
             secondary
           />
         </div>
@@ -176,15 +145,17 @@ const DirectionalPanel = (_props: DirectionalPanelProps) => {
   );
 };
 
-// ── Action button ─────────────────────────────────────────────────────────────
-
 interface ActionButtonProps {
   label: string;
   onClick: () => void;
   secondary?: boolean;
 }
 
-const ActionButton = ({ label, onClick, secondary = false }: ActionButtonProps) => (
+const ActionButton = ({
+  label,
+  onClick,
+  secondary = false,
+}: ActionButtonProps) => (
   <button
     onClick={onClick}
     style={{

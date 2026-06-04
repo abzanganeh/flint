@@ -1,11 +1,13 @@
+import { useRagChunks } from "../hooks/useRagChunks";
 import { useUIStore } from "../store/ui";
 
-// ── Component ────────────────────────────────────────────────────────────────
+export interface ContextPanelProps {
+  sessionId: string;
+}
 
-export interface ContextPanelProps {}
-
-const ContextPanel = (_props: ContextPanelProps) => {
-  const { ragChunks } = useUIStore();
+const ContextPanel = ({ sessionId }: ContextPanelProps) => {
+  useRagChunks(sessionId);
+  const { ragChunks, digestSummary } = useUIStore();
 
   return (
     <div
@@ -20,7 +22,6 @@ const ContextPanel = (_props: ContextPanelProps) => {
         fontSize: "13px",
       }}
     >
-      {/* Header */}
       <div
         style={{
           padding: "6px 12px",
@@ -35,7 +36,21 @@ const ContextPanel = (_props: ContextPanelProps) => {
         Context
       </div>
 
-      {/* RAG chunks */}
+      {digestSummary && (
+        <div
+          style={{
+            padding: "8px 12px",
+            borderBottom: "1px solid #1a1d26",
+            color: "#9ca3af",
+            fontSize: "11px",
+            lineHeight: 1.5,
+            flexShrink: 0,
+          }}
+        >
+          {digestSummary}
+        </div>
+      )}
+
       <div
         style={{
           flex: 1,
@@ -67,8 +82,6 @@ const ContextPanel = (_props: ContextPanelProps) => {
   );
 };
 
-// ── Chunk row ─────────────────────────────────────────────────────────────────
-
 interface ChunkRowProps {
   text: string;
   score: number;
@@ -76,7 +89,8 @@ interface ChunkRowProps {
 
 const ChunkRow = ({ text, score }: ChunkRowProps) => {
   const pct = Math.round(score * 100);
-  const barColor = score >= 0.75 ? "#22c55e" : score >= 0.5 ? "#3b82f6" : "#f59e0b";
+  const barColor =
+    score >= 0.75 ? "#22c55e" : score >= 0.5 ? "#3b82f6" : "#f59e0b";
 
   return (
     <div
@@ -85,7 +99,6 @@ const ChunkRow = ({ text, score }: ChunkRowProps) => {
         borderBottom: "1px solid #1a1d26",
       }}
     >
-      {/* Score bar */}
       <div
         style={{
           display: "flex",
@@ -113,7 +126,12 @@ const ChunkRow = ({ text, score }: ChunkRowProps) => {
           />
         </div>
         <span
-          style={{ color: barColor, fontSize: "10px", fontWeight: 600, minWidth: 28 }}
+          style={{
+            color: barColor,
+            fontSize: "10px",
+            fontWeight: 600,
+            minWidth: 28,
+          }}
         >
           {pct}%
         </span>

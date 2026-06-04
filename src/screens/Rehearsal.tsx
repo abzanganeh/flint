@@ -1,8 +1,13 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 
 import OverlayLayout from "../components/OverlayLayout";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
+import {
+  completeRehearsal,
+  runRehearsalTurn,
+} from "../commands";
+import { useHotkeys } from "../hooks/useHotkeys";
+import { useTokenUsage } from "../hooks/useTokenUsage";
 import DirectionalPanel from "../panels/DirectionalPanel";
 import DepthPanel from "../panels/DepthPanel";
 import ClarifyingPanel from "../panels/ClarifyingPanel";
@@ -10,21 +15,24 @@ import ContextPanel from "../panels/ContextPanel";
 import TranscriptPanel from "../panels/TranscriptPanel";
 import { useUIStore } from "../store/ui";
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
 export interface RehearsalProps {
   sessionId: string;
   onComplete: () => void;
 }
 
-// ── Component ────────────────────────────────────────────────────────────────
-
 const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
   const [question, setQuestion] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const { streamingBuffers, clearStreamingBuffers, clearClarifyingQuestions } =
-    useUIStore();
+  const {
+    streamingBuffers,
+    clearStreamingBuffers,
+    clearClarifyingQuestions,
+    setLastManualQuestion,
+  } = useUIStore();
+
+  useTokenUsage();
+  useHotkeys(sessionId, question, submitted);
 
   const hasResponse =
     streamingBuffers.directional.length > 0 ||
@@ -35,12 +43,10 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
     setError(null);
     clearStreamingBuffers();
     clearClarifyingQuestions();
+    setLastManualQuestion(question.trim());
 
     try {
-      // Use the real start_session + trigger_response path so the rehearsal
-      // exercises the full orchestrator stack, not a separate mock.
-      await invoke("start_session", { sessionId });
-      await invoke("trigger_response");
+      await runRehearsalTurn(sessionId, question.trim());
       setSubmitted(true);
     } catch (e) {
       setError(String(e));
@@ -49,9 +55,10 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
 
   const handleComplete = async () => {
     try {
-      await invoke("stop_session");
-    } catch {
-      // Session may already be stopped; proceed regardless.
+      await completeRehearsal(sessionId);
+    } catch (e) {
+      setError(String(e));
+      return;
     }
     onComplete();
   };
@@ -67,7 +74,6 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
         fontFamily: "'Inter', 'SF Pro Text', system-ui, sans-serif",
       }}
     >
-      {/* Top bar */}
       <div
         style={{
           display: "flex",
@@ -90,11 +96,10 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
           Rehearsal Mode
         </span>
         <span style={{ color: "#374151", fontSize: "11px" }}>
-          — practice before going live. This session is not saved.
+          — practice before going live. Responses are not saved as a session.
         </span>
       </div>
 
-      {/* Question input */}
       {!submitted && (
         <div
           style={{
@@ -143,28 +148,27 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
             Ask
           </button>
           {error && (
-            <span style={{ color: "#ef4444", fontSize: "12px", alignSelf: "center" }}>
+            <span
+              style={{ color: "#ef4444", fontSize: "12px", alignSelf: "center" }}
+            >
               {error}
             </span>
           )}
         </div>
       )}
 
-      {/* Panels — same layout as live session */}
       <div style={{ flex: 1, overflow: "hidden" }}>
         <OverlayLayout
           transcript={<TranscriptPanel />}
-          directional={<DirectionalPanel />}
+          directional={<DirectionalPanel sessionId={sessionId} />}
           depth={<DepthPanel />}
           clarifying={<ClarifyingPanel />}
-          context={<ContextPanel />}
+          context={<ContextPanel sessionId={sessionId} />}
         />
       </div>
 
-      {/* Token budget */}
       <TokenBudgetIndicator />
 
-      {/* Complete rehearsal button — only enabled once a response has arrived */}
       <div
         style={{
           padding: "10px 16px",
@@ -180,7 +184,7 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
           disabled={!hasResponse}
           title={
             hasResponse
-              ? "Complete rehearsal and go live"
+              ? "Complete rehearsal and continue to live session"
               : "Wait for a response before completing rehearsal"
           }
           style={{

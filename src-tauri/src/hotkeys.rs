@@ -1,28 +1,22 @@
 //! Global hotkey registration for Flint's Ctrl+Option/Alt chord system.
 //!
 //! Hotkey contract (§FR-5.11):
-//!   Ctrl+Alt          — manual trigger (fire orchestrator turn)
+//!   Ctrl+Alt          — manual trigger (React handles tap/hold/double-tap timing)
 //!   Ctrl+Alt+Shift    — panic hide/reveal overlay
 //!
-//! "Hold 2s = Answer Now" and "double-tap = cancel" are handled in the React
-//! layer via event timing on top of the tap event, not registered as separate
-//! OS shortcuts (OS global shortcuts do not expose hold/double-tap semantics).
+//! Hold 2s = Answer Now and double-tap = cancel are handled in the React layer
+//! via event timing on `hotkey_trigger`, not as separate OS shortcuts.
 
 use tauri::{AppHandle, Manager, Runtime};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tracing::{info, warn};
 
-use crate::events::{emit_session_state_change, SessionStateChangePayload};
+use crate::events::{emit_hotkey_trigger, HotkeyTriggerPayload};
 
-const SHORTCUT_TRIGGER: &str = "Ctrl+Alt+T";
-const SHORTCUT_PANIC: &str = "Ctrl+Alt+Shift+H";
+const SHORTCUT_TRIGGER: &str = "Control+Alt";
+const SHORTCUT_PANIC: &str = "Control+Alt+Shift";
 
 /// Register all Flint global shortcuts.
-///
-/// Called once from `lib.rs::run()` during app setup. Safe to call on every
-/// platform; on Wayland/X11 desktop environments the OS may reject shortcuts
-/// that conflict with the compositor — we log a warning and continue rather
-/// than blocking startup.
 pub fn register_hotkeys<R: Runtime>(app: &AppHandle<R>) {
     let app_trigger = app.clone();
     let app_panic = app.clone();
@@ -75,33 +69,35 @@ pub fn register_hotkeys<R: Runtime>(app: &AppHandle<R>) {
 }
 
 fn fire_trigger<R: Runtime>(app: &AppHandle<R>) {
-    // Emit a state-change-adjacent event so the React layer knows a manual
-    // trigger fired. The orchestrator picks it up via the trigger_response
-    // command — here we just make the window visible and forward the signal.
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.show();
         let _ = win.set_focus();
     }
-    // Emit a thin JSON event that the React layer listens to.
-    let _ = app.emit("hotkey_trigger", ());
+    emit_hotkey_trigger(
+        app,
+        HotkeyTriggerPayload {
+            action: "tap".to_string(),
+        },
+    );
 }
 
 fn toggle_overlay<R: Runtime>(app: &AppHandle<R>) {
+    use crate::events::{emit_overlay_visibility, OverlayVisibilityPayload};
+
     if let Some(win) = app.get_webview_window("main") {
         let visible = win.is_visible().unwrap_or(true);
         if visible {
             let _ = win.hide();
-            info!(event = "overlay_hidden");
+            emit_overlay_visibility(
+                app,
+                OverlayVisibilityPayload { hidden: true },
+            );
         } else {
             let _ = win.show();
             let _ = win.set_focus();
-            info!(event = "overlay_revealed");
-            // Re-emit IDLE so React re-renders if it missed state while hidden.
-            emit_session_state_change(
+            emit_overlay_visibility(
                 app,
-                SessionStateChangePayload {
-                    state: "IDLE".to_string(),
-                },
+                OverlayVisibilityPayload { hidden: false },
             );
         }
     }

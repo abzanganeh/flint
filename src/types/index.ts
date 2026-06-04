@@ -69,6 +69,9 @@ export interface UIState {
     depth: string;
   };
   confidenceLevel: ConfidenceLevel | null;
+  depthPrePrepared: boolean;
+  digestSummary: string | null;
+  lastManualQuestion: string;
   clarifyingQuestions: ClarifyingQuestion[];
   ragChunks: RagChunk[];
   tokenUsage: TokenUsage;

@@ -80,14 +80,40 @@ export const startSession = (sessionId: string): Promise<void> =>
 
 export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 
-export const triggerResponse = (): Promise<void> =>
-  invoke<void>("trigger_response");
+export const triggerResponse = (
+  question: string,
+  sessionId: string,
+  rephrase?: boolean,
+): Promise<void> =>
+  invoke<void>("trigger_response", { question, sessionId, rephrase: rephrase ?? null });
 
 export const cancelInference = (): Promise<void> =>
   invoke<void>("cancel_inference");
 
-export const panicHideOverlay = (): Promise<void> =>
-  invoke<void>("panic_hide_overlay");
+export const panicHideOverlay = (): Promise<boolean> =>
+  invoke<boolean>("panic_hide_overlay");
+
+export const getRehearsalCompleted = (): Promise<boolean> =>
+  invoke<boolean>("get_rehearsal_completed");
+
+export const runRehearsalTurn = (
+  sessionId: string,
+  question: string,
+  rephrase?: boolean,
+): Promise<void> =>
+  invoke<void>("run_rehearsal_turn", {
+    sessionId,
+    question,
+    rephrase: rephrase ?? null,
+  });
+
+export const completeRehearsal = (sessionId: string): Promise<void> =>
+  invoke<void>("complete_rehearsal", { sessionId });
+
+export const rephraseResponse = (
+  question: string,
+  sessionId: string,
+): Promise<void> => triggerResponse(question, sessionId, true);
 
 export const switchProvider = (name: string): Promise<void> =>
   invoke<void>("switch_provider", { name });

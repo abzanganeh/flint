@@ -1,51 +1,23 @@
-import { useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
-
-import { onDepthToken } from "../events";
+import { useDepthStream } from "../hooks/useDepthStream";
 import { useUIStore } from "../store/ui";
 
-// ── Component ────────────────────────────────────────────────────────────────
+export interface DepthPanelProps {}
 
-export interface DepthPanelProps {
-  // Exposed for testing — in production the store drives state.
-  isPrePrepared?: boolean;
-}
+const DepthPanel = (_props: DepthPanelProps) => {
+  useDepthStream();
 
-const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
-  const { streamingBuffers, appendDepthToken, confidenceLevel } = useUIStore();
-
+  const { streamingBuffers, depthPrePrepared } = useUIStore();
   const text = streamingBuffers.depth;
 
-  // A response is pre-prepared if it was served from the pre-warm cache.
-  // The Rust side emits a confidence_score with the ⚡ icon signal — we check
-  // the prop override first (for tests), otherwise treat red confidence as
-  // local fallback (not pre-prepared) and rely on the parent passing the flag.
-  const showPrePreparedBadge =
-    isPrePrepared ||
-    (confidenceLevel === "green" && text.length > 0 && false); // placeholder; parent drives
+  const sections = text
+    .split(/\n(?=\d+\.|[-*]|\*\*)/)
+    .map((s) => s.trim())
+    .filter(Boolean);
 
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-
-    const setup = async () => {
-      const fn = await onDepthToken(({ token }) => {
-        appendDepthToken(token);
-      });
-      if (cancelled) {
-        fn();
-      } else {
-        unlisten = fn;
-      }
-    };
-
-    void setup();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const handleCopy = () => {
+    if (text.length === 0) return;
+    void navigator.clipboard.writeText(text);
+  };
 
   return (
     <div
@@ -60,7 +32,6 @@ const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
         fontSize: "13px",
       }}
     >
-      {/* Header */}
       <div
         style={{
           display: "flex",
@@ -81,7 +52,7 @@ const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
         >
           Depth
         </span>
-        {showPrePreparedBadge && (
+        {depthPrePrepared && text.length > 0 && (
           <span
             style={{
               fontSize: "10px",
@@ -90,12 +61,11 @@ const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
               letterSpacing: "0.04em",
             }}
           >
-            ⚡ pre-prepared
+            pre-prepared
           </span>
         )}
       </div>
 
-      {/* Response text */}
       <div
         style={{
           flex: 1,
@@ -103,8 +73,6 @@ const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
           padding: "10px 12px",
           color: "#e5e7eb",
           lineHeight: "1.65",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
         }}
       >
         {text.length === 0 ? (
@@ -113,12 +81,32 @@ const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
           >
             Waiting for depth response…
           </span>
+        ) : sections.length > 1 ? (
+          sections.map((section, i) => (
+            <p
+              key={i}
+              style={{
+                margin: "0 0 10px",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {section}
+            </p>
+          ))
         ) : (
-          text
+          <p
+            style={{
+              margin: 0,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+            }}
+          >
+            {text}
+          </p>
         )}
       </div>
 
-      {/* Action button */}
       {text.length > 0 && (
         <div
           style={{
@@ -128,7 +116,7 @@ const DepthPanel = ({ isPrePrepared = false }: DepthPanelProps) => {
           }}
         >
           <button
-            onClick={() => void invoke("trigger_response")}
+            onClick={handleCopy}
             style={{
               padding: "4px 10px",
               fontSize: "11px",

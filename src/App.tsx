@@ -9,7 +9,9 @@ import { SessionState } from "./types";
 import "./App.css";
 import DigestReview from "./screens/DigestReview";
 import HealthCheck from "./screens/HealthCheck";
+import LiveOverlay from "./screens/LiveOverlay";
 import Onboarding from "./screens/Onboarding";
+import Rehearsal from "./screens/Rehearsal";
 import SessionDesign from "./screens/SessionDesign";
 
 type AppScreen =
@@ -18,7 +20,8 @@ type AppScreen =
   | "health"
   | "session-design"
   | "digest-review"
-  | "shell";
+  | "rehearsal"
+  | "live";
 
 function App() {
   const [screen, setScreen] = useState<AppScreen>("loading");
@@ -59,7 +62,9 @@ function App() {
     };
 
     void bootstrap();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   if (screen === "loading") {
@@ -98,8 +103,29 @@ function App() {
     return (
       <DigestReview
         sessionId={sessionId}
-        onComplete={() => setScreen("shell")}
+        onComplete={() => setScreen("rehearsal")}
         onStartOver={() => {
+          setSessionId(null);
+          setScreen("session-design");
+        }}
+      />
+    );
+  }
+
+  if (screen === "rehearsal" && sessionId) {
+    return (
+      <Rehearsal
+        sessionId={sessionId}
+        onComplete={() => setScreen("live")}
+      />
+    );
+  }
+
+  if (screen === "live" && sessionId) {
+    return (
+      <LiveOverlay
+        sessionId={sessionId}
+        onEnded={() => {
           setSessionId(null);
           setScreen("session-design");
         }}

@@ -20,10 +20,18 @@ interface UIStore extends UIState {
   appendDepthToken: (token: string) => void;
   clearStreamingBuffers: () => void;
   setConfidenceLevel: (level: ConfidenceLevel | null) => void;
+  setDepthPrePrepared: (depthPrePrepared: boolean) => void;
+  setDigestSummary: (digestSummary: string | null) => void;
+  setLastManualQuestion: (question: string) => void;
   addClarifyingQuestion: (q: ClarifyingQuestion) => void;
   clearClarifyingQuestions: () => void;
   setRagChunks: (chunks: RagChunk[]) => void;
   setTokenUsage: (usage: TokenUsage) => void;
+  accumulateTokenUsage: (
+    input: number,
+    output: number,
+    costDelta: number,
+  ) => void;
   setNotificationQueue: (notificationQueue: Notification[]) => void;
   pushNotification: (n: Notification) => void;
   setTheme: (theme: UIState["theme"]) => void;
@@ -61,6 +69,9 @@ export const useUIStore = create<UIStore>((set) => ({
   focusedPanel: null,
   streamingBuffers: { directional: "", depth: "" },
   confidenceLevel: null,
+  depthPrePrepared: false,
+  digestSummary: null,
+  lastManualQuestion: "",
   clarifyingQuestions: [],
   ragChunks: [],
   tokenUsage: defaultTokenUsage,
@@ -110,9 +121,18 @@ export const useUIStore = create<UIStore>((set) => ({
     })),
 
   clearStreamingBuffers: () =>
-    set({ streamingBuffers: { directional: "", depth: "" } }),
+    set({
+      streamingBuffers: { directional: "", depth: "" },
+      depthPrePrepared: false,
+    }),
 
   setConfidenceLevel: (confidenceLevel) => set({ confidenceLevel }),
+
+  setDepthPrePrepared: (depthPrePrepared) => set({ depthPrePrepared }),
+
+  setDigestSummary: (digestSummary) => set({ digestSummary }),
+
+  setLastManualQuestion: (lastManualQuestion) => set({ lastManualQuestion }),
 
   addClarifyingQuestion: (q) =>
     set((s) => ({
@@ -126,6 +146,16 @@ export const useUIStore = create<UIStore>((set) => ({
   setRagChunks: (ragChunks) => set({ ragChunks }),
 
   setTokenUsage: (tokenUsage) => set({ tokenUsage }),
+
+  accumulateTokenUsage: (input, output, costDelta) =>
+    set((s) => ({
+      tokenUsage: {
+        input: s.tokenUsage.input + input,
+        output: s.tokenUsage.output + output,
+        total: s.tokenUsage.total + input + output,
+        costEstimate: s.tokenUsage.costEstimate + costDelta,
+      },
+    })),
 
   setNotificationQueue: (notificationQueue) => set({ notificationQueue }),
 
