@@ -229,3 +229,36 @@ impl LLMProvider for FailingMockLLMProvider {
         }
     }
 }
+
+/// Test-only mock that panics inside `complete_stream`.
+/// Used to exercise orchestrator panic-recovery branches.
+pub struct PanickingMockLLMProvider {
+    pub provider_name: String,
+}
+
+#[async_trait]
+impl LLMProvider for PanickingMockLLMProvider {
+    async fn complete_stream(
+        &self,
+        _prompt: String,
+        _config: CompletionConfig,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        panic!("intentional panic from PanickingMockLLMProvider");
+    }
+
+    fn name(&self) -> &str {
+        &self.provider_name
+    }
+    fn is_available(&self) -> bool {
+        true
+    }
+    fn context_window(&self) -> usize {
+        128_000
+    }
+    fn rate_limit(&self) -> RateLimit {
+        RateLimit {
+            requests_per_minute: 60,
+            tokens_per_minute: 6_000,
+        }
+    }
+}

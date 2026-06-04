@@ -112,6 +112,121 @@ fn mean_rag_score(chunks: &[ScoredChunk]) -> f32 {
     sum / chunks.len().min(3) as f32
 }
 
+/// Collapse the nested `JoinError`/thread `Result` into a plain text payload.
+/// Emits a `thread_status` error event whenever the task panicked or the
+/// thread itself returned an error. Extracted so tarpaulin attributes the
+/// panic and error branches to the call site (inline closures + macros were
+/// reported as uncovered even when hit).
+fn persist_thread_response(
+    persistence: &SessionPersistence,
+    session_id: Uuid,
+    response_type: ResponseType,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let r = Response {
+        id: Uuid::new_v4(),
+        session_id,
+        response_type,
+        content: text.to_string(),
+        confidence: 0.0,
+    };
+    if let Err(e) = persistence.write_response(&r) {
+        warn!(
+            session_id = %session_id,
+            error = %e,
+            "thread persist failed"
+        );
+    }
+}
+
+fn collect_thread_text<R: Runtime>(
+    result: std::result::Result<Result<String>, tokio::task::JoinError>,
+    session_id: Uuid,
+    thread: &str,
+    app: &AppHandle<R>,
+) -> String {
+    match result {
+        Ok(Ok(text)) => text,
+        Ok(Err(e)) => {
+            log_thread_failed(session_id, thread, &e);
+            emit_thread_error(app, thread);
+            String::new()
+        }
+        Err(join_err) => {
+            log_thread_panicked(session_id, thread, &join_err);
+            emit_thread_error(app, thread);
+            String::new()
+        }
+    }
+}
+
+fn collect_clarifying(
+    result: std::result::Result<Result<Option<String>>, tokio::task::JoinError>,
+    session_id: Uuid,
+) -> bool {
+    match result {
+        Ok(Ok(Some(_))) => true,
+        Ok(Ok(None)) => false,
+        Ok(Err(e)) => {
+            log_thread_failed(session_id, "clarifying", &e);
+            false
+        }
+        Err(join_err) => {
+            log_thread_panicked(session_id, "clarifying", &join_err);
+            false
+        }
+    }
+}
+
+fn emit_thread_error<R: Runtime>(app: &AppHandle<R>, thread: &str) {
+    emit_thread_status(
+        app,
+        ThreadStatusPayload {
+            thread: thread.to_string(),
+            status: "error".to_string(),
+        },
+    );
+}
+
+fn log_thread_failed(session_id: Uuid, thread: &str, error: &anyhow::Error) {
+    warn!(session_id = %session_id, thread, error = %error, "thread failed");
+}
+
+fn log_thread_panicked(session_id: Uuid, thread: &str, join_err: &tokio::task::JoinError) {
+    warn!(session_id = %session_id, thread, "task panicked: {join_err}");
+}
+
+/// Helper extracted so tarpaulin attributes coverage to the call site.
+/// Inline `info!` arguments are otherwise reported as uncovered even when hit.
+#[allow(clippy::too_many_arguments)]
+fn log_confidence_computed(
+    session_id: Uuid,
+    turn: usize,
+    confidence_score: f32,
+    confidence_level: ConfidenceLevel,
+    provider: &str,
+    cache_hit: bool,
+    rag_latency_ms: u64,
+    failover_triggered: bool,
+) {
+    info!(
+        session_id = %session_id,
+        turn = turn,
+        event = "directional_thread_complete",
+        thread_type = "directional",
+        confidence = confidence_score,
+        level = %confidence_level.as_str(),
+        provider = %provider,
+        cache_hit = cache_hit,
+        rag_latency_ms,
+        failover_triggered = failover_triggered,
+        "confidence computed"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Main orchestrator loop
 // ──────────────────────────────────────────────────────────────────────────────
@@ -391,66 +506,14 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // Collect results — one thread failing never crashes the others.
     let (dir_result, dep_result, _cla_result) = tokio::join!(dir_task, dep_task, cla_task);
 
-    let directional_text = dir_result
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, "directional task panicked: {e}");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "directional".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            Err(anyhow::anyhow!("directional panic"))
-        })
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, error = %e, "directional thread failed");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "directional".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            String::new()
-        });
-
-    let depth_text = dep_result
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, "depth task panicked: {e}");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "depth".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            Err(anyhow::anyhow!("depth panic"))
-        })
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, error = %e, "depth thread failed");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "depth".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            String::new()
-        });
-
-    let clarifying_emitted = match _cla_result {
-        Ok(Ok(Some(_))) => true,
-        Ok(Ok(None)) => false,
-        Ok(Err(e)) => {
-            warn!(session_id = %cfg.session_id, error = %e, "clarifying thread failed");
-            false
-        }
-        Err(e) => {
-            warn!(session_id = %cfg.session_id, "clarifying task panicked: {e}");
-            false
-        }
-    };
+    let directional_text = collect_thread_text(
+        dir_result,
+        cfg.session_id,
+        "directional",
+        &app,
+    );
+    let depth_text = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
+    let clarifying_emitted = collect_clarifying(_cla_result, cfg.session_id);
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
     if clarifying_emitted {
@@ -478,18 +541,15 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         };
         let (confidence_score, confidence_level) = compute_confidence(&signals);
 
-        info!(
-            session_id = %cfg.session_id,
-            turn = cfg.turn_number,
-            event = "directional_thread_complete",
-            thread_type = "directional",
-            confidence = confidence_score,
-            level = %confidence_level.as_str(),
-            provider = %cfg.failover.active_provider_name(),
-            cache_hit = from_cache,
+        log_confidence_computed(
+            cfg.session_id,
+            cfg.turn_number,
+            confidence_score,
+            confidence_level,
+            cfg.failover.active_provider_name(),
+            from_cache,
             rag_latency_ms,
-            failover_triggered = cfg.failover.is_using_local(),
-            "confidence computed"
+            cfg.failover.is_using_local(),
         );
 
         emit_confidence_score(
@@ -501,31 +561,18 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     }
 
     // ── 7. Persist responses — crash-recovery insurance ───────────────────
-    if !directional_text.is_empty() {
-        let r = Response {
-            id: Uuid::new_v4(),
-            session_id: cfg.session_id,
-            response_type: ResponseType::Directional,
-            content: directional_text.clone(),
-            confidence: 0.0,
-        };
-        if let Err(e) = cfg.persistence.write_response(&r) {
-            warn!(session_id = %cfg.session_id, error = %e, "directional persist failed");
-        }
-    }
-
-    if !depth_text.is_empty() {
-        let r = Response {
-            id: Uuid::new_v4(),
-            session_id: cfg.session_id,
-            response_type: ResponseType::Depth,
-            content: depth_text.clone(),
-            confidence: 0.0,
-        };
-        if let Err(e) = cfg.persistence.write_response(&r) {
-            warn!(session_id = %cfg.session_id, error = %e, "depth persist failed");
-        }
-    }
+    persist_thread_response(
+        &cfg.persistence,
+        cfg.session_id,
+        ResponseType::Directional,
+        &directional_text,
+    );
+    persist_thread_response(
+        &cfg.persistence,
+        cfg.session_id,
+        ResponseType::Depth,
+        &depth_text,
+    );
 
     // ── 8. Update conversation memory ─────────────────────────────────────
     {

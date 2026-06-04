@@ -8,10 +8,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use futures::StreamExt;
 use tauri::{AppHandle, Runtime};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::events::{emit_depth_token, emit_thread_status, DepthTokenPayload, ThreadStatusPayload};
 use crate::llm::failover::FailoverManager;
@@ -37,35 +38,18 @@ pub async fn run_depth<R: Runtime>(
         let mut full_response = emit_cached_depth_tokens(&cached, &app, &ctx.turn_cancel);
 
         if ctx.turn_number >= 3 {
-            info!(
-                session_id = %ctx.session_id,
-                turn = ctx.turn_number,
-                "cache hit turn ≥ 3 — running fresh depth in parallel"
-            );
+            log_refresh_on_turn_three(ctx.session_id, ctx.turn_number);
             match run_fresh_depth(&ctx, Arc::clone(&failover), prompts_dir, &app).await {
                 Ok(fresh) if !fresh.is_empty() => full_response = fresh,
                 Ok(_) => {}
                 Err(e) => {
-                    warn!(
-                        session_id = %ctx.session_id,
-                        error = %e,
-                        "fresh depth after cache hit failed — keeping cached response"
-                    );
+                    log_fresh_refresh_failed(ctx.session_id, &e);
                 }
             }
         }
 
         let stream_ms = start.elapsed().as_millis() as u64;
-        info!(
-            session_id = %ctx.session_id,
-            event = "depth_thread_complete",
-            thread_type = "depth",
-            stream_complete_ms = stream_ms,
-            provider = %provider_name,
-            model = %provider_name,
-            cache_hit = true,
-            "depth thread finished"
-        );
+        log_depth_complete(ctx.session_id, stream_ms, &provider_name, true);
         emit_thread_status(
             &app,
             ThreadStatusPayload {
@@ -115,23 +99,10 @@ async fn run_fresh_depth<R: Runtime>(
 
     let stream_ms = start.elapsed().as_millis() as u64;
     if stream_ms > 8_000 {
-        warn!(
-            session_id = %ctx.session_id,
-            stream_ms,
-            "depth stream > 8s — NFR breach"
-        );
+        log_depth_nfr_breach(ctx.session_id, stream_ms);
     }
 
-    info!(
-        session_id = %ctx.session_id,
-        event = "depth_thread_complete",
-        thread_type = "depth",
-        stream_complete_ms = stream_ms,
-        provider = %provider_name,
-        model = %provider_name,
-        cache_hit = ctx.from_cache,
-        "depth thread finished"
-    );
+    log_depth_complete(ctx.session_id, stream_ms, &provider_name, ctx.from_cache);
 
     emit_thread_status(
         app,
@@ -142,6 +113,45 @@ async fn run_fresh_depth<R: Runtime>(
     );
 
     Ok(full_response)
+}
+
+/// Helpers extracted so tarpaulin attributes coverage to the call site —
+/// inline tracing macro arguments are reported as uncovered even when hit.
+fn log_refresh_on_turn_three(session_id: Uuid, turn: usize) {
+    info!(
+        session_id = %session_id,
+        turn = turn,
+        "cache hit turn ≥ 3 — running fresh depth in parallel"
+    );
+}
+
+fn log_fresh_refresh_failed(session_id: Uuid, error: &Error) {
+    warn!(
+        session_id = %session_id,
+        error = %error,
+        "fresh depth after cache hit failed — keeping cached response"
+    );
+}
+
+fn log_depth_nfr_breach(session_id: Uuid, stream_ms: u64) {
+    warn!(
+        session_id = %session_id,
+        stream_ms,
+        "depth stream > 8s — NFR breach"
+    );
+}
+
+fn log_depth_complete(session_id: Uuid, stream_ms: u64, provider: &str, cache_hit: bool) {
+    info!(
+        session_id = %session_id,
+        event = "depth_thread_complete",
+        thread_type = "depth",
+        stream_complete_ms = stream_ms,
+        provider = %provider,
+        model = %provider,
+        cache_hit = cache_hit,
+        "depth thread finished"
+    );
 }
 
 fn emit_cached_depth_tokens<R: Runtime>(

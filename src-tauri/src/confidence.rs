@@ -15,7 +15,7 @@
 
 /// The visual confidence level reported to the React layer via the
 /// `confidence_score` Tauri event.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConfidenceLevel {
     /// score ≥ 0.75 — Green — "Grounded"
     Green,
