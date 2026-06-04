@@ -27,9 +27,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, info_span, warn};
+use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 use crate::audio::pipeline::DetectedQuestion;
@@ -135,10 +135,10 @@ pub struct OrchestratorConfig {
 /// Designed to be spawned as a `tokio::task` for the duration of the live
 /// session. Exits when `question_rx` is closed (i.e. `stop_session` drops the
 /// sender).
-pub async fn run_orchestrator(
+pub async fn run_orchestrator<R: Runtime>(
     mut question_rx: mpsc::Receiver<DetectedQuestion>,
     config: OrchestratorConfig,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) {
     info!(session_id = %config.session_id, "orchestrator started");
 
@@ -186,17 +186,19 @@ pub async fn run_orchestrator(
             local_llm: Arc::clone(&config.local_llm),
         };
 
-        tokio::spawn(async move {
-            let _span = info_span!(
-                "orchestrator_turn",
-                session_id = %cfg.session_id,
-                turn = cfg.turn_number,
-            )
-            .entered();
-            if let Err(e) = run_turn(cfg, app_clone).await {
-                warn!(error = %e, "orchestrator turn failed");
+        let span = info_span!(
+            "orchestrator_turn",
+            session_id = %cfg.session_id,
+            turn = cfg.turn_number,
+        );
+        tokio::spawn(
+            async move {
+                if let Err(e) = run_turn(cfg, app_clone).await {
+                    warn!(error = %e, "orchestrator turn failed");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 
     info!(session_id = %config.session_id, "orchestrator stopped");
@@ -237,7 +239,7 @@ struct OrchestratorTurnConfig {
     local_llm: Arc<dyn LLMProvider>,
 }
 
-async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
+async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
     if cfg.turn_cancel.load(Ordering::Acquire) {
         return Ok(());
     }
@@ -412,14 +414,18 @@ async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
             String::new()
         });
 
-    let clarifying_emitted = _cla_result
-        .unwrap_or_else(|e| {
+    let clarifying_emitted = match _cla_result {
+        Ok(Ok(Some(_))) => true,
+        Ok(Ok(None)) => false,
+        Ok(Err(e)) => {
+            warn!(session_id = %cfg.session_id, error = %e, "clarifying thread failed");
+            false
+        }
+        Err(e) => {
             warn!(session_id = %cfg.session_id, "clarifying task panicked: {e}");
-            Err(anyhow::anyhow!("clarifying panic"))
-        })
-        .map(|r| r.ok().flatten())
-        .unwrap_or(None)
-        .is_some();
+            false
+        }
+    };
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
     if clarifying_emitted {

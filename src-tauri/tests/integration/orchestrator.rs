@@ -3,7 +3,7 @@
 //! Task 4.15: mock provider → directional + depth threads fire concurrently.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,16 +11,16 @@ use flint_lib::digest::Digest;
 use flint_lib::llm::failover::FailoverManager;
 use flint_lib::llm::provider::{CompletionConfig, LLMProvider, MockLLMProvider, RateLimit};
 use flint_lib::llm::rate_limiter::RateLimiter;
-use flint_lib::orchestrator::directional;
 use flint_lib::orchestrator::depth;
+use flint_lib::orchestrator::directional;
 use flint_lib::orchestrator::OrchestrationContext;
 use flint_lib::session::memory::MemoryContext;
-use tauri::test::{mock_builder, mock_context, noop_assets};
+use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
+use tauri::AppHandle;
 use uuid::Uuid;
 
 const MOCK_DELAY_MS: u64 = 150;
 
-/// Mock provider that delays before returning a token (simulates network latency).
 struct DelayedMockLLMProvider {
     response: String,
     provider_name: String,
@@ -59,7 +59,7 @@ impl LLMProvider for DelayedMockLLMProvider {
     }
 }
 
-fn mock_app_handle() -> tauri::AppHandle {
+fn mock_app_handle() -> AppHandle<MockRuntime> {
     mock_builder()
         .build(mock_context(noop_assets()))
         .expect("mock tauri app")
@@ -99,12 +99,12 @@ fn test_context(question: &str) -> OrchestrationContext {
 }
 
 fn make_failover(response: &str) -> Arc<FailoverManager> {
-    let primary = Arc::new(DelayedMockLLMProvider {
+    let primary: Arc<dyn LLMProvider> = Arc::new(DelayedMockLLMProvider {
         response: response.to_string(),
         provider_name: "mock".to_string(),
         delay: Duration::from_millis(MOCK_DELAY_MS),
     });
-    let local = Arc::new(MockLLMProvider {
+    let local: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
         response: "local".to_string(),
         provider_name: "ollama".to_string(),
     });
@@ -115,21 +115,25 @@ fn make_failover(response: &str) -> Arc<FailoverManager> {
 #[tokio::test]
 async fn directional_and_depth_threads_run_concurrently() {
     let app = mock_app_handle();
-
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+
     let dir_ctx = test_context("What is your experience with Rust?");
     let dep_ctx = test_context("What is your experience with Rust?");
 
     let dir_failover = make_failover("directional answer");
     let dep_failover = make_failover("depth answer");
 
-    let start = Instant::now();
+    let dir_app = app.clone();
+    let dep_app = app.clone();
+    let dir_prompts = prompts_dir.clone();
+    let dep_prompts = prompts_dir;
 
+    let start = Instant::now();
     let dir_task = tokio::spawn(async move {
-        directional::run_directional(dir_ctx, dir_failover, &prompts_dir, app.clone()).await
+        directional::run_directional(dir_ctx, dir_failover, &dir_prompts, dir_app).await
     });
     let dep_task = tokio::spawn(async move {
-        depth::run_depth(dep_ctx, dep_failover, &prompts_dir, app).await
+        depth::run_depth(dep_ctx, dep_failover, &dep_prompts, dep_app).await
     });
 
     let (dir_result, dep_result) = tokio::join!(dir_task, dep_task);
@@ -138,7 +142,6 @@ async fn directional_and_depth_threads_run_concurrently() {
     assert!(dir_result.unwrap().is_ok());
     assert!(dep_result.unwrap().is_ok());
 
-    // Sequential would take ≥ 2 × MOCK_DELAY_MS; concurrent should be < 1.8×.
     let sequential_floor = Duration::from_millis(MOCK_DELAY_MS * 2);
     assert!(
         elapsed < sequential_floor,
@@ -149,8 +152,8 @@ async fn directional_and_depth_threads_run_concurrently() {
 #[tokio::test]
 async fn cache_hit_serves_directional_without_llm_call() {
     let app = mock_app_handle();
-
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+
     let mut ctx = test_context("Tell me about yourself");
     ctx.cached_directional = Some("Cached directional response.".to_string());
     ctx.from_cache = true;

@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tauri::AppHandle;
-use tracing::{info, info_span, warn};
+use tauri::{AppHandle, Runtime};
+use tracing::{info, warn};
 
 use crate::events::{
     emit_directional_token, emit_thread_status, DirectionalTokenPayload, ThreadStatusPayload,
@@ -26,25 +26,18 @@ use super::{load_prompt, OrchestrationContext};
 /// Streams tokens to the React layer via `directional_token` events.
 /// Returns the full assembled response text (for confidence scoring and
 /// memory recording).
-pub async fn run_directional(
+pub async fn run_directional<R: Runtime>(
     ctx: OrchestrationContext,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<String> {
-    let _span = info_span!(
-        "directional_thread",
-        session_id = %ctx.session_id,
-        turn = ctx.turn_number,
-    )
-    .entered();
-
     let ttft_start = Instant::now();
     let provider_name = failover.active_provider_name().to_string();
 
     // Pre-warm cache hit — serve cached response without an LLM round-trip.
     if let Some(cached) = ctx.cached_directional {
-        let text = emit_cached_tokens(&cached, &app, &ctx.turn_cancel, emit_directional_token);
+        let text = emit_cached_directional_tokens(&cached, &app, &ctx.turn_cancel);
         let ttft_ms = ttft_start.elapsed().as_millis() as u64;
         info!(
             session_id = %ctx.session_id,
@@ -138,20 +131,22 @@ pub async fn run_directional(
     Ok(full_response)
 }
 
-/// Emit cached text word-by-word as token events for incremental UI rendering.
-pub(crate) fn emit_cached_tokens(
+/// Emit cached text word-by-word as `directional_token` events for incremental UI rendering.
+fn emit_cached_directional_tokens<R: Runtime>(
     text: &str,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
-    emit_fn: fn(&AppHandle, DirectionalTokenPayload),
 ) -> String {
     for word in text.split_inclusive(' ') {
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        emit_fn(app, DirectionalTokenPayload {
-            token: word.to_string(),
-        });
+        emit_directional_token(
+            app,
+            DirectionalTokenPayload {
+                token: word.to_string(),
+            },
+        );
     }
     text.to_string()
 }

@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tauri::AppHandle;
-use tracing::{info, info_span, warn};
+use tauri::{AppHandle, Runtime};
+use tracing::{info, warn};
 
 use crate::events::{emit_depth_token, emit_thread_status, DepthTokenPayload, ThreadStatusPayload};
 use crate::llm::failover::FailoverManager;
@@ -23,19 +23,12 @@ use super::{load_prompt, OrchestrationContext};
 ///
 /// Streams tokens to the React layer via `depth_token` events.
 /// Returns the full assembled response text.
-pub async fn run_depth(
+pub async fn run_depth<R: Runtime>(
     ctx: OrchestrationContext,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<String> {
-    let _span = info_span!(
-        "depth_thread",
-        session_id = %ctx.session_id,
-        turn = ctx.turn_number,
-    )
-    .entered();
-
     let start = Instant::now();
     let provider_name = failover.active_provider_name().to_string();
 
@@ -86,11 +79,11 @@ pub async fn run_depth(
     run_fresh_depth(&ctx, failover, prompts_dir, &app).await
 }
 
-async fn run_fresh_depth(
+async fn run_fresh_depth<R: Runtime>(
     ctx: &OrchestrationContext,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
-    app: &AppHandle,
+    app: &AppHandle<R>,
 ) -> Result<String> {
     let start = Instant::now();
     let provider_name = failover.active_provider_name().to_string();
@@ -151,9 +144,9 @@ async fn run_fresh_depth(
     Ok(full_response)
 }
 
-fn emit_cached_depth_tokens(
+fn emit_cached_depth_tokens<R: Runtime>(
     text: &str,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> String {
     for word in text.split_inclusive(' ') {

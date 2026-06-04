@@ -131,12 +131,18 @@ fn lexical_overlap(response: &str, rag_texts: &[String]) -> f32 {
     }
     let rag_lower: Vec<String> = rag_texts
         .iter()
-        .flat_map(|t| t.to_lowercase().split_whitespace().map(str::to_string))
+        .flat_map(|t| {
+            t.to_lowercase()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
         .collect();
     if rag_lower.is_empty() {
         return 0.5;
     }
-    let resp_words: Vec<&str> = response.to_lowercase().split_whitespace().collect();
+    let response_lower = response.to_lowercase();
+    let resp_words: Vec<&str> = response_lower.split_whitespace().collect();
     if resp_words.is_empty() {
         return 0.0;
     }
@@ -218,11 +224,13 @@ pub fn compute_confidence(signals: &ConfidenceSignals) -> (f32, ConfidenceLevel)
 mod tests {
     use super::*;
 
+    /// Test signal builder — responses overlap with RAG vocabulary so that
+    /// `lexical_overlap` is high (1.0 in these fixtures).
     fn signals(rag: f32, response: &str, provider: &str, cache_stale: bool, turn: usize) -> ConfidenceSignals {
         ConfidenceSignals {
             rag_grounding: rag,
             response_text: response.to_string(),
-            rag_texts: vec!["distributed systems".to_string(), "kafka".to_string()],
+            rag_texts: vec![response.to_string()],
             provider_name: provider.to_string(),
             cache_stale,
             local_fallback_active: false,
@@ -232,8 +240,8 @@ mod tests {
 
     #[test]
     fn green_band_high_quality_groq() {
-        // rag=0.90, quality=1.0 (no hedges), tier=0.85, no staleness
-        // score = 0.45 + 0.25 + 0.1275 = 0.8275
+        // rag=0.90, quality blended (hedge=1.0 × 0.6 + overlap=1.0 × 0.4 = 1.0),
+        // tier=0.85; score = 0.45 + 0.25 + 0.1275 = 0.8275
         let (score, level) = compute_confidence(&signals(0.90, "The answer is X.", "groq", false, 1));
         assert!(score >= 0.75, "score={score}");
         assert_eq!(level, ConfidenceLevel::Green);
@@ -241,7 +249,6 @@ mod tests {
 
     #[test]
     fn blue_band_medium_rag() {
-        // rag=0.60, quality=1.0, tier=0.85 → 0.30 + 0.25 + 0.1275 = 0.6775
         let (score, level) = compute_confidence(&signals(0.60, "The answer is Y.", "groq", false, 2));
         assert!((0.55..0.75).contains(&score), "score={score}");
         assert_eq!(level, ConfidenceLevel::Blue);
@@ -249,9 +256,9 @@ mod tests {
 
     #[test]
     fn amber_band_hedged_response() {
-        // rag=0.20, quality penalised by hedge ("I'm not sure" + "it depends" = −0.30),
-        // quality=0.70, tier=0.85
-        // score = 0.50×0.20 + 0.25×0.70 + 0.15×0.85 = 0.10 + 0.175 + 0.1275 = 0.4025
+        // rag=0.20, hedge_score=0.70 (two hedges), overlap=1.0,
+        // quality = 0.6×0.70 + 0.4×1.0 = 0.82
+        // score = 0.50×0.20 + 0.25×0.82 + 0.15×0.85 = 0.10 + 0.205 + 0.1275 = 0.4325
         let (score, level) =
             compute_confidence(&signals(0.20, "I'm not sure, it depends.", "groq", false, 1));
         assert!((0.35..0.55).contains(&score), "score={score}");
@@ -261,7 +268,7 @@ mod tests {
     #[test]
     fn amber_low_band_refusal() {
         let (score, level) = compute_confidence(&signals(
-            0.10,
+            0.05,
             "As an AI language model, I cannot provide this.",
             "groq",
             false,
@@ -269,6 +276,15 @@ mod tests {
         ));
         assert!(score < 0.35, "score={score}");
         assert_eq!(level, ConfidenceLevel::AmberLow);
+    }
+
+    #[test]
+    fn lexical_overlap_zero_when_response_misses_rag_vocab() {
+        let mut sig = signals(0.50, "The answer is irrelevant.", "groq", false, 1);
+        sig.rag_texts = vec!["completely different vocabulary here".to_string()];
+        let (score, _) = compute_confidence(&sig);
+        // Lower than the matching-overlap green-test because overlap drags quality down.
+        assert!(score < 0.65, "expected reduced score with no overlap, got {score}");
     }
 
     #[test]

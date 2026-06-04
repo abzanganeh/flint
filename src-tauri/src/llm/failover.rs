@@ -17,7 +17,7 @@ use anyhow::Result;
 use futures::Stream;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -90,7 +90,7 @@ impl FailoverManager {
     }
 
     /// Spawn the background ping loop. Must be called once from an async context.
-    pub fn start_ping_loop(&mut self, app: AppHandle) {
+    pub fn start_ping_loop<R: Runtime>(&mut self, app: AppHandle<R>) {
         let primary = Arc::clone(&self.primary);
         let using_local = Arc::clone(&self.using_local);
 
@@ -137,11 +137,11 @@ impl FailoverManager {
     /// - Calls primary; on hard failure retries once after 100ms.
     /// - On second failure, routes to local Ollama and emits `failover_triggered`.
     /// - On 429: parks at the rate-limiter backoff without routing to Ollama.
-    pub async fn complete_stream(
+    pub async fn complete_stream<R: Runtime>(
         &self,
         prompt: String,
         config: CompletionConfig,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         estimated_tokens: u32,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         if self.using_local.load(Ordering::Acquire) {
@@ -236,9 +236,9 @@ mod tests {
     use super::*;
     use crate::llm::provider::{FailingMockLLMProvider, MockLLMProvider};
     use futures::StreamExt;
-    use tauri::test::{mock_builder, mock_context, noop_assets};
+    use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
 
-    fn mock_app_handle() -> tauri::AppHandle {
+    fn mock_app_handle() -> tauri::AppHandle<MockRuntime> {
         mock_builder()
             .build(mock_context(noop_assets()))
             .expect("mock app")
@@ -253,11 +253,11 @@ mod tests {
 
     #[test]
     fn active_provider_name_before_failover() {
-        let primary = Arc::new(MockLLMProvider {
+        let primary: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
             response: "hello".to_string(),
             provider_name: "mock".to_string(),
         });
-        let local = Arc::new(MockLLMProvider {
+        let local: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
             response: "local".to_string(),
             provider_name: "ollama".to_string(),
         });
@@ -286,11 +286,11 @@ mod tests {
 
     #[tokio::test]
     async fn hard_failure_fails_over_to_local() {
-        let primary = Arc::new(FailingMockLLMProvider {
+        let primary: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
             provider_name: "groq".to_string(),
             error_message: "connection refused".to_string(),
         });
-        let local = Arc::new(MockLLMProvider {
+        let local: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
             response: "fallback answer".to_string(),
             provider_name: "ollama".to_string(),
         });
@@ -354,11 +354,11 @@ mod tests {
             }
         }
 
-        let primary = Arc::new(RateLimitThenOk {
+        let primary: Arc<dyn LLMProvider> = Arc::new(RateLimitThenOk {
             calls: AtomicU32::new(0),
             provider_name: "groq".to_string(),
         });
-        let local = Arc::new(FailingMockLLMProvider {
+        let local: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
             provider_name: "ollama".to_string(),
             error_message: "should not be called".to_string(),
         });
