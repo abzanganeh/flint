@@ -12,10 +12,15 @@ fi
 sudo apt-get update
 sudo apt-get install -y \
   build-essential \
+  cmake \
+  clang \
+  llvm-dev \
   curl \
   wget \
   file \
+  pkg-config \
   libssl-dev \
+  libclang-dev \
   patchelf \
   libxdo-dev \
   libayatana-appindicator3-dev \
