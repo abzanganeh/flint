@@ -1,5 +1,3 @@
-#![allow(dead_code)] // most emit helpers wired in later phases
-
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
@@ -48,6 +46,7 @@ pub struct PrimaryRestoredPayload {
     pub provider: String,
 }
 
+#[allow(dead_code)] // wired in Phase 5 token usage tracker
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenUsageUpdatePayload {
     pub input: u64,
@@ -65,23 +64,38 @@ pub fn emit_transcription_chunk(app: &AppHandle, payload: TranscriptionChunkPayl
     let _ = app.emit("transcription_chunk", payload);
 }
 
-pub fn emit_directional_token(_app: &AppHandle, _payload: DirectionalTokenPayload) {}
+pub fn emit_directional_token(app: &AppHandle, payload: DirectionalTokenPayload) {
+    let _ = app.emit("directional_token", payload);
+}
 
-pub fn emit_depth_token(_app: &AppHandle, _payload: DepthTokenPayload) {}
+pub fn emit_depth_token(app: &AppHandle, payload: DepthTokenPayload) {
+    let _ = app.emit("depth_token", payload);
+}
 
-pub fn emit_clarifying_question(_app: &AppHandle, _payload: ClarifyingQuestionPayload) {}
+pub fn emit_clarifying_question(app: &AppHandle, payload: ClarifyingQuestionPayload) {
+    let _ = app.emit("clarifying_question", payload);
+}
 
-pub fn emit_confidence_score(_app: &AppHandle, _payload: ConfidenceScorePayload) {}
+pub fn emit_confidence_score(app: &AppHandle, payload: ConfidenceScorePayload) {
+    let _ = app.emit("confidence_score", payload);
+}
 
 pub fn emit_thread_status(app: &AppHandle, payload: ThreadStatusPayload) {
     let _ = app.emit("thread_status", payload);
 }
 
-pub fn emit_failover_triggered(_app: &AppHandle, _payload: FailoverTriggeredPayload) {}
+pub fn emit_failover_triggered(app: &AppHandle, payload: FailoverTriggeredPayload) {
+    let _ = app.emit("failover_triggered", payload);
+}
 
-pub fn emit_primary_restored(_app: &AppHandle, _payload: PrimaryRestoredPayload) {}
+pub fn emit_primary_restored(app: &AppHandle, payload: PrimaryRestoredPayload) {
+    let _ = app.emit("primary_restored", payload);
+}
 
-pub fn emit_token_usage_update(_app: &AppHandle, _payload: TokenUsageUpdatePayload) {}
+#[allow(dead_code)] // wired in Phase 5 token usage tracker
+pub fn emit_token_usage_update(app: &AppHandle, payload: TokenUsageUpdatePayload) {
+    let _ = app.emit("token_usage_update", payload);
+}
 
 pub fn emit_session_state_change(app: &AppHandle, payload: SessionStateChangePayload) {
     let _ = app.emit("session_state_change", payload);

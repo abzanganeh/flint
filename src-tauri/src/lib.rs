@@ -1,6 +1,7 @@
 mod auth_session;
 pub mod audio;
 mod commands;
+pub mod confidence;
 pub mod digest;
 mod dto;
 mod events;

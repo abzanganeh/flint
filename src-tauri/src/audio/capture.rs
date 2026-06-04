@@ -1,7 +1,7 @@
 //! Dual-channel audio capture — Tasks 3.2, 3.8, 3.9.
 //!
 //! SECURITY INVARIANT: Audio data is NEVER written to disk.
-//! This file contains zero `std::fs` usage, no `File::create`, no temp files.
+//! This file contains no filesystem access, no file creation, no temp files.
 //! All audio lives in the fixed ring buffers below and is zeroed on session end.
 //!
 //! Processing chain produced by this module:
@@ -553,7 +553,7 @@ fn select_stream_config(device: &Device) -> Result<(StreamConfig, u32)> {
     let target = SampleRate(TARGET_RATE);
     for cfg in &supported {
         if cfg.min_sample_rate() <= target && target <= cfg.max_sample_rate() {
-            let sc = cfg.clone().with_sample_rate(target).config();
+            let sc = cfg.with_sample_rate(target).config();
             return Ok((sc, TARGET_RATE));
         }
     }
@@ -720,22 +720,30 @@ mod tests {
 
     // ── Security: no disk writes ──────────────────────────────────────────
 
-    /// Verify that this module file contains no `std::fs` or `File::create`
-    /// references at compile time (enforced via the source text below).
     #[test]
     fn capture_rs_contains_no_fs_usage() {
+        // Build the banned patterns at runtime so this test's own source
+        // does not contain the literal strings and trigger a false positive.
         let src = include_str!("capture.rs");
-        assert!(
-            !src.contains("std::fs"),
-            "capture.rs must not use std::fs"
-        );
-        assert!(
-            !src.contains("File::create"),
-            "capture.rs must not use File::create"
-        );
-        assert!(
-            !src.contains("OpenOptions"),
-            "capture.rs must not use OpenOptions"
-        );
+        let banned = [
+            ["std", "::", "fs"].concat(),
+            ["File", "::", "create"].concat(),
+            "OpenOptions".to_string(),
+        ];
+        for pattern in &banned {
+            let occurrences = src.match_indices(pattern.as_str()).count();
+            // The test itself must not appear in the scan window — we count
+            // only occurrences outside the tests module.  A simpler and
+            // correct approach: if a pattern appears more than once, only
+            // appearances that are *not* inside a string literal in the
+            // test body count.  We keep it simple: assert zero matches in
+            // the non-test portion of the file.
+            let test_mod_start = src.find("#[cfg(test)]").unwrap_or(src.len());
+            let production_src = &src[..test_mod_start];
+            assert!(
+                !production_src.contains(pattern.as_str()),
+                "capture.rs production code must not contain '{pattern}' (found {occurrences} total occurrences)"
+            );
+        }
     }
 }

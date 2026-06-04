@@ -116,6 +116,11 @@ pub struct VadChunker {
     current_source: AudioSource,
 }
 
+// `webrtc_vad::Vad` wraps a C pointer from bindgen, so it is not `Send` by
+// default. `VadChunker` is only ever accessed from a single pipeline task —
+// there is no cross-thread sharing. The declaration is therefore sound.
+unsafe impl Send for VadChunker {}
+
 impl VadChunker {
     /// Create a VadChunker with exact §26 parameters.
     pub fn new() -> Result<Self> {

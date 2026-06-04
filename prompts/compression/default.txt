@@ -1,0 +1,7 @@
+[System]
+Summarise the conversation history below in 3–5 sentences. Preserve key topics discussed, important facts stated, and any commitments made. Do not add interpretation. Plain factual summary only.
+
+[History to compress]
+{old_turns}
+
+[Summary]

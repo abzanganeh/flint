@@ -416,7 +416,7 @@ mod tests {
     #[tokio::test]
     async fn tier2_pass2_unexpected_response_falls_back_to_false() {
         let detector = detector_with_mock("MAYBE");
-        let result = detector.detect("so tell us something").await.unwrap();
+        let _result = detector.detect("so tell us something").await.unwrap();
         // "tell us something" → Pass 1 Question (starts with "tell ") — confirmed true
         // because Pass 1 catches it before Pass 2 is even called.
         // Use a truly ambiguous utterance for this test.
