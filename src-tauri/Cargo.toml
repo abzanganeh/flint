@@ -60,6 +60,9 @@ tauri-plugin-global-shortcut = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# test-util gives us paused virtual time (`tokio::test(start_paused = true)`)
+# so timing-dependent tests run deterministically without real sleeps.
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync"] }
 
 [[test]]
 name = "rag_pipeline"

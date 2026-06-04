@@ -76,7 +76,7 @@ async fn check_for_recovery_detects_live_session() {
     assert_eq!(offer.response_count, 1);
 
     // State machine must now be in RECOVERING.
-    let current = machine.lock().await.current().clone();
+    let current = *machine.lock().await.current();
     assert_eq!(current, SessionState::Recovering);
 }
 
@@ -97,7 +97,7 @@ async fn resume_session_transitions_to_ready() {
         .await
         .expect("resume_session failed");
 
-    let current = machine.lock().await.current().clone();
+    let current = *machine.lock().await.current();
     assert_eq!(current, SessionState::Ready);
 }
 
@@ -134,7 +134,7 @@ async fn discard_session_clears_data_and_returns_idle() {
         .expect("discard_session failed");
 
     // State machine must be back at IDLE.
-    let current = machine.lock().await.current().clone();
+    let current = *machine.lock().await.current();
     assert_eq!(current, SessionState::Idle);
 
     // SQLite data for that session must be gone.
@@ -156,6 +156,6 @@ async fn no_recovery_needed_returns_none() {
 
     assert!(offer.is_none());
     // State machine remains at IDLE.
-    let current = machine.lock().await.current().clone();
+    let current = *machine.lock().await.current();
     assert_eq!(current, SessionState::Idle);
 }

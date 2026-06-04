@@ -361,7 +361,7 @@ mod tests {
     use std::sync::OnceLock;
 
     use super::*;
-    use crate::llm::provider::{LLMProvider, RateLimit};
+    use crate::llm::provider::{FailingMockLLMProvider, LLMProvider, MockLLMProvider, RateLimit};
 
     static EMBEDDER: OnceLock<Option<Arc<Embedder>>> = OnceLock::new();
 
@@ -616,6 +616,147 @@ mod tests {
 
         let c = cache.lock().await;
         assert!(c.is_empty(), "no questions means no cache entries");
+    }
+
+    /// Cache lookup must skip entries whose embedding dimension does not
+    /// match the query (defensive — should never happen in practice but the
+    /// length check is in production code and must be tested).
+    #[test]
+    fn test_cache_lookup_skips_mismatched_dimension_entries() {
+        let mut cache = PreWarmCache::new();
+        // Insert an entry with a 4-dim embedding.
+        cache.insert(PreWarmEntry {
+            question: "wrong-dim".to_string(),
+            directional_response: "x".to_string(),
+            depth_response: "y".to_string(),
+            created_at: Utc::now(),
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        });
+        // Query with a 3-dim embedding — must return None (no compatible entry).
+        let result = cache.lookup(&[1.0, 0.0, 0.0]);
+        assert!(result.is_none(), "mismatched dims must not hit cache");
+    }
+
+    /// Lookup over multiple entries: the fold's "not greater" branch fires
+    /// whenever a later entry has lower similarity than the running best.
+    #[test]
+    fn test_cache_lookup_picks_highest_similarity_across_entries() {
+        let mut cache = PreWarmCache::new();
+        // Best match: aligned with query.
+        cache.insert(PreWarmEntry {
+            question: "best".to_string(),
+            directional_response: "a".to_string(),
+            depth_response: "b".to_string(),
+            created_at: Utc::now(),
+            embedding: vec![1.0, 0.0, 0.0, 0.0],
+        });
+        // Lower similarity: orthogonal direction, still ≥ 0.85 due to magnitude.
+        cache.insert(PreWarmEntry {
+            question: "worse".to_string(),
+            directional_response: "c".to_string(),
+            depth_response: "d".to_string(),
+            created_at: Utc::now(),
+            embedding: vec![0.9, 0.1, 0.0, 0.0],
+        });
+        let result = cache.lookup(&[1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(result.unwrap().question, "best");
+    }
+
+    /// Provider with no matching prompt file falls back to `default.txt`.
+    /// Hits the else-branch of [`load_prompt`].
+    #[tokio::test]
+    async fn test_prewarm_falls_back_to_default_prompt_when_provider_specific_missing() {
+        let digest = sample_digest();
+        let emb = require_embedder!();
+        let cache = Arc::new(Mutex::new(PreWarmCache::new()));
+
+        // Provider name does not match any file under prompts/{directional,depth}/.
+        let llm: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "fallback answer".to_string(),
+            provider_name: "no_such_provider".to_string(),
+        });
+
+        run_prewarm(&digest, llm, emb, Arc::clone(&cache))
+            .await
+            .expect("run_prewarm must succeed using default.txt fallback");
+        assert!(!cache.lock().await.is_empty());
+    }
+
+    /// Inner LLM error path (Ok(Err(_))): provider returns an error from
+    /// `complete_stream`. Both directional and depth tasks observe the
+    /// failure and the entry is skipped (both fields empty).
+    #[tokio::test]
+    async fn test_prewarm_skips_entry_when_both_calls_return_inner_error() {
+        let mut digest = sample_digest();
+        // Single question keeps the assertion crisp.
+        digest.likely_questions = vec!["Tell me about yourself".to_string()];
+
+        let emb = require_embedder!();
+        let cache = Arc::new(Mutex::new(PreWarmCache::new()));
+
+        let llm: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
+            provider_name: "default".to_string(),
+            error_message: "boom".to_string(),
+        });
+
+        run_prewarm(&digest, llm, emb, Arc::clone(&cache))
+            .await
+            .expect("run_prewarm must succeed even when LLM fails");
+
+        // Both calls failed → no entry inserted.
+        assert!(
+            cache.lock().await.is_empty(),
+            "cache must be empty when both LLM tasks fail"
+        );
+    }
+
+    /// Outer task error path (Err(_) from JoinHandle): the inner LLM future
+    /// panics. The coordinator must log it and continue without inserting.
+    #[tokio::test]
+    async fn test_prewarm_handles_panicking_llm_task() {
+        use std::pin::Pin;
+        struct PanickingLLM;
+        #[async_trait::async_trait]
+        impl LLMProvider for PanickingLLM {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn futures::Stream<Item = Result<String>> + Send>>> {
+                panic!("intentional panic for coverage of JoinHandle::Err path");
+            }
+            fn name(&self) -> &str {
+                "default"
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> RateLimit {
+                RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 60_000,
+                }
+            }
+        }
+
+        let mut digest = sample_digest();
+        digest.likely_questions = vec!["Tell me about yourself".to_string()];
+
+        let emb = require_embedder!();
+        let cache = Arc::new(Mutex::new(PreWarmCache::new()));
+        let llm: Arc<dyn LLMProvider> = Arc::new(PanickingLLM);
+
+        run_prewarm(&digest, llm, emb, Arc::clone(&cache))
+            .await
+            .expect("run_prewarm must survive panicking provider");
+
+        assert!(
+            cache.lock().await.is_empty(),
+            "panicking provider must not produce a cache entry"
+        );
     }
 
     #[tokio::test]

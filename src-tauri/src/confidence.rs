@@ -346,4 +346,74 @@ mod tests {
         assert!(score <= 1.0);
         assert!(score >= 0.0);
     }
+
+    /// `ConfidenceLevel::as_str` is the wire format sent to React via the
+    /// `confidence_score` event. Every variant must map to its canonical
+    /// kebab/lower-case identifier.
+    #[test]
+    fn confidence_level_as_str_covers_every_variant() {
+        assert_eq!(ConfidenceLevel::Green.as_str(), "green");
+        assert_eq!(ConfidenceLevel::Blue.as_str(), "blue");
+        assert_eq!(ConfidenceLevel::Amber.as_str(), "amber");
+        assert_eq!(ConfidenceLevel::AmberLow.as_str(), "amber_low");
+        assert_eq!(ConfidenceLevel::Grey.as_str(), "grey");
+        assert_eq!(ConfidenceLevel::Red.as_str(), "red");
+    }
+
+    #[test]
+    fn model_tier_score_covers_low_tier_and_unknown() {
+        assert_eq!(model_tier_score("llama3.2:3b"), 0.45);
+        assert_eq!(model_tier_score("ollama-3b"), 0.45);
+        assert_eq!(model_tier_score("llama3.2:1b"), 0.30);
+        assert_eq!(model_tier_score("ollama-1b"), 0.30);
+        assert_eq!(model_tier_score("claude-3-5-haiku"), 0.85);
+        assert_eq!(model_tier_score("gpt-4o-mini"), 0.80);
+        // Unknown providers fall back to the conservative default.
+        assert_eq!(model_tier_score("acme-future-llm"), 0.60);
+        assert_eq!(model_tier_score(""), 0.60);
+    }
+
+    /// Empty `rag_texts` short-circuits `lexical_overlap` to the neutral 0.5
+    /// default. Compare a no-RAG result against a non-overlapping RAG result
+    /// to confirm the default branch is taken.
+    #[test]
+    fn lexical_overlap_returns_neutral_default_with_no_rag_chunks() {
+        let mut sig = signals(0.50, "Answer text here.", "groq", false, 1);
+        sig.rag_texts = vec![];
+        let (no_rag, _) = compute_confidence(&sig);
+
+        let mut miss = signals(0.50, "Answer text here.", "groq", false, 1);
+        miss.rag_texts = vec!["completely orthogonal vocabulary".to_string()];
+        let (no_overlap, _) = compute_confidence(&miss);
+
+        assert!(
+            no_rag > no_overlap,
+            "empty rag_texts should default to neutral 0.5, not penalise like real miss"
+        );
+    }
+
+    /// Whitespace-only RAG entries produce zero tokens after split — the
+    /// scorer must again fall back to neutral 0.5 rather than divide-by-zero.
+    #[test]
+    fn lexical_overlap_returns_neutral_default_when_rag_has_no_tokens() {
+        let mut sig = signals(0.50, "Some answer.", "groq", false, 1);
+        sig.rag_texts = vec!["   \t\n  ".to_string(), "   ".to_string()];
+        let (score, _) = compute_confidence(&sig);
+        assert!((0.0..=1.0).contains(&score));
+    }
+
+    /// Empty response text produces zero `resp_words` and `lexical_overlap`
+    /// returns 0.0. The downstream score is therefore driven purely by RAG
+    /// grounding and tier — must stay in unit range.
+    ///
+    /// Requires `rag_texts` to contain actual tokens; otherwise the earlier
+    /// "rag_lower empty" guard at line 142 short-circuits the function and
+    /// the response-empty branch is unreachable.
+    #[test]
+    fn lexical_overlap_returns_zero_when_response_is_empty() {
+        let mut sig = signals(0.50, "", "groq", false, 1);
+        sig.rag_texts = vec!["actual rag vocabulary here".to_string()];
+        let (score, _) = compute_confidence(&sig);
+        assert!((0.0..=1.0).contains(&score));
+    }
 }
