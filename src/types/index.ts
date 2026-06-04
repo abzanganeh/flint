@@ -23,7 +23,7 @@ export type PanelId =
 
 export type Speaker = "System" | "Microphone";
 
-export type ConfidenceLevel = "green" | "blue" | "amber" | "grey" | "red";
+export type ConfidenceLevel = "green" | "blue" | "amber" | "amber_low" | "grey" | "red";
 
 export type HardwareTier = 1 | 2 | 3 | 4;
 

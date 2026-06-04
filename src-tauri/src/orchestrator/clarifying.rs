@@ -10,7 +10,7 @@ use std::time::Instant;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tracing::info;
 
 use crate::events::{emit_clarifying_question, ClarifyingQuestionPayload};
@@ -23,11 +23,11 @@ use super::{load_prompt, OrchestrationContext};
 ///
 /// Returns the generated clarifying question, or `None` if the response was
 /// empty or generation failed.
-pub async fn run_clarifying(
+pub async fn run_clarifying<R: Runtime>(
     ctx: OrchestrationContext,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) -> Result<Option<String>> {
     let start = Instant::now();
 

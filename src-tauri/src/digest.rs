@@ -361,7 +361,9 @@ mod tests {
         pad_likely_questions(&mut qs);
         // The duplicate should not be added again
         assert_eq!(
-            qs.iter().filter(|q| q.as_str() == "Tell me about yourself").count(),
+            qs.iter()
+                .filter(|q| q.as_str() == "Tell me about yourself")
+                .count(),
             1
         );
         assert_eq!(qs.len(), 5);

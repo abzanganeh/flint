@@ -124,7 +124,10 @@ mod tests {
         let chunks = chunk_text(&text, 3, 1);
         let combined = chunks.join(" ");
         for word in &words {
-            assert!(combined.contains(word), "word {word:?} missing from all chunks");
+            assert!(
+                combined.contains(word),
+                "word {word:?} missing from all chunks"
+            );
         }
     }
 }

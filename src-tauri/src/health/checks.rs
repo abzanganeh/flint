@@ -400,10 +400,7 @@ fn check_os_keychain() -> HealthCheckResult {
 }
 
 fn check_local_sqlite() -> HealthCheckResult {
-    let path = std::env::temp_dir().join(format!(
-        "flint_health_check_{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let path = std::env::temp_dir().join(format!("flint_health_check_{}.db", uuid::Uuid::new_v4()));
 
     let outcome = (|| -> anyhow::Result<()> {
         let conn = Connection::open(&path)?;
@@ -412,11 +409,10 @@ fn check_local_sqlite() -> HealthCheckResult {
              CREATE TABLE health_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL);
              INSERT INTO health_probe (value) VALUES ('ok');",
         )?;
-        let value: String = conn.query_row(
-            "SELECT value FROM health_probe WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )?;
+        let value: String =
+            conn.query_row("SELECT value FROM health_probe WHERE id = 1", [], |row| {
+                row.get(0)
+            })?;
         anyhow::ensure!(value == "ok", "unexpected probe value");
         Ok(())
     })();

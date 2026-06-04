@@ -22,27 +22,31 @@ pub mod directional;
 pub mod prewarm;
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use tokio::sync::{mpsc, Mutex};
-use tracing::{info, warn};
+use tracing::{info, info_span, warn, Instrument};
 use uuid::Uuid;
 
 use crate::audio::pipeline::DetectedQuestion;
-use crate::confidence::{compute_confidence, ConfidenceSignals};
+use crate::confidence::{compute_confidence, ConfidenceLevel, ConfidenceSignals};
 use crate::digest::Digest;
 use crate::events::{
-    emit_confidence_score, emit_thread_status, ConfidenceScorePayload, ThreadStatusPayload,
+    emit_confidence_score, emit_context_truncated, emit_thread_status, ConfidenceScorePayload,
+    ContextTruncatedPayload, ThreadStatusPayload,
 };
+use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::llm::failover::FailoverManager;
+use crate::llm::provider::LLMProvider;
+use crate::orchestrator::prewarm::PreWarmCache;
 use crate::rag::embedder::Embedder;
 use crate::rag::retriever::retrieve;
-use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::session::memory::{ContextBudget, ConversationMemory, MemoryContext, Turn};
-use crate::orchestrator::prewarm::PreWarmCache;
+use crate::state::TurnCancelFlag;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Silence debounce
@@ -65,6 +69,12 @@ pub struct OrchestrationContext {
     pub memory_ctx: MemoryContext,
     /// True if this response was served from the pre-warm cache.
     pub from_cache: bool,
+    /// Cached directional text when pre-warm cache hit (≥ 0.85 cosine).
+    pub cached_directional: Option<String>,
+    /// Cached depth text when pre-warm cache hit.
+    pub cached_depth: Option<String>,
+    /// Per-turn cancellation flag — set by `cancel_inference`.
+    pub turn_cancel: TurnCancelFlag,
     /// 1-indexed turn number in the current session.
     pub turn_number: usize,
 }
@@ -114,6 +124,10 @@ pub struct OrchestratorConfig {
     pub prewarm_cache: Arc<Mutex<PreWarmCache>>,
     pub memory: Arc<Mutex<ConversationMemory>>,
     pub compression_prompt: String,
+    /// Local Ollama provider — used for history compression during failover.
+    pub local_llm: Arc<dyn LLMProvider>,
+    /// Shared with `LiveTaskHandles` — replaced on each turn dispatch.
+    pub turn_cancel_slot: Arc<Mutex<Option<TurnCancelFlag>>>,
 }
 
 /// Receive detected questions and run the three parallel response threads.
@@ -121,17 +135,16 @@ pub struct OrchestratorConfig {
 /// Designed to be spawned as a `tokio::task` for the duration of the live
 /// session. Exits when `question_rx` is closed (i.e. `stop_session` drops the
 /// sender).
-pub async fn run_orchestrator(
+pub async fn run_orchestrator<R: Runtime>(
     mut question_rx: mpsc::Receiver<DetectedQuestion>,
     config: OrchestratorConfig,
-    app: AppHandle,
+    app: AppHandle<R>,
 ) {
     info!(session_id = %config.session_id, "orchestrator started");
 
     let mut turn_number: usize = 0;
 
     while let Some(first) = question_rx.recv().await {
-
         // ── Silence debounce ─────────────────────────────────────────────────
         // Drain additional questions that arrive within the debounce window,
         // keeping only the last one (most complete utterance).
@@ -146,6 +159,12 @@ pub async fn run_orchestrator(
             question = %question.text,
             "orchestrator dispatching turn"
         );
+
+        let turn_cancel = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = config.turn_cancel_slot.lock().await;
+            *slot = Some(Arc::clone(&turn_cancel));
+        }
 
         // Dispatch in its own task so the loop can accept the next question
         // while this turn is still processing.
@@ -162,13 +181,23 @@ pub async fn run_orchestrator(
             memory: Arc::clone(&config.memory),
             compression_prompt: config.compression_prompt.clone(),
             turn_number: turn,
+            turn_cancel,
+            local_llm: Arc::clone(&config.local_llm),
         };
 
-        tokio::spawn(async move {
-            if let Err(e) = run_turn(cfg, app_clone).await {
-                warn!(error = %e, "orchestrator turn failed");
+        let span = info_span!(
+            "orchestrator_turn",
+            session_id = %cfg.session_id,
+            turn = cfg.turn_number,
+        );
+        tokio::spawn(
+            async move {
+                if let Err(e) = run_turn(cfg, app_clone).await {
+                    warn!(error = %e, "orchestrator turn failed");
+                }
             }
-        });
+            .instrument(span),
+        );
     }
 
     info!(session_id = %config.session_id, "orchestrator stopped");
@@ -205,9 +234,16 @@ struct OrchestratorTurnConfig {
     memory: Arc<Mutex<ConversationMemory>>,
     compression_prompt: String,
     turn_number: usize,
+    turn_cancel: TurnCancelFlag,
+    local_llm: Arc<dyn LLMProvider>,
 }
 
-async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
+async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
+    if cfg.turn_cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let rag_start = std::time::Instant::now();
     // ── 1. Embed the question ─────────────────────────────────────────────
     let embedder = Arc::clone(&cfg.embedder);
     let question_clone = cfg.question_text.clone();
@@ -225,29 +261,56 @@ async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
     // MutexGuard is dropped before the first `.await` in `retrieve_rag`.
     let cache_hit = {
         let cache = cfg.prewarm_cache.lock().await;
-        cache.lookup(&embedding).map(|e| (e.directional_response.clone(), e.depth_response.clone()))
+        cache
+            .lookup(&embedding)
+            .map(|e| (e.directional_response.clone(), e.depth_response.clone()))
     };
 
     let from_cache = cache_hit.is_some();
+    let (cached_directional, cached_depth) = match cache_hit {
+        Some((dir, dep)) => (Some(dir), Some(dep)),
+        None => (None, None),
+    };
     if from_cache {
-        info!(session_id = %cfg.session_id, turn = cfg.turn_number, "pre-warm cache hit");
+        info!(
+            session_id = %cfg.session_id,
+            turn = cfg.turn_number,
+            event = "prewarm_cache_hit",
+            "pre-warm cache hit"
+        );
     }
 
     let rag_chunks = retrieve_rag(&cfg, &embedding).await?;
+    let rag_latency_ms = rag_start.elapsed().as_millis() as u64;
 
     // ── 3. Build memory context ───────────────────────────────────────────
+    let using_local = cfg.failover.is_using_local();
+    let compression_llm: Option<Arc<dyn LLMProvider>> = if using_local {
+        Some(Arc::clone(&cfg.local_llm))
+    } else {
+        None
+    };
+
     let memory_ctx = {
         let mem = cfg.memory.lock().await;
-        let budget = ContextBudget::from_window(
-            if cfg.failover.is_using_local() {
-                4_096
-            } else {
-                128_000
+        let budget = ContextBudget::from_window(if using_local { 4_096 } else { 128_000 });
+        mem.build_context(
+            &budget,
+            compression_llm.as_ref(),
+            &cfg.compression_prompt,
+            cfg.session_id,
+        )
+        .await?
+    };
+
+    if memory_ctx.truncated {
+        emit_context_truncated(
+            &app,
+            ContextTruncatedPayload {
+                session_id: cfg.session_id.to_string(),
             },
         );
-        mem.build_context(&budget, None, &cfg.compression_prompt, cfg.session_id)
-            .await?
-    };
+    }
 
     let rag_grounding = mean_rag_score(&rag_chunks);
 
@@ -255,10 +318,13 @@ async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
     let ctx = OrchestrationContext {
         session_id: cfg.session_id,
         question: cfg.question_text.clone(),
-        rag_chunks,
+        rag_chunks: rag_chunks.clone(),
         digest: Arc::clone(&cfg.digest),
         memory_ctx,
         from_cache,
+        cached_directional,
+        cached_depth,
+        turn_cancel: Arc::clone(&cfg.turn_cancel),
         turn_number: cfg.turn_number,
     };
 
@@ -307,7 +373,17 @@ async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
             );
             Err(anyhow::anyhow!("directional panic"))
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            warn!(session_id = %cfg.session_id, error = %e, "directional thread failed");
+            emit_thread_status(
+                &app,
+                ThreadStatusPayload {
+                    thread: "directional".to_string(),
+                    status: "error".to_string(),
+                },
+            );
+            String::new()
+        });
 
     let depth_text = dep_result
         .unwrap_or_else(|e| {
@@ -321,34 +397,78 @@ async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
             );
             Err(anyhow::anyhow!("depth panic"))
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|e| {
+            warn!(session_id = %cfg.session_id, error = %e, "depth thread failed");
+            emit_thread_status(
+                &app,
+                ThreadStatusPayload {
+                    thread: "depth".to_string(),
+                    status: "error".to_string(),
+                },
+            );
+            String::new()
+        });
+
+    let clarifying_emitted = match _cla_result {
+        Ok(Ok(Some(_))) => true,
+        Ok(Ok(None)) => false,
+        Ok(Err(e)) => {
+            warn!(session_id = %cfg.session_id, error = %e, "clarifying thread failed");
+            false
+        }
+        Err(e) => {
+            warn!(session_id = %cfg.session_id, "clarifying task panicked: {e}");
+            false
+        }
+    };
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
-    let signals = ConfidenceSignals {
-        rag_grounding,
-        response_text: directional_text.clone(),
-        provider_name: cfg.failover.active_provider_name().to_string(),
-        cache_stale: from_cache && cfg.failover.is_using_local(),
-        local_fallback_active: cfg.failover.is_using_local(),
-        turn_number: cfg.turn_number,
-    };
-    let (confidence_score, confidence_level) = compute_confidence(&signals);
+    if clarifying_emitted {
+        emit_confidence_score(
+            &app,
+            ConfidenceScorePayload {
+                level: ConfidenceLevel::Grey.as_str().to_string(),
+            },
+        );
+    } else {
+        let rag_texts: Vec<String> = rag_chunks
+            .iter()
+            .take(3)
+            .map(|c| c.chunk.text.clone())
+            .collect();
 
-    info!(
-        session_id = %cfg.session_id,
-        turn = cfg.turn_number,
-        confidence = confidence_score,
-        level = %confidence_level.as_str(),
-        provider = %cfg.failover.active_provider_name(),
-        "confidence computed"
-    );
+        let signals = ConfidenceSignals {
+            rag_grounding,
+            response_text: directional_text.clone(),
+            rag_texts,
+            provider_name: cfg.failover.active_provider_name().to_string(),
+            cache_stale: from_cache && cfg.turn_number > 3,
+            local_fallback_active: cfg.failover.is_using_local(),
+            turn_number: cfg.turn_number,
+        };
+        let (confidence_score, confidence_level) = compute_confidence(&signals);
 
-    emit_confidence_score(
-        &app,
-        ConfidenceScorePayload {
-            level: confidence_level.as_str().to_string(),
-        },
-    );
+        info!(
+            session_id = %cfg.session_id,
+            turn = cfg.turn_number,
+            event = "directional_thread_complete",
+            thread_type = "directional",
+            confidence = confidence_score,
+            level = %confidence_level.as_str(),
+            provider = %cfg.failover.active_provider_name(),
+            cache_hit = from_cache,
+            rag_latency_ms,
+            failover_triggered = cfg.failover.is_using_local(),
+            "confidence computed"
+        );
+
+        emit_confidence_score(
+            &app,
+            ConfidenceScorePayload {
+                level: confidence_level.as_str().to_string(),
+            },
+        );
+    }
 
     // ── 7. Update conversation memory ─────────────────────────────────────
     {
@@ -363,10 +483,7 @@ async fn run_turn(cfg: OrchestratorTurnConfig, app: AppHandle) -> Result<()> {
     Ok(())
 }
 
-async fn retrieve_rag(
-    cfg: &OrchestratorTurnConfig,
-    embedding: &[f32],
-) -> Result<Vec<ScoredChunk>> {
+async fn retrieve_rag(cfg: &OrchestratorTurnConfig, embedding: &[f32]) -> Result<Vec<ScoredChunk>> {
     let chunks = retrieve(
         cfg.vector_store.as_ref(),
         cfg.session_id,
@@ -435,7 +552,12 @@ mod tests {
             score,
         };
 
-        let chunks = vec![make_chunk(0.9), make_chunk(0.8), make_chunk(0.7), make_chunk(0.6)];
+        let chunks = vec![
+            make_chunk(0.9),
+            make_chunk(0.8),
+            make_chunk(0.7),
+            make_chunk(0.6),
+        ];
         let score = mean_rag_score(&chunks);
         // top 3: (0.9 + 0.8 + 0.7) / 3 = 0.8
         assert!((score - 0.8).abs() < 0.01, "score={score}");

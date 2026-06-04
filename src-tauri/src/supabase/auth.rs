@@ -109,9 +109,7 @@ impl SupabaseAuth {
 
     fn map_transport_error(err: reqwest::Error) -> anyhow::Error {
         if err.is_timeout() || err.is_connect() || err.is_request() {
-            anyhow!(
-                "Flint could not reach the auth service. Check your connection."
-            )
+            anyhow!("Flint could not reach the auth service. Check your connection.")
         } else {
             anyhow!("Authentication failed. Please try again.")
         }
@@ -208,9 +206,10 @@ impl AuthInterface for SupabaseAuth {
 
         let status = response.status();
         if status.is_success() {
-            let body: SignupResponse = response.json().await.map_err(|_| {
-                anyhow!("Authentication failed. Please try again.")
-            })?;
+            let body: SignupResponse = response
+                .json()
+                .await
+                .map_err(|_| anyhow!("Authentication failed. Please try again."))?;
             let user = body
                 .user
                 .ok_or_else(|| anyhow!("Authentication failed. Please try again."))?;
@@ -231,9 +230,10 @@ impl AuthInterface for SupabaseAuth {
         match response {
             Ok(resp) if resp.status().is_success() => {
                 info!(event = "login_success");
-                let body: GoTrueTokenResponse = resp.json().await.map_err(|_| {
-                    anyhow!("Authentication failed. Please try again.")
-                })?;
+                let body: GoTrueTokenResponse = resp
+                    .json()
+                    .await
+                    .map_err(|_| anyhow!("Authentication failed. Please try again."))?;
                 Self::token_from_response(body)
             }
             Ok(resp) => {
@@ -276,7 +276,9 @@ impl AuthInterface for SupabaseAuth {
             .await
             .map_err(Self::map_transport_error)?;
 
-        Self::handle_response::<GoTrueTokenResponse>(response).await.and_then(Self::token_from_response)
+        Self::handle_response::<GoTrueTokenResponse>(response)
+            .await
+            .and_then(Self::token_from_response)
     }
 
     async fn get_current_user(&self, token: &AuthToken) -> Result<User> {
@@ -290,9 +292,10 @@ impl AuthInterface for SupabaseAuth {
 
         let status = response.status();
         if status.is_success() {
-            let user: GoTrueUser = response.json().await.map_err(|_| {
-                anyhow!("Authentication failed. Please try again.")
-            })?;
+            let user: GoTrueUser = response
+                .json()
+                .await
+                .map_err(|_| anyhow!("Authentication failed. Please try again."))?;
             return Self::user_from_gotrue(user);
         }
         Err(Self::map_response_error(status))

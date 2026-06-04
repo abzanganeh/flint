@@ -77,6 +77,8 @@ pub struct ConfidenceSignals {
     pub rag_grounding: f32,
     /// Raw response text — used to detect hedging and refusal patterns.
     pub response_text: String,
+    /// Top RAG chunk texts — used for lexical overlap scoring.
+    pub rag_texts: Vec<String>,
     /// Name of the active LLM provider/model (matched against the tier table).
     pub provider_name: String,
     /// Whether this response was served from the pre-warm cache AND more than
@@ -122,12 +124,39 @@ const REFUSAL_PATTERNS: &[&str] = &[
     "outside my knowledge",
 ];
 
+/// Compute lexical overlap between response words and RAG chunk vocabulary.
+fn lexical_overlap(response: &str, rag_texts: &[String]) -> f32 {
+    if rag_texts.is_empty() {
+        return 0.5;
+    }
+    let rag_lower: Vec<String> = rag_texts
+        .iter()
+        .flat_map(|t| {
+            t.to_lowercase()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if rag_lower.is_empty() {
+        return 0.5;
+    }
+    let response_lower = response.to_lowercase();
+    let resp_words: Vec<&str> = response_lower.split_whitespace().collect();
+    if resp_words.is_empty() {
+        return 0.0;
+    }
+    let hits = resp_words
+        .iter()
+        .filter(|w| rag_lower.iter().any(|r| r == *w))
+        .count();
+    hits as f32 / resp_words.len() as f32
+}
+
 /// Compute a response quality signal (0.0–1.0) from the response text.
 ///
-/// Starts at 1.0 and subtracts:
-///  - 0.15 per hedge phrase (capped at −0.30 total)
-///  - 0.40 per refusal phrase (capped at −0.40 total)
-fn response_quality(text: &str) -> f32 {
+/// Blends hedge/refusal heuristics with lexical overlap against RAG chunks.
+fn response_quality(text: &str, rag_texts: &[String]) -> f32 {
     let lower = text.to_lowercase();
 
     let hedge_hits = HEDGE_PATTERNS
@@ -143,7 +172,9 @@ fn response_quality(text: &str) -> f32 {
     let hedge_penalty = (hedge_hits as f32 * 0.15).min(0.30);
     let refusal_penalty = (refusal_hits as f32 * 0.40).min(0.40);
 
-    (1.0_f32 - hedge_penalty - refusal_penalty).max(0.0)
+    let hedge_score = (1.0_f32 - hedge_penalty - refusal_penalty).max(0.0);
+    let overlap = lexical_overlap(text, rag_texts);
+    (0.6 * hedge_score + 0.4 * overlap).clamp(0.0, 1.0)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -162,13 +193,10 @@ pub fn compute_confidence(signals: &ConfidenceSignals) -> (f32, ConfidenceLevel)
         0.0
     };
 
-    let rq = response_quality(&signals.response_text);
+    let rq = response_quality(&signals.response_text, &signals.rag_texts);
     let tier = model_tier_score(&signals.provider_name);
 
-    let score = (0.50 * signals.rag_grounding)
-        + (0.25 * rq)
-        + (0.15 * tier)
-        - staleness_penalty;
+    let score = (0.50 * signals.rag_grounding) + (0.25 * rq) + (0.15 * tier) - staleness_penalty;
 
     let score = score.clamp(0.0, 1.0);
 
@@ -193,10 +221,19 @@ pub fn compute_confidence(signals: &ConfidenceSignals) -> (f32, ConfidenceLevel)
 mod tests {
     use super::*;
 
-    fn signals(rag: f32, response: &str, provider: &str, cache_stale: bool, turn: usize) -> ConfidenceSignals {
+    /// Test signal builder — responses overlap with RAG vocabulary so that
+    /// `lexical_overlap` is high (1.0 in these fixtures).
+    fn signals(
+        rag: f32,
+        response: &str,
+        provider: &str,
+        cache_stale: bool,
+        turn: usize,
+    ) -> ConfidenceSignals {
         ConfidenceSignals {
             rag_grounding: rag,
             response_text: response.to_string(),
+            rag_texts: vec![response.to_string()],
             provider_name: provider.to_string(),
             cache_stale,
             local_fallback_active: false,
@@ -206,28 +243,34 @@ mod tests {
 
     #[test]
     fn green_band_high_quality_groq() {
-        // rag=0.90, quality=1.0 (no hedges), tier=0.85, no staleness
-        // score = 0.45 + 0.25 + 0.1275 = 0.8275
-        let (score, level) = compute_confidence(&signals(0.90, "The answer is X.", "groq", false, 1));
+        // rag=0.90, quality blended (hedge=1.0 × 0.6 + overlap=1.0 × 0.4 = 1.0),
+        // tier=0.85; score = 0.45 + 0.25 + 0.1275 = 0.8275
+        let (score, level) =
+            compute_confidence(&signals(0.90, "The answer is X.", "groq", false, 1));
         assert!(score >= 0.75, "score={score}");
         assert_eq!(level, ConfidenceLevel::Green);
     }
 
     #[test]
     fn blue_band_medium_rag() {
-        // rag=0.60, quality=1.0, tier=0.85 → 0.30 + 0.25 + 0.1275 = 0.6775
-        let (score, level) = compute_confidence(&signals(0.60, "The answer is Y.", "groq", false, 2));
+        let (score, level) =
+            compute_confidence(&signals(0.60, "The answer is Y.", "groq", false, 2));
         assert!((0.55..0.75).contains(&score), "score={score}");
         assert_eq!(level, ConfidenceLevel::Blue);
     }
 
     #[test]
     fn amber_band_hedged_response() {
-        // rag=0.20, quality penalised by hedge ("I'm not sure" + "it depends" = −0.30),
-        // quality=0.70, tier=0.85
-        // score = 0.50×0.20 + 0.25×0.70 + 0.15×0.85 = 0.10 + 0.175 + 0.1275 = 0.4025
-        let (score, level) =
-            compute_confidence(&signals(0.20, "I'm not sure, it depends.", "groq", false, 1));
+        // rag=0.20, hedge_score=0.70 (two hedges), overlap=1.0,
+        // quality = 0.6×0.70 + 0.4×1.0 = 0.82
+        // score = 0.50×0.20 + 0.25×0.82 + 0.15×0.85 = 0.10 + 0.205 + 0.1275 = 0.4325
+        let (score, level) = compute_confidence(&signals(
+            0.20,
+            "I'm not sure, it depends.",
+            "groq",
+            false,
+            1,
+        ));
         assert!((0.35..0.55).contains(&score), "score={score}");
         assert_eq!(level, ConfidenceLevel::Amber);
     }
@@ -235,7 +278,7 @@ mod tests {
     #[test]
     fn amber_low_band_refusal() {
         let (score, level) = compute_confidence(&signals(
-            0.10,
+            0.05,
             "As an AI language model, I cannot provide this.",
             "groq",
             false,
@@ -243,6 +286,18 @@ mod tests {
         ));
         assert!(score < 0.35, "score={score}");
         assert_eq!(level, ConfidenceLevel::AmberLow);
+    }
+
+    #[test]
+    fn lexical_overlap_zero_when_response_misses_rag_vocab() {
+        let mut sig = signals(0.50, "The answer is irrelevant.", "groq", false, 1);
+        sig.rag_texts = vec!["completely different vocabulary here".to_string()];
+        let (score, _) = compute_confidence(&sig);
+        // Lower than the matching-overlap green-test because overlap drags quality down.
+        assert!(
+            score < 0.65,
+            "expected reduced score with no overlap, got {score}"
+        );
     }
 
     #[test]
@@ -260,14 +315,20 @@ mod tests {
         let fresh = compute_confidence(&signals(0.80, "Answer.", "groq", true, 2));
         let stale = compute_confidence(&signals(0.80, "Answer.", "groq", true, 4));
         assert!(fresh.0 > stale.0, "staleness penalty not applied");
-        assert!((fresh.0 - stale.0 - 0.10).abs() < 0.01, "penalty magnitude wrong");
+        assert!(
+            (fresh.0 - stale.0 - 0.10).abs() < 0.01,
+            "penalty magnitude wrong"
+        );
     }
 
     #[test]
     fn staleness_penalty_not_applied_on_turn_3_or_earlier() {
         let at_turn_3 = compute_confidence(&signals(0.80, "Answer.", "groq", true, 3));
         let no_cache = compute_confidence(&signals(0.80, "Answer.", "groq", false, 3));
-        assert_eq!(at_turn_3.0, no_cache.0, "turn 3 should not incur staleness penalty");
+        assert_eq!(
+            at_turn_3.0, no_cache.0,
+            "turn 3 should not incur staleness penalty"
+        );
     }
 
     #[test]

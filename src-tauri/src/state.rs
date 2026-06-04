@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -23,6 +24,10 @@ use crate::supabase::SupabaseAuth;
 
 // ── Live session handles (Phase 3) ───────────────────────────────────────────
 
+/// Per-turn cancellation flag. Set by `cancel_inference`; checked by response
+/// threads between token emissions.
+pub type TurnCancelFlag = Arc<AtomicBool>;
+
 /// Handles for the running audio capture thread and background tasks.
 ///
 /// `AudioCapture` contains `cpal::Stream` which is `!Send`, so the capture
@@ -46,6 +51,8 @@ pub struct LiveTaskHandles {
     /// Sender side of the question channel — used by `trigger_response` to
     /// inject a manual question into the orchestrator.
     pub question_tx: mpsc::Sender<DetectedQuestion>,
+    /// Active turn's cancellation flag. Replaced on each orchestrator dispatch.
+    pub turn_cancel: Arc<Mutex<Option<TurnCancelFlag>>>,
 }
 
 /// Shared application state for Tauri commands.
@@ -83,10 +90,9 @@ pub struct AppState {
     /// Audio capture thread stop signal + background task handles. `Some`
     /// only while the session is LIVE. Cleared on `stop_session`.
     pub live_tasks: Mutex<Option<LiveTaskHandles>>,
-    /// Per-session conversation memory. Populated at `start_session`, cleared
-    /// at `stop_session`. Shared between the orchestrator and any commands that
-    /// need to inspect history (e.g. `get_session_snapshot`).
-    pub session_memory: Arc<Mutex<Option<ConversationMemory>>>,
+    /// Shared orchestrator conversation memory. Same `Arc` as passed to
+    /// `OrchestratorConfig` — not a duplicate instance.
+    pub session_memory: Arc<Mutex<Option<Arc<Mutex<ConversationMemory>>>>>,
 }
 
 impl AppState {
@@ -102,8 +108,7 @@ impl AppState {
             .path()
             .app_data_dir()
             .context("Cannot determine app data directory")?;
-        std::fs::create_dir_all(&data_dir)
-            .context("Cannot create app data directory")?;
+        std::fs::create_dir_all(&data_dir).context("Cannot create app data directory")?;
 
         let persistence_path = data_dir.join("flint.db");
         let vec_db_path = data_dir.join("flint_vec.db");
@@ -133,14 +138,13 @@ impl AppState {
         // The model is cached locally after the first run; subsequent startups
         // take < 1 s.
         let embedder = Arc::new(
-            Embedder::new().context("Failed to initialise embedder — check network on first run")?,
+            Embedder::new()
+                .context("Failed to initialise embedder — check network on first run")?,
         );
 
         // ── State machine wired to persistence ───────────────────────────────
         let persister = Arc::clone(&persistence) as Arc<dyn crate::session::state::StatePersister>;
-        let state_machine = Arc::new(Mutex::new(
-            SessionStateMachine::with_persister(persister),
-        ));
+        let state_machine = Arc::new(Mutex::new(SessionStateMachine::with_persister(persister)));
 
         Ok(Self {
             auth,

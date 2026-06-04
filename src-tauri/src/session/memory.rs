@@ -111,11 +111,7 @@ impl ConversationMemory {
 
     /// Update the directional/depth responses on the most recent turn if they
     /// were not available when the turn was first pushed.
-    pub fn update_last_responses(
-        &mut self,
-        directional: Option<String>,
-        depth: Option<String>,
-    ) {
+    pub fn update_last_responses(&mut self, directional: Option<String>, depth: Option<String>) {
         if let Some(last) = self.turns.last_mut() {
             if let Some(d) = directional {
                 last.directional_response = d;
@@ -177,7 +173,10 @@ impl ConversationMemory {
 
         let old_text = self.serialise_turns(old_turns);
         let new_summary = if let Some(provider) = llm {
-            match self.compress(&old_text, provider, compression_prompt_template).await {
+            match self
+                .compress(&old_text, provider, compression_prompt_template)
+                .await
+            {
                 Ok(s) => {
                     info!(
                         session_id = %session_id,
@@ -285,8 +284,10 @@ mod tests {
     #[test]
     fn budget_allocations_sum_to_sixty_percent() {
         let budget = ContextBudget::from_window(128_000);
-        let total_allocated =
-            budget.rag_tokens + budget.history_tokens + budget.system_tokens + budget.question_tokens;
+        let total_allocated = budget.rag_tokens
+            + budget.history_tokens
+            + budget.system_tokens
+            + budget.question_tokens;
         let sixty_percent = (128_000_f64 * 0.6) as usize;
         // Allow ±4 tokens for rounding.
         assert!(

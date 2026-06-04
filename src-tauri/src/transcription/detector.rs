@@ -61,13 +61,29 @@ const P95_REENABLE_THRESHOLD_MS: u128 = 120;
 /// Utterance-opening phrases that reliably signal a question or request.
 /// Matched case-insensitively against the normalised utterance prefix.
 const QUESTION_PREFIXES: &[&str] = &[
-    "what ", "what's ", "what's ",
-    "how ", "why ", "when ", "where ", "who ",
-    "which ", "whose ", "whom ",
-    "can you ", "could you ", "would you ", "should you ",
-    "tell me ", "walk me ", "walk us ",
-    "describe ", "explain ", "help me understand ",
-    "give me ", "give us ",
+    "what ",
+    "what's ",
+    "what's ",
+    "how ",
+    "why ",
+    "when ",
+    "where ",
+    "who ",
+    "which ",
+    "whose ",
+    "whom ",
+    "can you ",
+    "could you ",
+    "would you ",
+    "should you ",
+    "tell me ",
+    "walk me ",
+    "walk us ",
+    "describe ",
+    "explain ",
+    "help me understand ",
+    "give me ",
+    "give us ",
 ];
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -107,16 +123,13 @@ impl QuestionDetector {
         ollama: Option<Arc<dyn LLMProvider>>,
         prompts_dir: &Path,
     ) -> Result<Self> {
-        let prompt_path = prompts_dir
-            .join("question_detection")
-            .join("llama.txt");
-        let prompt_template = std::fs::read_to_string(&prompt_path)
-            .with_context(|| {
-                format!(
-                    "Failed to load question detection prompt from {}",
-                    prompt_path.display()
-                )
-            })?;
+        let prompt_path = prompts_dir.join("question_detection").join("llama.txt");
+        let prompt_template = std::fs::read_to_string(&prompt_path).with_context(|| {
+            format!(
+                "Failed to load question detection prompt from {}",
+                prompt_path.display()
+            )
+        })?;
 
         Ok(Self {
             ollama,
@@ -192,11 +205,9 @@ impl QuestionDetector {
         // the prompt structure. Replace bare braces with their lookalike
         // Unicode alternatives so the text is preserved but is inert.
         let sanitized = utterance
-            .replace('{', "\u{FF5B}")  // ｛ FULLWIDTH LEFT CURLY BRACKET
+            .replace('{', "\u{FF5B}") // ｛ FULLWIDTH LEFT CURLY BRACKET
             .replace('}', "\u{FF5D}"); // ｝ FULLWIDTH RIGHT CURLY BRACKET
-        let prompt = self
-            .prompt_template
-            .replace("{utterance}", &sanitized);
+        let prompt = self.prompt_template.replace("{utterance}", &sanitized);
 
         let config = CompletionConfig {
             max_tokens: Some(4),
@@ -205,13 +216,10 @@ impl QuestionDetector {
         };
 
         let timeout = Duration::from_millis(PASS2_TIMEOUT_MS);
-        let response = tokio::time::timeout(
-            timeout,
-            provider.complete(prompt, config),
-        )
-        .await
-        .context("Pass 2 timed out")?
-        .context("Pass 2 completion failed")?;
+        let response = tokio::time::timeout(timeout, provider.complete(prompt, config))
+            .await
+            .context("Pass 2 timed out")?
+            .context("Pass 2 completion failed")?;
 
         let answer = response.trim().to_uppercase();
         match answer.as_str() {
@@ -339,7 +347,10 @@ mod tests {
     #[test]
     fn question_mark_detected() {
         assert_eq!(pass1("tell me about yourself?"), DetectionResult::Question);
-        assert_eq!(pass1("what is your experience with rust?"), DetectionResult::Question);
+        assert_eq!(
+            pass1("what is your experience with rust?"),
+            DetectionResult::Question
+        );
     }
 
     // ── Pass 1 — prefix matching ──────────────────────────────────────────
@@ -356,12 +367,18 @@ mod tests {
 
     #[test]
     fn question_prefix_tell_me_detected() {
-        assert_eq!(pass1("tell me about a challenge"), DetectionResult::Question);
+        assert_eq!(
+            pass1("tell me about a challenge"),
+            DetectionResult::Question
+        );
     }
 
     #[test]
     fn question_prefix_walk_me_detected() {
-        assert_eq!(pass1("walk me through your decision"), DetectionResult::Question);
+        assert_eq!(
+            pass1("walk me through your decision"),
+            DetectionResult::Question
+        );
     }
 
     #[test]
@@ -371,7 +388,10 @@ mod tests {
 
     #[test]
     fn question_prefix_explain_detected() {
-        assert_eq!(pass1("explain your approach to testing"), DetectionResult::Question);
+        assert_eq!(
+            pass1("explain your approach to testing"),
+            DetectionResult::Question
+        );
     }
 
     #[test]
@@ -402,7 +422,10 @@ mod tests {
     #[tokio::test]
     async fn tier2_pass2_yes_response_returns_true() {
         let detector = detector_with_mock("YES");
-        let result = detector.detect("that is quite the challenge").await.unwrap();
+        let result = detector
+            .detect("that is quite the challenge")
+            .await
+            .unwrap();
         assert!(result, "Pass 2 YES should return true");
     }
 
@@ -421,15 +444,24 @@ mod tests {
         // because Pass 1 catches it before Pass 2 is even called.
         // Use a truly ambiguous utterance for this test.
         let result2 = detector.detect("that sounds great").await.unwrap();
-        assert!(!result2, "Unexpected Pass 2 response should fall back to false");
+        assert!(
+            !result2,
+            "Unexpected Pass 2 response should fall back to false"
+        );
     }
 
     #[tokio::test]
     async fn tier2_clear_question_resolved_by_pass1_without_pass2() {
         // Even on Tier 2, a clear "?" question never reaches Pass 2.
         let detector = detector_with_mock("NO"); // Pass 2 would say NO — but is never called
-        let result = detector.detect("can you describe your approach?").await.unwrap();
-        assert!(result, "Clear question should be true regardless of mock response");
+        let result = detector
+            .detect("can you describe your approach?")
+            .await
+            .unwrap();
+        assert!(
+            result,
+            "Clear question should be true regardless of mock response"
+        );
     }
 
     // ── P95 latency tracking ──────────────────────────────────────────────

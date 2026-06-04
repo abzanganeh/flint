@@ -110,11 +110,11 @@ pub struct Downsampler {
 impl Downsampler {
     pub fn new() -> Result<Self> {
         let resampler = FftFixedIn::<f32>::new(
-            RNNOISE_RATE as usize,    // 48 000
-            PIPELINE_RATE as usize,   // 16 000
-            RNNOISE_FRAME_SIZE,       // fixed input chunk = 480 samples
-            2,                        // sub_chunks (rubato recommendation)
-            1,                        // mono
+            RNNOISE_RATE as usize,  // 48 000
+            PIPELINE_RATE as usize, // 16 000
+            RNNOISE_FRAME_SIZE,     // fixed input chunk = 480 samples
+            2,                      // sub_chunks (rubato recommendation)
+            1,                      // mono
         )
         .context("Failed to create 48kHz → 16kHz downsampler")?;
         Ok(Self { resampler })
@@ -141,10 +141,7 @@ impl Downsampler {
             .context("Downsampler process error")?;
 
         // extract the single mono channel
-        let ch = output
-            .drain(..)
-            .next()
-            .unwrap_or_default();
+        let ch = output.drain(..).next().unwrap_or_default();
 
         debug_assert_eq!(
             ch.len(),

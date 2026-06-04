@@ -181,7 +181,11 @@ impl WhisperEngine {
 
                 let start_ms = centiseconds_to_ms(data.t0);
                 let end_ms = centiseconds_to_ms(data.t1).max(start_ms);
-                seg_words.push(WordTimestamp { word, start_ms, end_ms });
+                seg_words.push(WordTimestamp {
+                    word,
+                    start_ms,
+                    end_ms,
+                });
             }
 
             if seg_logprob_count > 0 {

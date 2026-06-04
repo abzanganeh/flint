@@ -66,7 +66,8 @@ fn test_rnnoise_processes_speech_frame() {
     let mut proc = RNNoiseProcessor::new().expect("RNNoiseProcessor init failed");
     let mut frame = speech_like_frame_48khz(0);
 
-    proc.process_frame(&mut frame).expect("process_frame failed");
+    proc.process_frame(&mut frame)
+        .expect("process_frame failed");
 
     let energy: f32 = frame.iter().map(|s| s * s).sum();
     assert!(
@@ -81,7 +82,8 @@ fn test_rnnoise_silence_stays_silence() {
     let mut proc = RNNoiseProcessor::new().expect("RNNoiseProcessor init failed");
     let mut frame = vec![0.0f32; RNNOISE_FRAME_SIZE];
 
-    proc.process_frame(&mut frame).expect("process_frame failed");
+    proc.process_frame(&mut frame)
+        .expect("process_frame failed");
 
     let energy: f32 = frame.iter().map(|s| s * s).sum();
     assert!(
@@ -176,7 +178,10 @@ fn test_two_channels_independent() {
     let sys_energy: f32 = sys_out.iter().map(|s| s * s).sum();
     let mic_energy: f32 = mic_out.iter().map(|s| s * s).sum();
 
-    assert!(sys_energy > mic_energy, "System (speech) channel should have higher energy than mic (silence)");
+    assert!(
+        sys_energy > mic_energy,
+        "System (speech) channel should have higher energy than mic (silence)"
+    );
 }
 
 // ── Section B: Question detection ────────────────────────────────────────────
@@ -184,8 +189,8 @@ fn test_two_channels_independent() {
 /// Direct questions ending in `?` are detected as questions.
 #[tokio::test]
 async fn test_detector_identifies_direct_question() {
-    let detector = QuestionDetector::new(1, None, &prompts_dir())
-        .expect("QuestionDetector init failed");
+    let detector =
+        QuestionDetector::new(1, None, &prompts_dir()).expect("QuestionDetector init failed");
 
     assert!(
         detector
@@ -199,8 +204,8 @@ async fn test_detector_identifies_direct_question() {
 /// Statements are not classified as questions.
 #[tokio::test]
 async fn test_detector_rejects_statement() {
-    let detector = QuestionDetector::new(1, None, &prompts_dir())
-        .expect("QuestionDetector init failed");
+    let detector =
+        QuestionDetector::new(1, None, &prompts_dir()).expect("QuestionDetector init failed");
 
     assert!(
         !detector
@@ -214,8 +219,8 @@ async fn test_detector_rejects_statement() {
 /// Common interview question prefixes are all detected correctly.
 #[tokio::test]
 async fn test_detector_interview_question_prefixes() {
-    let detector = QuestionDetector::new(1, None, &prompts_dir())
-        .expect("QuestionDetector init failed");
+    let detector =
+        QuestionDetector::new(1, None, &prompts_dir()).expect("QuestionDetector init failed");
 
     let questions = [
         "Tell me about yourself.",
@@ -238,8 +243,8 @@ async fn test_detector_interview_question_prefixes() {
 /// Pure statements that happen to mention topics are not questions.
 #[tokio::test]
 async fn test_detector_non_question_statements() {
-    let detector = QuestionDetector::new(1, None, &prompts_dir())
-        .expect("QuestionDetector init failed");
+    let detector =
+        QuestionDetector::new(1, None, &prompts_dir()).expect("QuestionDetector init failed");
 
     let non_questions = [
         "We are looking for someone with strong Rust skills.",
@@ -259,8 +264,8 @@ async fn test_detector_non_question_statements() {
 /// accumulation bugs, no P95 bypass triggering on Pass 1-only paths).
 #[tokio::test]
 async fn test_detector_consistent_across_repeated_calls() {
-    let detector = QuestionDetector::new(1, None, &prompts_dir())
-        .expect("QuestionDetector init failed");
+    let detector =
+        QuestionDetector::new(1, None, &prompts_dir()).expect("QuestionDetector init failed");
 
     let question = "Tell me about a time you had to debug a production issue.";
     let statement = "We operate a 24/7 on-call rotation.";
@@ -309,8 +314,7 @@ fn test_whisper_engine_transcribes_pcm_audio() {
         return;
     }
 
-    let engine = WhisperEngine::new(&model_path, 1_u8)
-        .expect("WhisperEngine init failed");
+    let engine = WhisperEngine::new(&model_path, 1_u8).expect("WhisperEngine init failed");
 
     // Synthesise 3 seconds of speech-like audio at 16kHz (Whisper input rate).
     let sample_rate = 16_000_u32;
@@ -365,7 +369,10 @@ fn test_whisper_transcribes_real_speech_fixture() {
 
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let model_path = format!("{home}/.cache/whisper/ggml-tiny.en.bin");
-    let fixture_path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tell_me_about_yourself.wav");
+    let fixture_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/tell_me_about_yourself.wav"
+    );
 
     if !std::path::Path::new(&model_path).exists() {
         eprintln!("SKIP: model not found at {model_path}");
@@ -378,11 +385,9 @@ fn test_whisper_transcribes_real_speech_fixture() {
 
     // Load raw 16kHz f32 PCM from the WAV file (hound crate not available here;
     // a minimal WAV parser reads the data chunk directly).
-    let samples = load_wav_samples(fixture_path)
-        .expect("Failed to load WAV fixture");
+    let samples = load_wav_samples(fixture_path).expect("Failed to load WAV fixture");
 
-    let engine = WhisperEngine::new(&model_path, 1_u8)
-        .expect("WhisperEngine init failed");
+    let engine = WhisperEngine::new(&model_path, 1_u8).expect("WhisperEngine init failed");
 
     let chunk = VadChunk {
         duration_ms: (samples.len() as u32 * 1000) / 16_000,
@@ -394,12 +399,12 @@ fn test_whisper_transcribes_real_speech_fixture() {
         .transcribe(&chunk)
         .expect("transcribe should not error");
 
-    let transcript = result
-        .map(|r| r.text.to_lowercase())
-        .unwrap_or_default();
+    let transcript = result.map(|r| r.text.to_lowercase()).unwrap_or_default();
 
     assert!(
-        transcript.contains("tell") || transcript.contains("yourself") || transcript.contains("about"),
+        transcript.contains("tell")
+            || transcript.contains("yourself")
+            || transcript.contains("about"),
         "Expected transcript to contain words from 'Tell me about yourself', got: {transcript:?}"
     );
 }
@@ -414,8 +419,7 @@ fn test_whisper_transcribes_real_speech_fixture() {
 fn load_wav_samples(path: &str) -> anyhow::Result<Vec<f32>> {
     use std::io::{BufReader, Read};
 
-    let file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("cannot open {path}: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| anyhow::anyhow!("cannot open {path}: {e}"))?;
     let mut reader = BufReader::new(file);
 
     let mut header = [0u8; 44];

@@ -23,8 +23,8 @@ use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::LLMProvider;
 use crate::llm::rate_limiter::RateLimiter;
-use crate::orchestrator::{run_orchestrator, OrchestratorConfig};
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
+use crate::orchestrator::{run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
 use crate::session::memory::ConversationMemory;
 use crate::session::state::SessionState;
@@ -88,10 +88,7 @@ async fn active_auth_token(state: &AppState) -> Result<AuthToken, String> {
 }
 
 /// Validate that `session_id` string parses and matches the active session.
-async fn validate_session_id(
-    state: &AppState,
-    session_id: &str,
-) -> Result<Uuid, String> {
+async fn validate_session_id(state: &AppState, session_id: &str) -> Result<Uuid, String> {
     let id = session_id
         .parse::<Uuid>()
         .map_err(|_| "Invalid session ID format.".to_string())?;
@@ -193,7 +190,10 @@ pub async fn run_health_check(
     state: State<'_, AppState>,
 ) -> Result<Vec<HealthCheckResultDto>, String> {
     let results = checks::run_health_check(&state.plugins).await;
-    Ok(results.into_iter().map(HealthCheckResultDto::from).collect())
+    Ok(results
+        .into_iter()
+        .map(HealthCheckResultDto::from)
+        .collect())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -224,9 +224,7 @@ pub async fn create_session(
             ));
         }
 
-        machine
-            .set_session_id(session_id)
-            .map_err(session_error)?;
+        machine.set_session_id(session_id).map_err(session_error)?;
 
         machine
             .transition(SessionState::Configuring)
@@ -289,7 +287,9 @@ pub async fn ingest_context(
         let mut machine = state.state_machine.lock().await;
         let _ = machine.transition(SessionState::Configuring);
         emit_state(&app, SessionState::Configuring);
-        return Err("Context text is empty — please paste your job description or notes.".to_string());
+        return Err(
+            "Context text is empty — please paste your job description or notes.".to_string(),
+        );
     }
 
     // ── 2. Embed ─────────────────────────────────────────────────────────────
@@ -569,8 +569,7 @@ pub async fn start_session(
     // The thread owns the AudioCapture. When stop_tx fires (or is dropped),
     // blocking_recv() returns, capture.stop() zeroes the ring buffers, then
     // zeroed_tx fires so stop_session can confirm zeroing before emitting ENDED.
-    let (ready_tx, ready_rx) =
-        tokio::sync::oneshot::channel::<anyhow::Result<()>>();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
 
     std::thread::spawn(move || {
         match AudioCapture::start(system_tx, mic_tx) {
@@ -601,20 +600,21 @@ pub async fn start_session(
     // ── 5. Build failover manager and conversation memory ─────────────────
 
     let (primary_provider, context_window) = match keychain::get_api_key("groq") {
-        Ok(api_key) => {
-            match GroqProvider::new(api_key) {
-                Ok(p) => {
-                    let cw = p.context_window();
-                    (Arc::new(p) as Arc<dyn crate::llm::provider::LLMProvider>, cw)
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to build Groq provider — using stub");
-                    let stub = Arc::clone(&state.llm);
-                    let cw = stub.context_window();
-                    (stub, cw)
-                }
+        Ok(api_key) => match GroqProvider::new(api_key) {
+            Ok(p) => {
+                let cw = p.context_window();
+                (
+                    Arc::new(p) as Arc<dyn crate::llm::provider::LLMProvider>,
+                    cw,
+                )
             }
-        }
+            Err(e) => {
+                warn!(error = %e, "Failed to build Groq provider — using stub");
+                let stub = Arc::clone(&state.llm);
+                let cw = stub.context_window();
+                (stub, cw)
+            }
+        },
         Err(_) => {
             warn!("No Groq API key in keychain — using stub LLM provider");
             let stub = Arc::clone(&state.llm);
@@ -623,7 +623,7 @@ pub async fn start_session(
         }
     };
 
-    let local_provider = Arc::new(
+    let local_provider: Arc<dyn LLMProvider> = Arc::new(
         OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
     );
     let rate_limiter = Arc::new(RateLimiter::new(
@@ -631,34 +631,32 @@ pub async fn start_session(
         primary_provider.rate_limit().requests_per_minute,
         primary_provider.rate_limit().tokens_per_minute,
     ));
-    let mut failover = FailoverManager::new(
-        primary_provider,
-        Arc::clone(&local_provider),
-        rate_limiter,
-    );
+    let mut failover =
+        FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
     failover.start_ping_loop(app.clone());
     let failover = Arc::new(failover);
 
-    let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(context_window)));
-    *state.session_memory.lock().await = Some(ConversationMemory::new(context_window));
+    let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
+        context_window,
+    )));
+    *state.session_memory.lock().await = Some(Arc::clone(&memory));
+
+    let turn_cancel_slot: Arc<tokio::sync::Mutex<Option<crate::state::TurnCancelFlag>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
 
     // Load compression prompt for memory management.
-    let compression_prompt = std::fs::read_to_string(
-        prompts_base_dir().join("compression").join("default.txt"),
-    )
-    .unwrap_or_else(|_| {
-        "Summarise the conversation below in 3-5 sentences.\n\n{old_turns}\n\n[Summary]"
-            .to_string()
-    });
+    let compression_prompt =
+        std::fs::read_to_string(prompts_base_dir().join("compression").join("default.txt"))
+            .unwrap_or_else(|_| {
+                "Summarise the conversation below in 3-5 sentences.\n\n{old_turns}\n\n[Summary]"
+                    .to_string()
+            });
 
     // ── 6. Spawn background tasks ─────────────────────────────────────────
 
-    let digest = state
-        .session_digest
-        .read()
-        .await
-        .clone()
-        .ok_or_else(|| "No session digest — run ingest_context before starting a live session.".to_string())?;
+    let digest = state.session_digest.read().await.clone().ok_or_else(|| {
+        "No session digest — run ingest_context before starting a live session.".to_string()
+    })?;
 
     let orch_config = OrchestratorConfig {
         session_id: sid,
@@ -670,6 +668,8 @@ pub async fn start_session(
         prewarm_cache: Arc::clone(&state.prewarm_cache),
         memory,
         compression_prompt,
+        local_llm: local_provider,
+        turn_cancel_slot: Arc::clone(&turn_cancel_slot),
     };
 
     let orch_app = app.clone();
@@ -693,6 +693,7 @@ pub async fn start_session(
         pipeline,
         orchestrator,
         question_tx,
+        turn_cancel: turn_cancel_slot,
     });
 
     // ── 6. State transitions ──────────────────────────────────────────────
@@ -744,10 +745,7 @@ pub async fn start_session(
 /// The caller is responsible for the final `ENDED → IDLE` (or
 /// `ENDED → CONFIGURING`) transition, which is a frontend UX decision.
 #[tauri::command]
-pub async fn stop_session(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     {
         let machine = state.state_machine.lock().await;
         if *machine.current() != SessionState::Live {
@@ -838,16 +836,28 @@ pub async fn trigger_response(
 
 /// Cancel any running inference — valid only from LIVE.
 ///
-/// No-op in Phase 3; the orchestrator's cancellation token is wired in Phase 4.
+/// Sets the active turn's cancellation flag so in-flight token streams stop.
 #[tauri::command]
 pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> {
-    let machine = state.state_machine.lock().await;
-    if *machine.current() != SessionState::Live {
-        return Err(format!(
-            "cancel_inference is only valid from LIVE (current: {})",
-            machine.current()
-        ));
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "cancel_inference is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
     }
+
+    let guard = state.live_tasks.lock().await;
+    if let Some(handles) = guard.as_ref() {
+        let slot = handles.turn_cancel.lock().await;
+        if let Some(flag) = slot.as_ref() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+            info!("cancel_inference: active turn cancelled");
+        }
+    }
+
     Ok(())
 }
 
