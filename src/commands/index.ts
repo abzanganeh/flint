@@ -161,6 +161,10 @@ export const confirmDigest = (sessionId: string, digest: DigestDto): Promise<voi
 export const getDigest = (sessionId: string): Promise<DigestDto> =>
   invoke<DigestDto>("get_digest", { sessionId });
 
+/** Return persisted context text for any session (Past Sessions → Start similar). */
+export const getSessionContext = (sessionId: string): Promise<string> =>
+  invoke<string>("get_session_context", { sessionId });
+
 /** Return the full session state snapshot for React resync. */
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");
@@ -210,6 +214,10 @@ export const listSessions = (): Promise<SessionSummaryDto[]> =>
 /** Mark a session as promoted (exempt from 30-day expiry). */
 export const promoteSession = (sessionId: string): Promise<void> =>
   invoke<void>("promote_session", { sessionId });
+
+/** Remove the promoted flag — session resumes normal 30-day expiry. */
+export const demoteSession = (sessionId: string): Promise<void> =>
+  invoke<void>("demote_session", { sessionId });
 
 /** Delete a session and all its data from local SQLite. */
 export const deleteSession = (sessionId: string): Promise<void> =>

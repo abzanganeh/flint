@@ -98,7 +98,7 @@ pub struct RecoveryData {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -177,6 +177,20 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v3")?;
         info!("sqlite schema migrated to version 3");
+    }
+
+    if current < 4 {
+        // Store the raw context text so sessions can be cloned with the same
+        // context pre-filled. Existing sessions default to empty string.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN context_text TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 4;
+            ",
+        )
+        .context("schema migration v4")?;
+        info!("sqlite schema migrated to version 4");
     }
 
     Ok(())
@@ -630,6 +644,47 @@ impl SessionPersistence {
         .context("promote session")?;
         debug!(session_id = %session_id, "session promoted");
         Ok(())
+    }
+
+    /// Remove the promoted flag from a session so it resumes normal 30-day expiry.
+    pub fn demote_session(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET promoted = 0 WHERE id = ?1",
+            params![sid],
+        )
+        .context("demote session")?;
+        debug!(session_id = %session_id, "session demoted");
+        Ok(())
+    }
+
+    /// Persist the raw context text supplied during ingest so it can be
+    /// retrieved later when the user wants to clone the session.
+    pub fn store_context_text(&self, session_id: Uuid, text: &str) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET context_text = ?1 WHERE id = ?2",
+            params![text, sid],
+        )
+        .context("store context text")?;
+        debug!(session_id = %session_id, "context text stored");
+        Ok(())
+    }
+
+    /// Return the raw context text for a session (empty string if not stored).
+    pub fn get_session_context(&self, session_id: Uuid) -> Result<String> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let text: String = conn
+            .query_row(
+                "SELECT context_text FROM sessions WHERE id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .context("get session context")?;
+        Ok(text)
     }
 
     /// Delete all persisted data for `session_id`.

@@ -138,6 +138,10 @@ fn apply_capture_exclusion_impl<R: Runtime>(_window: &tauri::WebviewWindow<R>) {
 /// `.cursor/rules/flint-security.mdc` requires defaulting to a non-primary
 /// display when available; positions on the chosen monitor are top-right with
 /// a 40px inset so the overlay sits out of the way of typical video tiles.
+///
+/// Unused in debug builds — [`configure_dev_window`] centres on the primary
+/// display instead.
+#[cfg_attr(debug_assertions, allow(dead_code))]
 pub fn place_on_non_primary_monitor<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("main") else {
         warn!("place_on_non_primary_monitor: main window not found");
@@ -191,5 +195,59 @@ pub fn place_on_non_primary_monitor<R: Runtime>(app: &AppHandle<R>) {
             y = new_pos.y,
             "overlay placed on non-primary monitor"
         );
+    }
+}
+
+/// Dev-only window setup: draggable chrome, taskbar entry, primary monitor.
+///
+/// Release builds keep frameless always-on-top placement on the non-primary
+/// display (stealth overlay). Debug builds are easier to move and find.
+#[cfg(debug_assertions)]
+pub fn configure_dev_window<R: Runtime>(app: &AppHandle<R>) {
+    let Some(window) = app.get_webview_window("main") else {
+        warn!("configure_dev_window: main window not found");
+        return;
+    };
+
+    // Keep the window frameless even in dev — the React TitleBar provides
+    // drag, minimize, maximize, and close. Enabling OS decorations here caused
+    // non-functional buttons on Wayland because the hint arrives after mapping.
+    if let Err(e) = window.set_always_on_top(false) {
+        warn!(error = %e, "configure_dev_window: set_always_on_top failed");
+    }
+    if let Err(e) = window.set_skip_taskbar(false) {
+        warn!(error = %e, "configure_dev_window: set_skip_taskbar failed");
+    }
+
+    place_on_primary_monitor_centred(&window);
+    info!("dev window: decorations on, centred on primary monitor");
+}
+
+#[cfg(debug_assertions)]
+fn place_on_primary_monitor_centred<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    let Some(primary) = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+    else {
+        return;
+    };
+
+    let pos = primary.position();
+    let size = primary.size();
+    let win_size = window.outer_size().unwrap_or(tauri::PhysicalSize {
+        width: 800,
+        height: 600,
+    });
+
+    let x = pos.x + (size.width as i32 - win_size.width as i32) / 2;
+    let y = pos.y + (size.height as i32 - win_size.height as i32) / 2;
+    let new_pos = tauri::PhysicalPosition {
+        x: x.max(pos.x),
+        y: y.max(pos.y),
+    };
+
+    if let Err(e) = window.set_position(new_pos) {
+        warn!(error = %e, "place_on_primary_monitor_centred: set_position failed");
     }
 }

@@ -301,6 +301,11 @@ pub async fn ingest_context(
         );
     }
 
+    // Persist raw text for session cloning (best-effort — non-fatal).
+    if let Err(e) = state.persistence.store_context_text(sid, &text) {
+        warn!(session_id = %sid, error = %e, "failed to store context text");
+    }
+
     // ── 2. Embed ─────────────────────────────────────────────────────────────
     let refs: Vec<&str> = raw_chunks.iter().map(|s| s.as_str()).collect();
     let embeddings = tokio::task::spawn_blocking({
@@ -417,6 +422,21 @@ pub async fn confirm_digest(
 
     info!(session_id = %sid, "digest confirmed, pre-warm complete");
     Ok(())
+}
+
+/// Return the raw context text persisted for a session (for cloning / re-open).
+///
+/// Does not require the session to be the active in-memory session.
+#[tauri::command]
+pub async fn get_session_context(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+    state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())
 }
 
 /// Return the current digest for the active session.
@@ -1234,6 +1254,19 @@ pub async fn promote_session(
     state
         .persistence
         .promote_session(sid)
+        .map_err(|e| e.to_string())
+}
+
+/// Remove the promoted flag from a session so it resumes normal 30-day expiry.
+#[tauri::command]
+pub async fn demote_session(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+    state
+        .persistence
+        .demote_session(sid)
         .map_err(|e| e.to_string())
 }
 

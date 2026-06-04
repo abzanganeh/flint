@@ -41,6 +41,9 @@ pub fn run() {
             app.manage(app_state);
             hotkeys::register_hotkeys(app.handle());
             stealth::apply_capture_exclusion(app.handle());
+            #[cfg(debug_assertions)]
+            stealth::configure_dev_window(app.handle());
+            #[cfg(not(debug_assertions))]
             stealth::place_on_non_primary_monitor(app.handle());
             Ok(())
         })
@@ -60,6 +63,7 @@ pub fn run() {
             commands::ingest_context,
             commands::confirm_digest,
             commands::get_digest,
+            commands::get_session_context,
             commands::get_session_snapshot,
             commands::get_rehearsal_completed,
             commands::run_rehearsal_turn,
@@ -78,6 +82,7 @@ pub fn run() {
             commands::generate_session_summary,
             commands::list_sessions,
             commands::promote_session,
+            commands::demote_session,
             commands::delete_session,
         ])
         .run(tauri::generate_context!())

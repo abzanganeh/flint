@@ -22,7 +22,7 @@ export interface RehearsalProps {
 
 const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
   const [question, setQuestion] = useState("");
-  const [submitted, setSubmitted] = useState(false);
+  const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const {
     streamingBuffers,
@@ -32,24 +32,26 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
   } = useUIStore();
 
   useTokenUsage();
-  useHotkeys(sessionId, question, submitted);
+  useHotkeys(sessionId, question, asking);
 
   const hasResponse =
     streamingBuffers.directional.length > 0 ||
     streamingBuffers.depth.length > 0;
 
   const handleSubmit = async () => {
-    if (!question.trim()) return;
+    if (!question.trim() || asking) return;
     setError(null);
     clearStreamingBuffers();
     clearClarifyingQuestions();
     setLastManualQuestion(question.trim());
+    setAsking(true);
 
     try {
       await runRehearsalTurn(sessionId, question.trim());
-      setSubmitted(true);
     } catch (e) {
       setError(String(e));
+    } finally {
+      setAsking(false);
     }
   };
 
@@ -63,13 +65,20 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
     onComplete();
   };
 
+  const handleQuestionKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      void handleSubmit();
+    }
+  };
+
   return (
     <div
       data-testid="rehearsal-screen"
       style={{
         display: "flex",
         flexDirection: "column",
-        height: "100vh",
+        height: "calc(100vh - 36px)",
         backgroundColor: "#0f1117",
         fontFamily: "'Inter', 'SF Pro Text', system-ui, sans-serif",
       }}
@@ -95,69 +104,81 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
         >
           Rehearsal Mode
         </span>
-        <span style={{ color: "#374151", fontSize: "11px" }}>
-          — practice before going live. Responses are not saved as a session.
+        <span style={{ color: "#6b7280", fontSize: "11px" }}>
+          — practice before going live. Ctrl+Enter to ask; Enter for a new line.
         </span>
       </div>
 
-      {!submitted && (
+      <div
+        style={{
+          padding: "12px 16px",
+          borderBottom: "1px solid #1e2028",
+          display: "flex",
+          gap: 8,
+          flexShrink: 0,
+          alignItems: "flex-start",
+        }}
+      >
+        <textarea
+          data-testid="rehearsal-question-input"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          onKeyDown={handleQuestionKeyDown}
+          placeholder="Type a practice interview question… (Enter = new line, Ctrl+Enter = Ask)"
+          rows={3}
+          disabled={asking}
+          style={{
+            flex: 1,
+            padding: "8px 12px",
+            backgroundColor: "#1a1d26",
+            border: "1px solid #2d3748",
+            borderRadius: 6,
+            color: "#e5e7eb",
+            fontSize: "13px",
+            lineHeight: 1.5,
+            fontFamily: "inherit",
+            resize: "vertical",
+            minHeight: "4.5rem",
+            maxHeight: "12rem",
+            outline: "none",
+          }}
+        />
+        <button
+          data-testid="rehearsal-submit-button"
+          onClick={() => void handleSubmit()}
+          disabled={!question.trim() || asking}
+          style={{
+            padding: "8px 16px",
+            backgroundColor: question.trim() && !asking ? "#7c3aed" : "#1e2028",
+            color: question.trim() && !asking ? "#fff" : "#4b5563",
+            border: "none",
+            borderRadius: 6,
+            fontSize: "13px",
+            fontWeight: 600,
+            cursor: question.trim() && !asking ? "pointer" : "not-allowed",
+            flexShrink: 0,
+            alignSelf: "flex-end",
+          }}
+        >
+          {asking ? "Asking…" : hasResponse ? "Ask again" : "Ask"}
+        </button>
+      </div>
+
+      {error && (
         <div
           style={{
-            padding: "16px",
+            padding: "8px 16px",
+            color: "#ef4444",
+            fontSize: "12px",
             borderBottom: "1px solid #1e2028",
-            display: "flex",
-            gap: 8,
             flexShrink: 0,
           }}
         >
-          <input
-            data-testid="rehearsal-question-input"
-            type="text"
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void handleSubmit();
-            }}
-            placeholder="Type a practice interview question…"
-            style={{
-              flex: 1,
-              padding: "8px 12px",
-              backgroundColor: "#1a1d26",
-              border: "1px solid #2d3748",
-              borderRadius: 6,
-              color: "#e5e7eb",
-              fontSize: "13px",
-              outline: "none",
-            }}
-          />
-          <button
-            data-testid="rehearsal-submit-button"
-            onClick={() => void handleSubmit()}
-            disabled={!question.trim()}
-            style={{
-              padding: "8px 16px",
-              backgroundColor: question.trim() ? "#7c3aed" : "#1e2028",
-              color: question.trim() ? "#fff" : "#4b5563",
-              border: "none",
-              borderRadius: 6,
-              fontSize: "13px",
-              fontWeight: 600,
-              cursor: question.trim() ? "pointer" : "not-allowed",
-            }}
-          >
-            Ask
-          </button>
-          {error && (
-            <span
-              style={{ color: "#ef4444", fontSize: "12px", alignSelf: "center" }}
-            >
-              {error}
-            </span>
-          )}
+          {error}
         </div>
       )}
 
-      <div style={{ flex: 1, overflow: "hidden" }}>
+      <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
         <OverlayLayout
           transcript={<TranscriptPanel />}
           directional={<DirectionalPanel sessionId={sessionId} />}
@@ -174,31 +195,34 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
           padding: "10px 16px",
           borderTop: "1px solid #1e2028",
           display: "flex",
-          justifyContent: "flex-end",
+          justifyContent: "space-between",
+          alignItems: "center",
           flexShrink: 0,
+          gap: 12,
         }}
       >
+        <span style={{ color: "#52525b", fontSize: "11px" }}>
+          {hasResponse
+            ? "Review the panels above, then go live when ready."
+            : "Optional: ask a practice question, or go live without rehearsing."}
+        </span>
         <button
           data-testid="rehearsal-complete-button"
           onClick={() => void handleComplete()}
-          disabled={!hasResponse}
-          title={
-            hasResponse
-              ? "Complete rehearsal and continue to live session"
-              : "Wait for a response before completing rehearsal"
-          }
+          title="Continue to live session"
           style={{
             padding: "8px 20px",
-            backgroundColor: hasResponse ? "#22c55e" : "#1e2028",
-            color: hasResponse ? "#fff" : "#4b5563",
+            backgroundColor: "#22c55e",
+            color: "#fff",
             border: "none",
             borderRadius: 6,
             fontSize: "13px",
             fontWeight: 600,
-            cursor: hasResponse ? "pointer" : "not-allowed",
+            cursor: "pointer",
+            flexShrink: 0,
           }}
         >
-          Complete Rehearsal →
+          {hasResponse ? "Complete Rehearsal →" : "Skip rehearsal → Go live"}
         </button>
       </div>
     </div>
