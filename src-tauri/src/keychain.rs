@@ -117,8 +117,24 @@ mod tests {
     use super::*;
     use secrecy::ExposeSecret;
 
+    /// Linux CI runners often lack dbus/secret-service; skip rather than fail.
+    fn keychain_available() -> bool {
+        let probe = SecretString::new("probe".into());
+        let provider = "__flint_keychain_probe__";
+        if store_api_key(provider, probe).is_err() {
+            return false;
+        }
+        let _ = delete_api_key(provider);
+        true
+    }
+
     #[test]
     fn test_api_key_round_trip() {
+        if !keychain_available() {
+            eprintln!("SKIP: OS keychain unavailable (no secret service on this host)");
+            return;
+        }
+
         let key = SecretString::new("sk-test-key-12345".into());
         store_api_key("groq", key.clone()).unwrap();
         let retrieved = get_api_key("groq").unwrap();
