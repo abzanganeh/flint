@@ -10,10 +10,10 @@
 //! Wayland there is no standardised compositor exclusion protocol, so we log
 //! and rely on the X11 hard fail plus the user-controlled PipeWire portal.
 //!
-//! macOS exclusion (`NSWindowSharingNone`) is intentionally deferred: it
-//! requires an Objective-C runtime binding which is gated on having a macOS
-//! build host to validate. The function is wired so that turning it on is a
-//! single-file change when a mac is available.
+//! macOS exclusion (`NSWindow.sharingType = NSWindowSharingNone`) is wired via
+//! raw `objc_msgSend` FFI to avoid a new crate dependency. The Objective-C
+//! runtime is always present in any AppKit process, so no extra linker flags
+//! are required.
 
 use tauri::{AppHandle, Manager, Runtime};
 use tracing::{info, warn};
@@ -73,14 +73,47 @@ fn apply_capture_exclusion_impl<R: Runtime>(window: &tauri::WebviewWindow<R>) {
 }
 
 #[cfg(target_os = "macos")]
-fn apply_capture_exclusion_impl<R: Runtime>(_window: &tauri::WebviewWindow<R>) {
-    // TODO(macos): set `NSWindow.sharingType = NSWindowSharingNone` via an
-    // Objective-C binding (objc2 or objc crate). Deferred until we have a
-    // macOS build host to validate.
-    warn!(
-        "capture exclusion: macOS NSWindowSharingNone not yet wired \
-         — set NSWindow.sharingType = .none when implementing"
-    );
+fn apply_capture_exclusion_impl<R: Runtime>(window: &tauri::WebviewWindow<R>) {
+    // Raw `objc_msgSend` FFI to keep dependencies minimal.
+    // `NSWindowSharingNone = 0` instructs AppKit's window server to exclude
+    // the window from screen capture (CGWindowList / ScreenCaptureKit / OBS).
+    use std::ffi::{c_char, c_void};
+
+    type Sel = *mut c_void;
+    type Object = *mut c_void;
+
+    const NS_WINDOW_SHARING_NONE: usize = 0;
+
+    extern "C" {
+        fn sel_registerName(name: *const c_char) -> Sel;
+        fn objc_msgSend();
+    }
+
+    let ns_window_ptr = match window.ns_window() {
+        Ok(ptr) => ptr as Object,
+        Err(e) => {
+            warn!(error = %e, "capture exclusion: ns_window unavailable");
+            return;
+        }
+    };
+    if ns_window_ptr.is_null() {
+        warn!("capture exclusion: ns_window is null");
+        return;
+    }
+
+    // SAFETY: `b"setSharingType:\0"` is a valid C string; `sel_registerName`
+    // returns a stable, process-lifetime selector.
+    let sel = unsafe { sel_registerName(b"setSharingType:\0".as_ptr() as *const c_char) };
+
+    // SAFETY: `objc_msgSend` is an untyped ABI trampoline. We transmute it to
+    // the exact signature for `-[NSWindow setSharingType:]` so the calling
+    // convention and argument count match the Objective-C method.
+    let send: unsafe extern "C" fn(Object, Sel, usize) =
+        unsafe { std::mem::transmute(objc_msgSend as *const ()) };
+
+    // SAFETY: `ns_window_ptr` is a valid NSWindow vended by Tauri.
+    unsafe { send(ns_window_ptr, sel, NS_WINDOW_SHARING_NONE) };
+    info!("capture exclusion applied (NSWindowSharingNone)");
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
