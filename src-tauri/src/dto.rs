@@ -182,4 +182,10 @@ pub struct SessionSummaryDto {
     pub expires_in_secs: i64,
     /// If `true`, this session is pinned and won't be auto-deleted at expiry.
     pub promoted: bool,
+    /// User-specified session name (may be empty for legacy rows).
+    pub name: String,
+    /// e.g. "interview" | "meeting"
+    pub session_type: String,
+    /// e.g. "software engineering" | "product management"
+    pub domain: String,
 }

@@ -152,7 +152,10 @@ export const SessionList: React.FC<Props> = ({ onBack }) => {
                 {/* Info */}
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium text-white truncate">
-                    {dateLabel} &mdash; {stateLabel(session.state)}
+                    {session.name || dateLabel} &mdash; {session.domain || stateLabel(session.state)}
+                  </p>
+                  <p className="text-xs text-neutral-500 mt-0.5 truncate">
+                    {session.name ? dateLabel : ""}{session.name && session.sessionType ? ` \u00B7 ${session.sessionType}` : ""}
                   </p>
                   <p
                     className={`text-xs mt-0.5 ${

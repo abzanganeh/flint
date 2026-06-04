@@ -182,6 +182,9 @@ export interface SessionSummaryDto {
   createdAt: number;
   expiresInSecs: number;
   promoted: boolean;
+  name: string;
+  sessionType: string;
+  domain: string;
 }
 
 /** On app startup: check for a crashed session. Returns null if none. */

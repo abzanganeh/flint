@@ -238,6 +238,12 @@ pub async fn create_session(
     *state.rehearsal_turn.lock().await = 0;
     *state.session_memory.lock().await = None;
 
+    // Persist session row with metadata for the session list.
+    state
+        .persistence
+        .create_session_row(session_id, &config.name, &config.session_type, &config.domain)
+        .map_err(session_error)?;
+
     info!(
         session_id = %session_id,
         name = %config.name,
@@ -905,10 +911,22 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
     // Post-session Supabase sync — fire-and-forget, non-fatal on failure.
     if let Some(sid) = session_id {
         let token_opt = state.auth_token().await;
+        let digest_opt = state.session_digest.read().await.clone();
         if let Some(token) = token_opt {
             let plugins = state.plugins.clone();
             let persistence = Arc::clone(&state.persistence);
             tokio::spawn(async move {
+                let metadata = crate::supabase::SessionMetadata {
+                    name: digest_opt
+                        .as_ref()
+                        .map(|d| d.role.clone())
+                        .unwrap_or_else(|| "Interview Session".to_string()),
+                    session_type: "interview".to_string(),
+                    domain: digest_opt
+                        .as_ref()
+                        .map(|d| d.domain.clone())
+                        .unwrap_or_else(|| "general".to_string()),
+                };
                 match (
                     plugins.get("supabase"),
                     serde_json::from_value::<serde_json::Value>(
@@ -919,7 +937,9 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
                         let url = cfg["url"].as_str().unwrap_or("").to_string();
                         let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
                         if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
-                            if let Err(e) = sync.sync_session(sid, &token, &persistence).await {
+                            if let Err(e) =
+                                sync.sync_session(sid, &token, &persistence, &metadata).await
+                            {
                                 warn!(session_id = %sid, error = %e, "Supabase session sync failed");
                             }
                         }
@@ -1126,7 +1146,7 @@ pub async fn generate_session_summary(
     let transcript_text = {
         let data = state
             .persistence
-            .load_session_for_recovery(sid)
+            .load_session_data(sid)
             .map_err(|e| e.to_string())?;
         match data {
             Some(d) => d
@@ -1217,15 +1237,38 @@ pub async fn promote_session(
         .map_err(|e| e.to_string())
 }
 
-/// Delete a session and all its data from local SQLite.
+/// Delete a session and all its data from local SQLite and Supabase.
 #[tauri::command]
 pub async fn delete_session(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+
+    // Delete locally first (always succeeds even if Supabase is unreachable).
     state
         .persistence
         .clear_session(sid)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Best-effort Supabase deletion — non-fatal on failure.
+    let token_opt = state.auth_token().await;
+    if let Some(token) = token_opt {
+        let plugins = state.plugins.clone();
+        tokio::spawn(async move {
+            if let Some(cfg_val) = plugins.get("supabase") {
+                if let Ok(cfg) = serde_json::from_value::<serde_json::Value>(cfg_val.clone()) {
+                    let url = cfg["url"].as_str().unwrap_or("").to_string();
+                    let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
+                    if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
+                        if let Err(e) = sync.delete_session(sid, &token).await {
+                            warn!(session_id = %sid, error = %e, "Supabase session delete failed");
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    Ok(())
 }

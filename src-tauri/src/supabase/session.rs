@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::interfaces::auth::AuthToken;
-use crate::session::persistence::{RecoveryData, SessionPersistence};
+use crate::session::persistence::SessionPersistence;
 
 const SYNC_TIMEOUT_SECS: u64 = 15;
 
@@ -43,7 +43,7 @@ struct InsertTranscriptRow<'a> {
     session_id: &'a str,
     speaker: &'a str,
     content: &'a str,
-    timestamp: &'a str,
+    timestamp: i64,
 }
 
 #[derive(Serialize)]
@@ -53,12 +53,19 @@ struct InsertResponseRow<'a> {
     #[serde(rename = "type")]
     response_type: &'a str,
     content: &'a str,
-    confidence: &'a str,
+    confidence: f64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Sync implementation
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Metadata needed for the Supabase session row (sourced from local SQLite).
+pub struct SessionMetadata {
+    pub name: String,
+    pub session_type: String,
+    pub domain: String,
+}
 
 /// Supabase session sync client.
 pub struct SupabaseSessionSync {
@@ -101,17 +108,15 @@ impl SupabaseSessionSync {
             reqwest::header::CONTENT_TYPE,
             "application/json".parse().unwrap(),
         );
-        // Prefer=resolution=merge-duplicates so upserts are idempotent.
         h.insert("Prefer", "resolution=merge-duplicates".parse().unwrap());
         h
     }
 
     /// Sync one completed session from SQLite to Supabase.
     ///
-    /// Loads the full session data from `persistence`, then POSTs each table
-    /// in order. A partial sync (e.g. transcripts written but responses not)
-    /// is safe: Supabase upserts are idempotent, so re-running on the next
-    /// app launch will complete the sync.
+    /// Loads the full session data from `persistence` (state-agnostic), then
+    /// POSTs each table in order. Supabase upserts are idempotent, so
+    /// re-running on the next app launch will complete a partial sync.
     ///
     /// Returns `Ok(())` on success. Network errors are logged and returned
     /// so the caller can decide whether to retry or accept partial sync.
@@ -120,8 +125,9 @@ impl SupabaseSessionSync {
         session_id: Uuid,
         token: &AuthToken,
         persistence: &SessionPersistence,
+        metadata: &SessionMetadata,
     ) -> Result<()> {
-        let data: RecoveryData = match persistence.load_session_for_recovery(session_id)? {
+        let data = match persistence.load_session_data(session_id)? {
             Some(d) => d,
             None => {
                 warn!(session_id = %session_id, "no local data to sync");
@@ -136,27 +142,42 @@ impl SupabaseSessionSync {
         // 1. Upsert the session row.
         let session_row = UpsertSessionRow {
             id: &sid,
-            name: "Interview Session",
-            session_type: "interview",
-            domain: "software engineering",
+            name: &metadata.name,
+            session_type: &metadata.session_type,
+            domain: &metadata.domain,
             status: "ended",
         };
-        self.client
+
+        let resp = self
+            .client
             .post(self.rest_url("sessions"))
             .headers(headers.clone())
             .json(&[&session_row])
             .send()
-            .await
-            .context("upsert session row")?
-            .error_for_status()
-            .context("session upsert HTTP error")?;
+            .await;
+
+        // One immediate retry on network failure (NFR-16).
+        let resp = match resp {
+            Ok(r) => r,
+            Err(_) => {
+                warn!(session_id = %sid, "session upsert failed, retrying once");
+                self.client
+                    .post(self.rest_url("sessions"))
+                    .headers(headers.clone())
+                    .json(&[&session_row])
+                    .send()
+                    .await
+                    .context("session upsert retry failed")?
+            }
+        };
+        resp.error_for_status().context("session upsert HTTP error")?;
 
         info!(session_id = %sid, "session row synced");
 
         // 2. Insert transcript chunks (idempotent — Supabase ignores duplicate PKs).
         if !data.transcript_chunks.is_empty() {
-            // Pre-build owned ID strings to avoid temporary lifetime issues.
-            let chunk_ids: Vec<String> = data.transcript_chunks.iter().map(|c| c.id.to_string()).collect();
+            let chunk_ids: Vec<String> =
+                data.transcript_chunks.iter().map(|c| c.id.to_string()).collect();
             let rows: Vec<InsertTranscriptRow<'_>> = data
                 .transcript_chunks
                 .iter()
@@ -166,7 +187,7 @@ impl SupabaseSessionSync {
                     session_id: &sid,
                     speaker: &c.speaker,
                     content: &c.text,
-                    timestamp: "now()",
+                    timestamp: c.timestamp_ms,
                 })
                 .collect();
 
@@ -189,7 +210,8 @@ impl SupabaseSessionSync {
 
         // 3. Insert AI responses.
         if !data.responses.is_empty() {
-            let response_ids: Vec<String> = data.responses.iter().map(|r| r.id.to_string()).collect();
+            let response_ids: Vec<String> =
+                data.responses.iter().map(|r| r.id.to_string()).collect();
             let rows: Vec<InsertResponseRow<'_>> = data
                 .responses
                 .iter()
@@ -199,7 +221,7 @@ impl SupabaseSessionSync {
                     session_id: &sid,
                     response_type: r.response_type.as_str(),
                     content: &r.content,
-                    confidence: "medium",
+                    confidence: r.confidence as f64,
                 })
                 .collect();
 
@@ -221,6 +243,36 @@ impl SupabaseSessionSync {
         }
 
         info!(session_id = %sid, "session sync complete");
+        Ok(())
+    }
+
+    /// Delete a session's data from Supabase (cascading: transcripts + responses).
+    ///
+    /// Used when the user explicitly deletes a session.
+    pub async fn delete_session(
+        &self,
+        session_id: Uuid,
+        token: &AuthToken,
+    ) -> Result<()> {
+        let sid = session_id.to_string();
+        let bearer = token.access_token.expose_secret();
+        let headers = self.headers(bearer);
+
+        // Delete in dependency order: responses → transcripts → session.
+        for table in &["responses", "transcripts", "sessions"] {
+            let filter_col = if *table == "sessions" { "id" } else { "session_id" };
+            let url = format!("{}?{}=eq.{}", self.rest_url(table), filter_col, sid);
+            self.client
+                .delete(&url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .context(format!("delete from {table}"))?
+                .error_for_status()
+                .context(format!("{table} delete HTTP error"))?;
+        }
+
+        info!(session_id = %sid, "session deleted from Supabase");
         Ok(())
     }
 }
