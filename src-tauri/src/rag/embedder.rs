@@ -89,10 +89,27 @@ mod tests {
     // Shared across all tests in this module — the model is loaded once and
     // reused. This avoids concurrent download attempts which cause fastembed
     // lock-file contention when tests run in parallel.
-    static EMBEDDER: OnceLock<Embedder> = OnceLock::new();
+    //
+    // Returns None when the model is not cached and the download is blocked
+    // (e.g. HuggingFace 429 on CI runners). Tests skip gracefully in that case.
+    static EMBEDDER: OnceLock<Option<Embedder>> = OnceLock::new();
 
-    fn shared_embedder() -> &'static Embedder {
-        EMBEDDER.get_or_init(|| Embedder::new().expect("embedder should load"))
+    fn shared_embedder() -> Option<&'static Embedder> {
+        EMBEDDER.get_or_init(|| Embedder::new().ok()).as_ref()
+    }
+
+    macro_rules! require_embedder {
+        () => {
+            match shared_embedder() {
+                Some(e) => e,
+                None => {
+                    eprintln!(
+                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    );
+                    return;
+                }
+            }
+        };
     }
 
     /// Verifies the model loads and produces 384-dimensional embeddings.
@@ -102,7 +119,7 @@ mod tests {
     /// run only.
     #[test]
     fn test_embedding_dimensions() {
-        let embedder = shared_embedder();
+        let embedder = require_embedder!();
         let embedding = embedder
             .embed_one("test sentence")
             .expect("embed_one should succeed");
@@ -116,7 +133,7 @@ mod tests {
 
     #[test]
     fn test_embed_batch_returns_one_vector_per_input() {
-        let embedder = shared_embedder();
+        let embedder = require_embedder!();
         let texts = ["hello world", "distributed systems", "Rust programming"];
         let results = embedder
             .embed_batch(&texts)
@@ -129,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_embed_one_and_batch_are_consistent() {
-        let embedder = shared_embedder();
+        let embedder = require_embedder!();
         let text = "consistency check sentence";
         let via_one = embedder.embed_one(text).expect("embed_one failed");
         let via_batch = embedder
@@ -144,7 +161,7 @@ mod tests {
 
     #[test]
     fn test_embeddings_are_not_zero_vectors() {
-        let embedder = shared_embedder();
+        let embedder = require_embedder!();
         let embedding = embedder
             .embed_one("non-trivial sentence about machine learning")
             .expect("embed_one failed");
@@ -154,7 +171,7 @@ mod tests {
 
     #[test]
     fn test_empty_batch_returns_empty_vec() {
-        let embedder = shared_embedder();
+        let embedder = require_embedder!();
         let results = embedder
             .embed_batch(&[])
             .expect("empty batch should not error");

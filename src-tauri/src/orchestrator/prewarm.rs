@@ -363,12 +363,26 @@ mod tests {
     use super::*;
     use crate::llm::provider::{LLMProvider, RateLimit};
 
-    static EMBEDDER: OnceLock<Arc<Embedder>> = OnceLock::new();
+    static EMBEDDER: OnceLock<Option<Arc<Embedder>>> = OnceLock::new();
 
-    fn embedder() -> Arc<Embedder> {
-        Arc::clone(
-            EMBEDDER.get_or_init(|| Arc::new(Embedder::new().expect("embedder should load"))),
-        )
+    fn embedder() -> Option<Arc<Embedder>> {
+        EMBEDDER
+            .get_or_init(|| Embedder::new().ok().map(Arc::new))
+            .clone()
+    }
+
+    macro_rules! require_embedder {
+        () => {
+            match embedder() {
+                Some(e) => e,
+                None => {
+                    eprintln!(
+                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    );
+                    return;
+                }
+            }
+        };
     }
 
     fn sample_digest() -> Digest {
@@ -431,7 +445,7 @@ mod tests {
 
     #[test]
     fn test_cache_lookup_returns_entry_above_threshold() {
-        let emb = embedder();
+        let emb = require_embedder!();
         let q = "Tell me about yourself";
         let embedding = emb.embed_one(q).unwrap();
 
@@ -452,7 +466,7 @@ mod tests {
 
     #[test]
     fn test_cache_lookup_returns_none_for_unrelated_query() {
-        let emb = embedder();
+        let emb = require_embedder!();
         let interview_q = "Tell me about yourself";
         let unrelated_q = "What is the weather like today in Tokyo?";
 
@@ -477,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_cache_lookup_returns_none_when_empty() {
-        let emb = embedder();
+        let emb = require_embedder!();
         let cache = PreWarmCache::new();
         let embedding = emb.embed_one("some question").unwrap();
         assert!(cache.lookup(&embedding).is_none());
@@ -515,7 +529,7 @@ mod tests {
     async fn test_run_prewarm_populates_cache() {
         let digest = sample_digest();
         let llm = mock_llm("A great pre-warmed answer.");
-        let emb = embedder();
+        let emb = require_embedder!();
         let cache = Arc::new(Mutex::new(PreWarmCache::new()));
 
         run_prewarm(&digest, llm, emb, Arc::clone(&cache))
@@ -534,7 +548,7 @@ mod tests {
         let expected_count = digest.likely_questions.len().min(5);
 
         let llm = mock_llm("merged answer");
-        let emb = embedder();
+        let emb = require_embedder!();
         let cache = Arc::new(Mutex::new(PreWarmCache::new()));
 
         run_prewarm(&digest, llm, emb, Arc::clone(&cache))
@@ -566,7 +580,7 @@ mod tests {
 
         let digest = sample_digest();
         let llm = mock_llm("concurrency check answer");
-        let emb = embedder();
+        let emb = require_embedder!();
         let cache = Arc::new(Mutex::new(PreWarmCache::new()));
 
         let start = Instant::now();
@@ -593,7 +607,7 @@ mod tests {
         digest.likely_questions.clear();
 
         let llm = mock_llm("should not be called");
-        let emb = embedder();
+        let emb = require_embedder!();
         let cache = Arc::new(Mutex::new(PreWarmCache::new()));
 
         run_prewarm(&digest, llm, emb, Arc::clone(&cache))
@@ -606,7 +620,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_prewarm_cache_hit_serves_prewarmed_response() {
-        let emb = embedder();
+        let emb = require_embedder!();
         let q = "Tell me about yourself";
         let embedding = emb.embed_one(q).unwrap();
 
