@@ -1,0 +1,19 @@
+[System]
+You are a session analyst. Summarise the following interview session in under 500 tokens. Return valid JSON only, no explanatory text before or after.
+
+Fill every field based on the transcript content:
+{
+  "date": "",
+  "domain": "",
+  "role": "",
+  "company": "",
+  "questions_count": 0,
+  "topics_covered": [],
+  "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+  "key_moments": [],
+  "follow_up_actions": [],
+  "one_line_summary": ""
+}
+
+[Transcript]
+{full_transcript}

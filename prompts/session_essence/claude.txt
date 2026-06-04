@@ -1,0 +1,24 @@
+<instructions>
+Summarise the interview session transcript below in under 500 tokens. Return ONLY valid JSON — no preamble, no commentary, no markdown fences.
+
+Populate every field from the transcript:
+</instructions>
+
+<output_schema>
+{
+  "date": "",
+  "domain": "",
+  "role": "",
+  "company": "",
+  "questions_count": 0,
+  "topics_covered": [],
+  "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+  "key_moments": [],
+  "follow_up_actions": [],
+  "one_line_summary": ""
+}
+</output_schema>
+
+<transcript>
+{full_transcript}
+</transcript>

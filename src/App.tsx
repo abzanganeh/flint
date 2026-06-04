@@ -49,19 +49,20 @@ function App() {
           return;
         }
 
+        // Crash recovery check runs before auth — local SQLite data is
+        // independent of Supabase login state.
+        const offer = await checkCrashRecovery().catch(() => null);
+        if (cancelled) return;
+        if (offer) {
+          setRecoveryOffer(offer);
+          setScreen("recovery");
+          return;
+        }
+
         const user = await getCurrentUser().catch(() => null);
         if (cancelled) return;
 
         if (user) {
-          // Check for a crashed session before showing the normal flow.
-          const offer = await checkCrashRecovery().catch(() => null);
-          if (cancelled) return;
-          if (offer) {
-            setRecoveryOffer(offer);
-            setScreen("recovery");
-            return;
-          }
-
           await setSessionState(SessionState.IDLE);
           setScreen("health");
           return;
@@ -105,6 +106,7 @@ function App() {
       <Recovery
         offer={recoveryOffer}
         onResume={() => {
+          setSessionId(recoveryOffer.sessionId);
           setRecoveryOffer(null);
           setScreen("live");
         }}
