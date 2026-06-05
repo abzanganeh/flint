@@ -34,6 +34,20 @@ use serde::{Deserialize, Serialize};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Gate definitions — sourced from flint-performance.mdc.
+//
+// NFRs intentionally NOT gated here, with rationale:
+//
+// * Depth response fully streamed P95 < 8s — gated end-to-end against a real
+//   LLM provider in the eval harness (`evals/` crate), not in criterion. A
+//   microbenchmark cannot reproduce realistic provider latency, and the
+//   orchestrator-overhead gate below already covers the local pipeline cost.
+// * Transcription lag P95 < 2s — depends on a loaded Whisper model and live
+//   audio. Criterion cannot run it without device + ~/.cache/whisper assets.
+//   Tracked manually via the audio-pipeline integration tests (#[ignore]ed
+//   on hosts without the model + cmake + libclang).
+// * App cold start P95 < 3s — measured against the packaged binary in CI
+//   smoke jobs, not in-process criterion. A library-only bench would skip
+//   Tauri's webview boot, which dominates the figure.
 // ────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
