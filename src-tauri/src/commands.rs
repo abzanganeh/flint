@@ -12,7 +12,7 @@ use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
     DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionSnapshotDto,
-    UserDto,
+    SmartResumeImportDto, UserDto,
 };
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use crate::health::{checks, hardware};
@@ -30,6 +30,7 @@ use crate::rag::chunker::chunk_text;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
+use crate::smart_resume;
 use crate::state::{AppState, LiveTaskHandles};
 use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
@@ -464,6 +465,31 @@ pub async fn get_digest(
     match guard.as_ref() {
         Some(digest) => Ok(DigestDto::from(digest.clone())),
         None => Err("Digest not yet available. Complete context ingestion first.".to_string()),
+    }
+}
+
+/// Redeem a single-use Smart Resume handoff token and return session pre-fill data.
+#[tauri::command]
+pub async fn import_from_smart_resume(token: String) -> Result<SmartResumeImportDto, String> {
+    info!(
+        event = "smart_resume_import.started",
+        "redeeming Smart Resume handoff token"
+    );
+    match smart_resume::redeem_handoff_token(&token).await {
+        Ok(dto) => {
+            info!(
+                event = "smart_resume_import.success",
+                session_type = %dto.session_type,
+                domain = %dto.domain,
+                export_version = dto.export_version,
+                "Smart Resume handoff token redeemed"
+            );
+            Ok(dto)
+        }
+        Err(ref e) => {
+            warn!(event = "smart_resume_import.error", error = %e, "Smart Resume handoff redeem failed");
+            Err(e.clone())
+        }
     }
 }
 

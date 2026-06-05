@@ -114,6 +114,19 @@ pub struct SessionConfigDto {
     pub domain: String,
 }
 
+/// Payload redeemed from a Smart Resume handoff token (Strategy B Phase 1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartResumeImportDto {
+    pub session_name: String,
+    pub session_type: String,
+    pub domain: String,
+    pub jd_text: String,
+    pub resume_summary: String,
+    pub smart_resume_session_id: String,
+    pub export_version: u32,
+}
+
 /// Serialisable view of a [`Digest`] for React. All fields are editable on the
 /// DigestReview screen before the user confirms and triggers pre-warming.
 #[derive(Debug, Clone, Serialize, Deserialize)]
