@@ -127,7 +127,7 @@ jobs:
           cargo test --lib --no-run --locked
           cargo test --bin bench_gate --no-run --locked
           cargo test --tests --no-run --locked
-          & "$env:GITHUB_WORKSPACE/scripts/windows-prepare-tests.ps1"
+          . "$env:GITHUB_WORKSPACE/scripts/windows-prepare-tests.ps1"
           cargo test --lib --locked
           cargo test --bin bench_gate --locked
           cargo test --tests --locked
