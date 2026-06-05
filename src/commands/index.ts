@@ -222,3 +222,69 @@ export const demoteSession = (sessionId: string): Promise<void> =>
 /** Delete a session and all its data from local SQLite. */
 export const deleteSession = (sessionId: string): Promise<void> =>
   invoke<void>("delete_session", { sessionId });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 7.4 — cost cap enforcement
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type CostCapStatusName = "ok" | "warning_80" | "reached";
+
+export interface CostStatusDto {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costEstimateUsd: number;
+  maxTotalTokens: number | null;
+  maxCostEstimateUsd: number | null;
+  suspended: boolean;
+  status: CostCapStatusName;
+  fractionUsed: number | null;
+}
+
+interface RawCostStatus {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_estimate_usd: number;
+  max_total_tokens: number | null;
+  max_cost_estimate_usd: number | null;
+  suspended: boolean;
+  status: CostCapStatusName;
+  fraction_used: number | null;
+}
+
+const adaptCostStatus = (raw: RawCostStatus): CostStatusDto => ({
+  inputTokens: raw.input_tokens,
+  outputTokens: raw.output_tokens,
+  totalTokens: raw.total_tokens,
+  costEstimateUsd: raw.cost_estimate_usd,
+  maxTotalTokens: raw.max_total_tokens,
+  maxCostEstimateUsd: raw.max_cost_estimate_usd,
+  suspended: raw.suspended,
+  status: raw.status,
+  fractionUsed: raw.fraction_used,
+});
+
+/** Snapshot cumulative usage, cap, and suspension flag. */
+export const getCostStatus = async (): Promise<CostStatusDto> =>
+  adaptCostStatus(await invoke<RawCostStatus>("get_cost_status"));
+
+/** Configure caps. Pass null on either field to remove that dimension. */
+export const setCostCap = async (
+  maxTotalTokens: number | null,
+  maxCostEstimateUsd: number | null,
+): Promise<CostStatusDto> =>
+  adaptCostStatus(
+    await invoke<RawCostStatus>("set_cost_cap", {
+      maxTotalTokens,
+      maxCostEstimateUsd,
+    }),
+  );
+
+/** Clear the suspended flag; counters and cap unchanged. */
+export const liftCostSuspension = async (): Promise<CostStatusDto> =>
+  adaptCostStatus(await invoke<RawCostStatus>("lift_cost_suspension"));
+
+/** Zero all cumulative counters. */
+export const resetCostTracker = async (): Promise<CostStatusDto> =>
+  adaptCostStatus(await invoke<RawCostStatus>("reset_cost_tracker"));

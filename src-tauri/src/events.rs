@@ -91,6 +91,36 @@ pub struct HotkeyTriggerPayload {
     pub action: String,
 }
 
+/// Phase 7.4 — emitted on every transition through the cost-cap status
+/// machine. `status` is one of `ok` / `warning_80` / `reached`. `suspended`
+/// reflects whether the orchestrator is currently blocked from dispatching
+/// new turns.
+#[derive(Debug, Clone, Serialize)]
+pub struct CostCapStatusPayload {
+    pub status: &'static str,
+    pub suspended: bool,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_estimate_usd: f64,
+    pub max_total_tokens: Option<u64>,
+    pub max_cost_estimate_usd: Option<f64>,
+    /// Fraction of the strictest active cap consumed (`0.0..=1.0+`), or
+    /// `null` if no cap is configured.
+    pub fraction_used: Option<f64>,
+}
+
+/// Phase 7.4 — fired exactly once when the orchestrator refuses a turn
+/// because the cap is at 100%. The frontend should surface a non-dismissible
+/// banner and disable the trigger-response control until the user lifts
+/// the suspension via the cost-cap settings.
+#[derive(Debug, Clone, Serialize)]
+pub struct InferenceSuspendedPayload {
+    pub reason: &'static str,
+    pub total_tokens: u64,
+    pub cost_estimate_usd: f64,
+}
+
 pub fn emit_transcription_chunk<R: Runtime>(
     app: &AppHandle<R>,
     payload: TranscriptionChunkPayload,
@@ -131,6 +161,17 @@ pub fn emit_primary_restored<R: Runtime>(app: &AppHandle<R>, payload: PrimaryRes
 
 pub fn emit_token_usage_update<R: Runtime>(app: &AppHandle<R>, payload: TokenUsageUpdatePayload) {
     let _ = app.emit("token_usage_update", payload);
+}
+
+pub fn emit_cost_cap_status<R: Runtime>(app: &AppHandle<R>, payload: CostCapStatusPayload) {
+    let _ = app.emit("cost_cap_status", payload);
+}
+
+pub fn emit_inference_suspended<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: InferenceSuspendedPayload,
+) {
+    let _ = app.emit("inference_suspended", payload);
 }
 
 pub fn emit_rag_chunks_update<R: Runtime>(app: &AppHandle<R>, payload: RagChunksUpdatePayload) {

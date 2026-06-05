@@ -654,6 +654,7 @@ pub async fn run_rehearsal_turn(
         turn_cancel,
         local_provider,
         Arc::clone(&state.persistence),
+        Arc::clone(&state.cost_tracker),
         app,
     )
     .await
@@ -819,6 +820,7 @@ pub async fn start_session(
         local_llm: local_provider,
         turn_cancel_slot: Arc::clone(&turn_cancel_slot),
         persistence: Arc::clone(&state.persistence),
+        cost_tracker: Arc::clone(&state.cost_tracker),
     };
 
     let orch_app = app.clone();
@@ -917,6 +919,9 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
     // Clear per-session memory.
     *state.session_memory.lock().await = None;
 
+    // Phase 7.4 — zero the cost tracker so the next session starts fresh.
+    state.cost_tracker.reset();
+
     // ENDING → ENDED
     let session_id = {
         let mut machine = state.state_machine.lock().await;
@@ -1000,6 +1005,13 @@ pub async fn trigger_response(
                 machine.current()
             ));
         }
+    }
+
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
     }
 
     let question_text = if rephrase.unwrap_or(false) {
@@ -1280,6 +1292,92 @@ pub async fn demote_session(session_id: String, state: State<'_, AppState>) -> R
         .persistence
         .demote_session(sid)
         .map_err(|e| e.to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.4 — Cost cap enforcement
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// DTO mirroring [`crate::cost::CostStatus`] for the frontend.
+#[derive(serde::Serialize)]
+pub struct CostStatusDto {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_estimate_usd: f64,
+    pub max_total_tokens: Option<u64>,
+    pub max_cost_estimate_usd: Option<f64>,
+    pub suspended: bool,
+    pub status: String,
+    pub fraction_used: Option<f64>,
+}
+
+impl From<crate::cost::CostStatus> for CostStatusDto {
+    fn from(s: crate::cost::CostStatus) -> Self {
+        let status = match s.status {
+            crate::cost::CostCapStatus::Ok => "ok",
+            crate::cost::CostCapStatus::Warning80 => "warning_80",
+            crate::cost::CostCapStatus::Reached => "reached",
+        };
+        Self {
+            input_tokens: s.usage.input_tokens,
+            output_tokens: s.usage.output_tokens,
+            total_tokens: s.usage.total_tokens,
+            cost_estimate_usd: s.usage.cost_estimate_usd,
+            max_total_tokens: s.cap.max_total_tokens,
+            max_cost_estimate_usd: s.cap.max_cost_estimate_usd,
+            suspended: s.suspended,
+            status: status.to_string(),
+            fraction_used: s.fraction_used,
+        }
+    }
+}
+
+/// Snapshot the current cumulative usage, configured cap, and suspension flag.
+#[tauri::command]
+pub async fn get_cost_status(state: State<'_, AppState>) -> Result<CostStatusDto, String> {
+    Ok(state.cost_tracker.snapshot().into())
+}
+
+/// Configure the per-session token / cost cap. `None` on either field
+/// disables that dimension; both `None` removes the cap entirely.
+#[tauri::command]
+pub async fn set_cost_cap(
+    state: State<'_, AppState>,
+    max_total_tokens: Option<u64>,
+    max_cost_estimate_usd: Option<f64>,
+) -> Result<CostStatusDto, String> {
+    let cap = crate::cost::CostCap {
+        max_total_tokens,
+        max_cost_estimate_usd,
+    };
+    let snap = state.cost_tracker.set_cap(cap);
+    info!(
+        max_total_tokens = ?max_total_tokens,
+        max_cost_estimate_usd = ?max_cost_estimate_usd,
+        suspended = snap.suspended,
+        "cost cap updated",
+    );
+    Ok(snap.into())
+}
+
+/// Clear the suspended flag while preserving cumulative counters. The cap
+/// itself is unchanged — the next turn will re-suspend unless the user also
+/// widens the cap via `set_cost_cap`.
+#[tauri::command]
+pub async fn lift_cost_suspension(state: State<'_, AppState>) -> Result<CostStatusDto, String> {
+    let snap = state.cost_tracker.lift_suspension();
+    info!("cost-cap suspension lifted by user");
+    Ok(snap.into())
+}
+
+/// Zero all cumulative counters. Useful when the user wants a fresh budget
+/// without restarting the session.
+#[tauri::command]
+pub async fn reset_cost_tracker(state: State<'_, AppState>) -> Result<CostStatusDto, String> {
+    let snap = state.cost_tracker.reset();
+    info!("cost tracker reset by user");
+    Ok(snap.into())
 }
 
 /// Delete a session and all its data from local SQLite and Supabase.

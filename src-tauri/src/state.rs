@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 use crate::audio::pipeline::DetectedQuestion;
 
 use crate::auth_session::restore_auth_from_keychain;
+use crate::cost::CostTracker;
 use crate::digest::Digest;
 use crate::interfaces::auth::{AuthInterface, AuthToken};
 use crate::interfaces::session::{SessionInterface, StubSession};
@@ -94,6 +95,11 @@ pub struct AppState {
     pub session_memory: Arc<Mutex<Option<Arc<Mutex<ConversationMemory>>>>>,
     /// Turn counter for rehearsal-mode orchestrator dispatches.
     pub rehearsal_turn: Mutex<usize>,
+
+    /// Phase 7.4 — process-wide cumulative token / cost accounting. Read by
+    /// the orchestrator pre-dispatch to enforce the configured cap; mutated
+    /// post-turn to advance the totals and fire warning / suspension events.
+    pub cost_tracker: Arc<CostTracker>,
 }
 
 impl AppState {
@@ -162,6 +168,7 @@ impl AppState {
             live_tasks: Mutex::new(None),
             session_memory: Arc::new(Mutex::new(None)),
             rehearsal_turn: Mutex::new(0),
+            cost_tracker: Arc::new(CostTracker::new()),
         })
     }
 

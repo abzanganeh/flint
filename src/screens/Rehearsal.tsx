@@ -6,6 +6,7 @@ import {
   completeRehearsal,
   runRehearsalTurn,
 } from "../commands";
+import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import DirectionalPanel from "../panels/DirectionalPanel";
@@ -32,6 +33,7 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
   } = useUIStore();
 
   useTokenUsage();
+  useCostCap();
   useHotkeys(sessionId, question, asking);
 
   const hasResponse =

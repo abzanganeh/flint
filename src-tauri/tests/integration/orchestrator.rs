@@ -8,6 +8,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use flint_lib::audio::pipeline::DetectedQuestion;
+use flint_lib::cost::CostTracker;
 use flint_lib::digest::Digest;
 use flint_lib::llm::failover::FailoverManager;
 use flint_lib::llm::provider::{
@@ -175,6 +176,10 @@ fn fresh_persistence() -> Arc<SessionPersistence> {
     Arc::new(SessionPersistence::new(":memory:").expect("in-memory persistence"))
 }
 
+fn no_op_tracker() -> Arc<CostTracker> {
+    Arc::new(CostTracker::new())
+}
+
 fn fresh_vector_store() -> Arc<dyn flint_lib::interfaces::vector::VectorInterface> {
     Arc::new(SqliteVecStore::new(":memory:").expect("in-memory vector store"))
 }
@@ -242,6 +247,7 @@ async fn dispatch_turn_runs_full_pipeline_end_to_end() {
         turn_cancel,
         local_llm,
         persistence,
+        no_op_tracker(),
         app,
     )
     .await;
@@ -300,6 +306,7 @@ async fn dispatch_turn_survives_primary_llm_failure() {
         Arc::new(AtomicBool::new(false)),
         local_llm,
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -375,6 +382,7 @@ async fn dispatch_turn_serves_prewarm_cache_hit() {
         Arc::new(AtomicBool::new(false)),
         local_llm,
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -418,6 +426,7 @@ async fn run_orchestrator_processes_question_and_exits_when_channel_closed() {
         local_llm,
         turn_cancel_slot: Arc::new(Mutex::new(None)),
         persistence,
+        cost_tracker: no_op_tracker(),
     };
 
     let app = mock_app_handle();
@@ -472,6 +481,7 @@ async fn run_orchestrator_debounces_rapid_questions() {
         local_llm,
         turn_cancel_slot: Arc::new(Mutex::new(None)),
         persistence,
+        cost_tracker: no_op_tracker(),
     };
 
     let handle = tokio::spawn(run_orchestrator(rx, config, mock_app_handle()));
@@ -562,6 +572,7 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
         Arc::new(AtomicBool::new(false)),
         local_llm,
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -612,6 +623,7 @@ async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
             provider_name: "ollama".to_string(),
         }),
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -661,6 +673,7 @@ async fn dispatch_turn_recovers_from_panicking_llm_provider() {
         Arc::new(AtomicBool::new(false)),
         local_llm,
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -701,6 +714,7 @@ async fn dispatch_turn_logs_when_persistence_write_fails() {
             provider_name: "ollama".to_string(),
         }),
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -739,6 +753,7 @@ async fn dispatch_turn_returns_early_when_cancel_flag_set() {
             provider_name: "ollama".to_string(),
         }),
         persistence,
+        no_op_tracker(),
         mock_app_handle(),
     )
     .await;
@@ -768,4 +783,194 @@ async fn cache_hit_serves_directional_without_llm_call() {
         elapsed < Duration::from_millis(MOCK_DELAY_MS),
         "cache path should not wait for LLM delay"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 7.4 — cost cap enforcement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A turn that crosses the configured ceiling must suspend the tracker and
+/// the next turn dispatched against the same tracker must short-circuit
+/// before any LLM call. We assert "no LLM call" indirectly by pointing the
+/// failover at a `FailingMockLLMProvider` that would fail the turn if reached
+/// — the assertion is that `dispatch_turn` returns `Ok(())` regardless.
+#[tokio::test]
+async fn dispatch_turn_short_circuits_when_cost_tracker_is_suspended() {
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
+    let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+    let session_id = Uuid::new_v4();
+
+    let persistence = fresh_persistence();
+    persistence
+        .create_session_row(session_id, "Cap Test", "interview", "swe")
+        .expect("session row");
+
+    let tracker = Arc::new(CostTracker::new());
+    tracker.set_cap(flint_lib::cost::CostCap {
+        max_total_tokens: Some(1),
+        max_cost_estimate_usd: None,
+    });
+
+    // First turn — a healthy provider so the turn completes and pushes
+    // usage past the (tiny) cap.
+    let result_first = dispatch_turn(
+        session_id,
+        "Tell me about yourself".to_string(),
+        1,
+        Arc::new(test_digest()),
+        prompts_dir.clone(),
+        fast_failover("Streamed answer.", "default"),
+        Arc::clone(&embedder),
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        Arc::clone(&persistence),
+        Arc::clone(&tracker),
+        mock_app_handle(),
+    )
+    .await;
+    assert!(
+        result_first.is_ok(),
+        "first turn must succeed: {result_first:?}"
+    );
+    assert!(
+        tracker.is_suspended(),
+        "tracker must be suspended after crossing the cap"
+    );
+
+    // Second turn — fail-only providers; we should never reach them because
+    // `run_turn` returns early on `is_suspended()`.
+    let primary: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
+        provider_name: "default".to_string(),
+        error_message: "MUST NOT BE CALLED — cap should short-circuit".to_string(),
+    });
+    let local: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
+        provider_name: "ollama".to_string(),
+        error_message: "MUST NOT BE CALLED — cap should short-circuit".to_string(),
+    });
+    let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
+    let blocked_failover = Arc::new(FailoverManager::new(primary, local, rl));
+
+    let result_blocked = dispatch_turn(
+        session_id,
+        "Second question".to_string(),
+        2,
+        Arc::new(test_digest()),
+        prompts_dir,
+        blocked_failover,
+        Arc::clone(&embedder),
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        persistence,
+        Arc::clone(&tracker),
+        mock_app_handle(),
+    )
+    .await;
+    assert!(
+        result_blocked.is_ok(),
+        "suspended dispatch must return Ok(()) without calling the LLM: {result_blocked:?}"
+    );
+    assert!(
+        tracker.is_suspended(),
+        "tracker stays suspended until explicitly lifted"
+    );
+}
+
+/// After the user lifts the suspension (and widens the cap), inference
+/// resumes normally.
+#[tokio::test]
+async fn lifting_cost_suspension_re_enables_inference() {
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
+    let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+    let session_id = Uuid::new_v4();
+
+    let persistence = fresh_persistence();
+    persistence
+        .create_session_row(session_id, "Cap Lift Test", "interview", "swe")
+        .expect("session row");
+
+    let tracker = Arc::new(CostTracker::new());
+    tracker.set_cap(flint_lib::cost::CostCap {
+        max_total_tokens: Some(1),
+        max_cost_estimate_usd: None,
+    });
+
+    // Fire a turn — exceeds the cap, suspends.
+    dispatch_turn(
+        session_id,
+        "First question".to_string(),
+        1,
+        Arc::new(test_digest()),
+        prompts_dir.clone(),
+        fast_failover("Streamed answer.", "default"),
+        Arc::clone(&embedder),
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        Arc::clone(&persistence),
+        Arc::clone(&tracker),
+        mock_app_handle(),
+    )
+    .await
+    .expect("first turn succeeds");
+    assert!(tracker.is_suspended());
+
+    // Widen the cap to something that no longer trips, then lift the flag.
+    tracker.set_cap(flint_lib::cost::CostCap {
+        max_total_tokens: Some(1_000_000),
+        max_cost_estimate_usd: None,
+    });
+    tracker.lift_suspension();
+    assert!(!tracker.is_suspended());
+
+    // Now a real turn should run through to completion.
+    let result = dispatch_turn(
+        session_id,
+        "Second question".to_string(),
+        2,
+        Arc::new(test_digest()),
+        prompts_dir,
+        fast_failover("Streamed answer.", "default"),
+        embedder,
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        persistence,
+        Arc::clone(&tracker),
+        mock_app_handle(),
+    )
+    .await;
+    assert!(result.is_ok(), "post-lift dispatch must run: {result:?}");
+    assert!(!tracker.is_suspended(), "still below the widened cap");
 }

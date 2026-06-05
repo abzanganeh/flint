@@ -36,10 +36,11 @@ use crate::audio::pipeline::DetectedQuestion;
 use crate::confidence::{compute_confidence, ConfidenceLevel, ConfidenceSignals};
 use crate::digest::Digest;
 use crate::events::{
-    emit_confidence_score, emit_context_truncated, emit_rag_chunks_update, emit_response_metadata,
-    emit_thread_status, emit_token_usage_update, ConfidenceScorePayload, ContextTruncatedPayload,
-    RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload, ThreadStatusPayload,
-    TokenUsageUpdatePayload,
+    emit_confidence_score, emit_context_truncated, emit_cost_cap_status, emit_inference_suspended,
+    emit_rag_chunks_update, emit_response_metadata, emit_thread_status, emit_token_usage_update,
+    ConfidenceScorePayload, ContextTruncatedPayload, CostCapStatusPayload,
+    InferenceSuspendedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
+    ThreadStatusPayload, TokenUsageUpdatePayload,
 };
 use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::llm::failover::FailoverManager;
@@ -248,6 +249,9 @@ pub struct OrchestratorConfig {
     pub turn_cancel_slot: Arc<Mutex<Option<TurnCancelFlag>>>,
     /// Write-through SQLite persistence for crash recovery.
     pub persistence: Arc<SessionPersistence>,
+    /// Phase 7.4 — cumulative cost / token accounting. Checked pre-dispatch
+    /// to enforce the cap and updated post-dispatch with the turn's usage.
+    pub cost_tracker: Arc<crate::cost::CostTracker>,
 }
 
 /// Receive detected questions and run the three parallel response threads.
@@ -304,6 +308,7 @@ pub async fn run_orchestrator<R: Runtime>(
             turn_cancel,
             local_llm: Arc::clone(&config.local_llm),
             persistence: Arc::clone(&config.persistence),
+            cost_tracker: Arc::clone(&config.cost_tracker),
         };
 
         let span = info_span!(
@@ -358,10 +363,29 @@ struct OrchestratorTurnConfig {
     turn_cancel: TurnCancelFlag,
     local_llm: Arc<dyn LLMProvider>,
     persistence: Arc<SessionPersistence>,
+    cost_tracker: Arc<crate::cost::CostTracker>,
 }
 
 async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
     if cfg.turn_cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    // ── Phase 7.4 — cap pre-check ────────────────────────────────────────
+    // Reject the turn before any LLM call when the tracker is suspended.
+    // The frontend already received an `inference_suspended` event on the
+    // transition; this gate just guarantees no further spend can accrue
+    // until the user explicitly lifts the suspension.
+    if cfg.cost_tracker.is_suspended() {
+        let snap = cfg.cost_tracker.snapshot();
+        emit_inference_suspended(
+            &app,
+            InferenceSuspendedPayload {
+                reason: "cost_cap_reached",
+                total_tokens: snap.usage.total_tokens,
+                cost_estimate_usd: snap.usage.cost_estimate_usd,
+            },
+        );
         return Ok(());
     }
 
@@ -575,6 +599,9 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     }
 
     // ── 8. Token usage estimate (4 chars ≈ 1 token) ───────────────────────
+    // The +500 fudge accounts for the system prompt + RAG chunks injected
+    // into every call. It overestimates slightly, which is the safer side
+    // to err on for a hard cost cap.
     let turn_input = (cfg.question_text.len() as u64 + 500) / 4;
     let turn_output = (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
     let total = turn_input + turn_output;
@@ -588,6 +615,42 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
             cost_estimate,
         },
     );
+
+    // ── 9. Phase 7.4 — record against the cap and emit transitions ───────
+    let (snap, is_transition) =
+        cfg.cost_tracker
+            .record_turn_with_transition(turn_input, turn_output, cost_estimate);
+    if is_transition {
+        let status_str: &'static str = match snap.status {
+            crate::cost::CostCapStatus::Ok => "ok",
+            crate::cost::CostCapStatus::Warning80 => "warning_80",
+            crate::cost::CostCapStatus::Reached => "reached",
+        };
+        emit_cost_cap_status(
+            &app,
+            CostCapStatusPayload {
+                status: status_str,
+                suspended: snap.suspended,
+                input_tokens: snap.usage.input_tokens,
+                output_tokens: snap.usage.output_tokens,
+                total_tokens: snap.usage.total_tokens,
+                cost_estimate_usd: snap.usage.cost_estimate_usd,
+                max_total_tokens: snap.cap.max_total_tokens,
+                max_cost_estimate_usd: snap.cap.max_cost_estimate_usd,
+                fraction_used: snap.fraction_used,
+            },
+        );
+        if matches!(snap.status, crate::cost::CostCapStatus::Reached) {
+            emit_inference_suspended(
+                &app,
+                InferenceSuspendedPayload {
+                    reason: "cost_cap_reached",
+                    total_tokens: snap.usage.total_tokens,
+                    cost_estimate_usd: snap.usage.cost_estimate_usd,
+                },
+            );
+        }
+    }
 
     Ok(())
 }
@@ -609,6 +672,7 @@ pub async fn dispatch_turn<R: Runtime>(
     turn_cancel: TurnCancelFlag,
     local_llm: Arc<dyn LLMProvider>,
     persistence: Arc<SessionPersistence>,
+    cost_tracker: Arc<crate::cost::CostTracker>,
     app: AppHandle<R>,
 ) -> Result<()> {
     run_turn(
@@ -627,6 +691,7 @@ pub async fn dispatch_turn<R: Runtime>(
             turn_cancel,
             local_llm,
             persistence,
+            cost_tracker,
         },
         app,
     )

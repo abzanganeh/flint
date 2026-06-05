@@ -2,6 +2,7 @@ pub mod audio;
 mod auth_session;
 mod commands;
 pub mod confidence;
+pub mod cost;
 pub mod digest;
 mod dto;
 mod events;
@@ -85,6 +86,11 @@ pub fn run() {
             commands::promote_session,
             commands::demote_session,
             commands::delete_session,
+            // Phase 7.4 — cost cap enforcement
+            commands::get_cost_status,
+            commands::set_cost_cap,
+            commands::lift_cost_suspension,
+            commands::reset_cost_tracker,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
