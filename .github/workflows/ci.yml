@@ -127,6 +127,19 @@ jobs:
           cargo test --lib --no-run --locked
           cargo test --bin bench_gate --no-run --locked
           cargo test --tests --no-run --locked
+
+          # ── Diagnose DLL layout before staging ─────────────────────────────
+          Write-Host "=== target\debug *.dll ==="
+          Get-ChildItem target\debug -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+            Select-Object Name | Sort-Object Name | Format-Table -HideTableHeaders
+          Write-Host "=== target\debug\deps *.dll ==="
+          Get-ChildItem target\debug\deps -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+            Select-Object Name | Sort-Object Name | Format-Table -HideTableHeaders
+          Write-Host "=== onnxruntime anywhere under target ==="
+          Get-ChildItem target -Recurse -Filter "onnxruntime*.dll" -File -ErrorAction SilentlyContinue |
+            Select-Object FullName | Format-Table -HideTableHeaders
+          # ────────────────────────────────────────────────────────────────────
+
           . "$env:GITHUB_WORKSPACE/scripts/windows-prepare-tests.ps1"
           cargo test --lib --locked
           cargo test --bin bench_gate --locked
