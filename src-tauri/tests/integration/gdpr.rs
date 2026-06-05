@@ -45,7 +45,7 @@ impl AuthInterface for ScriptedAuth {
     async fn logout(&self, _token: &AuthToken) -> anyhow::Result<()> {
         Ok(())
     }
-    async fn refresh(&self, _refresh: &str) -> anyhow::Result<AuthToken> {
+    async fn refresh(&self, _refresh: &SecretString) -> anyhow::Result<AuthToken> {
         unreachable!("refresh not used in GDPR tests")
     }
     async fn get_current_user(&self, _token: &AuthToken) -> anyhow::Result<User> {

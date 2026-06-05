@@ -246,7 +246,7 @@ pub async fn run_prewarm(
     // PreWarmEntry per question (no duplicate / half-populated entries).
     let mut question_tasks = Vec::with_capacity(questions.len());
 
-    for (question, embedding) in questions.iter().zip(embeddings) {
+    for (question_idx, (question, embedding)) in questions.iter().zip(embeddings).enumerate() {
         let dir_prompt = build_prompt(&dir_template, question, digest);
         let dep_prompt = build_prompt(&dep_template, question, digest);
         let question_str = question.clone();
@@ -287,14 +287,18 @@ pub async fn run_prewarm(
         let coordinator = tokio::spawn(async move {
             let (dir_join, dep_join) = tokio::join!(dir_handle, dep_handle);
 
+            // question_idx is the question's position in the digest's
+            // likely_questions list — stable for the duration of pre-warm
+            // and free of session content. The full text is gated to
+            // debug-only logs below (flint-security.mdc §"Hard Constraints").
             let directional_response = match dir_join {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
-                    warn!(question = %question_str, error = %e, "directional pre-warm failed");
+                    warn!(question_idx, error = %e, "directional pre-warm failed");
                     String::new()
                 }
                 Err(e) => {
-                    warn!(question = %question_str, error = %e, "directional task panicked");
+                    warn!(question_idx, error = %e, "directional task panicked");
                     String::new()
                 }
             };
@@ -302,11 +306,11 @@ pub async fn run_prewarm(
             let depth_response = match dep_join {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
-                    warn!(question = %question_str, error = %e, "depth pre-warm failed");
+                    warn!(question_idx, error = %e, "depth pre-warm failed");
                     String::new()
                 }
                 Err(e) => {
-                    warn!(question = %question_str, error = %e, "depth task panicked");
+                    warn!(question_idx, error = %e, "depth task panicked");
                     String::new()
                 }
             };
@@ -326,7 +330,12 @@ pub async fn run_prewarm(
 
             let mut c = cache_handle.lock().await;
             c.insert(entry);
-            debug!(question = %question_str, "pre-warm entry cached");
+            #[cfg(debug_assertions)]
+            debug!(
+                question_idx,
+                question = %question_str,
+                "pre-warm entry cached (debug-only content)",
+            );
         });
 
         question_tasks.push(coordinator);
@@ -383,8 +392,10 @@ mod tests {
             match embedder() {
                 Some(e) => e,
                 None => {
-                    eprintln!(
-                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    // Run tests with `RUST_LOG=warn cargo test -- --nocapture`
+                    // to see why an embedder-dependent test was skipped.
+                    tracing::warn!(
+                        "SKIP prewarm test: fastembed model not cached (offline or rate-limited)"
                     );
                     return;
                 }

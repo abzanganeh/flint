@@ -277,11 +277,22 @@ pub async fn run_orchestrator<R: Runtime>(
         turn_number += 1;
         let turn = turn_number;
 
+        // Question text is session content and must not appear at INFO or
+        // above in release builds (flint-security.mdc §"Hard Constraints").
+        // We log a length proxy for operability while gating the literal
+        // text behind a debug-only sibling event.
         info!(
             session_id = %config.session_id,
             turn = turn,
-            question = %question.text,
+            question_len = question.text.len(),
             "orchestrator dispatching turn"
+        );
+        #[cfg(debug_assertions)]
+        tracing::debug!(
+            session_id = %config.session_id,
+            turn = turn,
+            question = %question.text,
+            "orchestrator dispatching turn (debug-only content)",
         );
 
         let turn_cancel = Arc::new(AtomicBool::new(false));

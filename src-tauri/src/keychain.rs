@@ -186,7 +186,10 @@ mod tests {
     #[test]
     fn test_api_key_round_trip() {
         if !keychain_available() {
-            eprintln!("SKIP: OS keychain unavailable (no secret service on this host)");
+            // Silent skip — OS keychain is not available in many CI/headless
+            // environments. Run with `RUST_LOG=warn cargo test -- --nocapture`
+            // to surface skips via the tracing subscriber.
+            tracing::warn!("SKIP test_api_key_round_trip: OS keychain unavailable");
             return;
         }
 

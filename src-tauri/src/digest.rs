@@ -146,11 +146,17 @@ pub async fn extract_digest(context_text: &str, llm: &dyn LLMProvider) -> Result
     let json_str = strip_markdown_fences(raw.trim());
 
     let mut digest: Digest = serde_json::from_str(json_str).map_err(|parse_err| {
+        // raw_response is logged at DEBUG only — it contains LLM-paraphrased
+        // pasted context which must not appear in release-build logs
+        // (flint-security.mdc §"Hard Constraints").
         error!(
-            raw_response = %raw,
+            provider = llm.name(),
+            response_len = raw.len(),
             parse_error = %parse_err,
             "digest extraction failed — LLM did not return valid JSON",
         );
+        #[cfg(debug_assertions)]
+        debug!(raw_response = %raw, "digest LLM raw response (debug builds only)");
         anyhow!("Digest extraction failed — try rephrasing your context")
     })?;
 

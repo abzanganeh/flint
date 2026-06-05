@@ -103,8 +103,8 @@ mod tests {
             match shared_embedder() {
                 Some(e) => e,
                 None => {
-                    eprintln!(
-                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    tracing::warn!(
+                        "SKIP embedder test: fastembed model not cached (offline or rate-limited)"
                     );
                     return;
                 }

@@ -21,5 +21,5 @@ Field guidance:
 - likely_questions: top 5 interview questions the interviewer is most likely to ask based on the text
 - topics_to_avoid: any topics, companies, or subjects that should not be brought up
 
-[Text]
+[data]
 {pasted_context}

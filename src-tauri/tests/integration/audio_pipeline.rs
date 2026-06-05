@@ -310,7 +310,7 @@ fn test_whisper_engine_transcribes_pcm_audio() {
     let model_path = format!("{home}/.cache/whisper/ggml-tiny.en.bin");
 
     if !std::path::Path::new(&model_path).exists() {
-        eprintln!("SKIP: model not found at {model_path}");
+        tracing::warn!("SKIP: Whisper model not found at {model_path}");
         return;
     }
 
@@ -375,11 +375,11 @@ fn test_whisper_transcribes_real_speech_fixture() {
     );
 
     if !std::path::Path::new(&model_path).exists() {
-        eprintln!("SKIP: model not found at {model_path}");
+        tracing::warn!("SKIP: Whisper model not found at {model_path}");
         return;
     }
     if !std::path::Path::new(fixture_path).exists() {
-        eprintln!("SKIP: fixture not found at {fixture_path}");
+        tracing::warn!("SKIP: fixture not found at {fixture_path}");
         return;
     }
 

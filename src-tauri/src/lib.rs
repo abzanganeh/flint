@@ -24,8 +24,36 @@ pub mod transcription;
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use tauri::Manager;
 
+/// Initialise structured logging.
+///
+/// Release builds default to INFO and drop DEBUG entirely (content-bearing
+/// fields are also gated behind `#[cfg(debug_assertions)]` at call sites,
+/// belt-and-braces). Operators can override via `FLINT_LOG=…` using the
+/// standard `tracing_subscriber::EnvFilter` syntax. Idempotent — safe to
+/// call from tests via the public re-export.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    #[cfg(debug_assertions)]
+    let default_filter = "info,flint=debug";
+    #[cfg(not(debug_assertions))]
+    let default_filter = "info";
+
+    let filter =
+        EnvFilter::try_from_env("FLINT_LOG").unwrap_or_else(|_| EnvFilter::new(default_filter));
+
+    // `try_init` swallows the AlreadyInit error so a second call (from a
+    // unit test, for example) is a no-op rather than a panic.
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_ansi(cfg!(debug_assertions))
+        .try_init();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_tracing();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -116,6 +144,10 @@ pub fn run() {
             commands::is_feature_enabled,
             commands::refresh_feature_flags,
             commands::get_feature_flags_snapshot,
+            // Phase 7.7 — provider API key management
+            commands::save_provider_key,
+            commands::is_provider_key_present,
+            commands::clear_provider_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

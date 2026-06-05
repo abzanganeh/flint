@@ -35,7 +35,7 @@ pub trait AuthInterface: Send + Sync {
     async fn signup(&self, email: &str, password: &str) -> Result<User>;
     async fn login(&self, email: &str, password: &str) -> Result<AuthToken>;
     async fn logout(&self, token: &AuthToken) -> Result<()>;
-    async fn refresh(&self, refresh_token: &str) -> Result<AuthToken>;
+    async fn refresh(&self, refresh_token: &SecretString) -> Result<AuthToken>;
     async fn get_current_user(&self, token: &AuthToken) -> Result<User>;
     async fn delete_account(&self, token: &AuthToken) -> Result<()>;
 }

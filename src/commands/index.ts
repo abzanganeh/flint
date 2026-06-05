@@ -401,3 +401,29 @@ export const refreshFeatureFlags = (): Promise<void> =>
  */
 export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =>
   adaptSnapshot(await invoke<RawFeatureFlagsSnapshot>("get_feature_flags_snapshot"));
+
+// ── Phase 7.7 — Provider API key management ──────────────────────────────────
+
+export type LlmProvider = "groq" | "openai" | "anthropic";
+
+/**
+ * Store an LLM provider API key in the OS keychain. The plaintext value
+ * lives in JS for the duration of this call only and is never echoed by
+ * the backend.
+ */
+export const saveProviderKey = (provider: LlmProvider, key: string): Promise<void> =>
+  invoke<void>("save_provider_key", { provider, key });
+
+/**
+ * Whether a key is currently stored for `provider`. The actual key value
+ * is never sent over IPC.
+ */
+export const isProviderKeyPresent = (provider: LlmProvider): Promise<boolean> =>
+  invoke<boolean>("is_provider_key_present", { provider });
+
+/**
+ * Remove `provider`'s key from the OS keychain. Safe to call when no key
+ * is stored.
+ */
+export const clearProviderKey = (provider: LlmProvider): Promise<void> =>
+  invoke<void>("clear_provider_key", { provider });

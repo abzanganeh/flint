@@ -347,8 +347,8 @@ mod tests {
             match embedder() {
                 Some(e) => e,
                 None => {
-                    eprintln!(
-                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    tracing::warn!(
+                        "SKIP store test: fastembed model not cached (offline or rate-limited)"
                     );
                     return;
                 }

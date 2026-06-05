@@ -235,7 +235,7 @@ mod tests {
         async fn logout(&self, _token: &AuthToken) -> Result<()> {
             Ok(())
         }
-        async fn refresh(&self, _refresh_token: &str) -> Result<AuthToken> {
+        async fn refresh(&self, _refresh_token: &SecretString) -> Result<AuthToken> {
             unreachable!()
         }
         async fn get_current_user(&self, _token: &AuthToken) -> Result<User> {

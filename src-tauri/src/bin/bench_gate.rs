@@ -14,6 +14,13 @@
 //!   cargo run --bin bench_gate -- \
 //!     --criterion-dir target/criterion \
 //!     --report-dir target/bench-report
+//!
+//! `println!` / `eprintln!` exemption: this is a standalone CLI binary used
+//! by CI and developers; structured tracing is overkill here and would
+//! require an extra subscriber. The Phase 2 "no print" rule applies to the
+//! desktop application library code, not to bin/ CLI tools.
+
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::cmp::Ordering;
 use std::fmt;

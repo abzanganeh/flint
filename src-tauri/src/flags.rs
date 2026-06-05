@@ -386,16 +386,15 @@ fn write_cache(path: &std::path::Path, bundle: &FlagsBundle) -> Result<()> {
 // Convenience helpers used by Tauri commands + app startup
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Build the production Supabase source from `plugins.supabase` in
-/// `tauri.conf.json`. Returns `None` if the plugin block is missing or
-/// malformed — the client then keeps running on cache + defaults.
+/// Build the production Supabase source from `plugins.supabase` plus env
+/// overrides (`FLINT_SUPABASE_URL`, `FLINT_SUPABASE_ANON_KEY`). Returns
+/// `None` if neither source supplies a usable pair — the client then keeps
+/// running on cache + defaults.
 pub fn supabase_source_from_plugins(
     plugins: &HashMap<String, serde_json::Value>,
 ) -> Option<SupabaseFlagsSource> {
-    let raw = plugins.get("supabase")?;
-    let url = raw.get("url")?.as_str()?.to_string();
-    let key = raw.get("anonKey")?.as_str()?.to_string();
-    SupabaseFlagsSource::new(url, key).ok()
+    let cfg = crate::supabase::resolve_supabase_config(plugins)?;
+    SupabaseFlagsSource::new(cfg.url, cfg.anon_key).ok()
 }
 
 // ────────────────────────────────────────────────────────────────────────────

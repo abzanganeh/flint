@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Manager, State};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -131,9 +132,13 @@ pub async fn signup(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    // Wrap immediately so the password buffer is zeroed on drop
+    // (flint-security.mdc §"Hard Constraints"). The original `password`
+    // moves into `SecretString` and is dropped at the end of this scope.
+    let password = SecretString::new(password);
     state
         .auth
-        .signup(&email, &password)
+        .signup(&email, password.expose_secret())
         .await
         .map(|_| ())
         .map_err(map_user_error)
@@ -151,9 +156,10 @@ pub async fn login(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    let password = SecretString::new(password);
     let token = state
         .auth
-        .login(&email, &password)
+        .login(&email, password.expose_secret())
         .await
         .map_err(map_user_error)?;
 
@@ -952,16 +958,11 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
                         .map(|d| d.domain.clone())
                         .unwrap_or_else(|| "general".to_string()),
                 };
-                match (
-                    plugins.get("supabase"),
-                    serde_json::from_value::<serde_json::Value>(
-                        plugins.get("supabase").cloned().unwrap_or_default(),
-                    ),
-                ) {
-                    (Some(_), Ok(cfg)) => {
-                        let url = cfg["url"].as_str().unwrap_or("").to_string();
-                        let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
-                        if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
+                match crate::supabase::resolve_supabase_config(&plugins) {
+                    Some(cfg) => {
+                        if let Ok(sync) =
+                            crate::supabase::SupabaseSessionSync::new(cfg.url, cfg.anon_key)
+                        {
                             if let Err(e) = sync
                                 .sync_session(sid, &token, &persistence, &metadata)
                                 .await
@@ -970,7 +971,7 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
                             }
                         }
                     }
-                    _ => {
+                    None => {
                         warn!("Supabase not configured — skipping session sync");
                     }
                 }
@@ -1031,7 +1032,17 @@ pub async fn trigger_response(
             .question_tx
             .try_send(detected)
             .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
-        info!(session_id = %sid, question = %question_text, "manual trigger_response");
+        info!(
+            session_id = %sid,
+            question_len = question_text.len(),
+            "manual trigger_response",
+        );
+        #[cfg(debug_assertions)]
+        tracing::debug!(
+            session_id = %sid,
+            question = %question_text,
+            "manual trigger_response (debug-only content)",
+        );
     }
 
     Ok(())
@@ -1396,14 +1407,10 @@ pub async fn delete_session(session_id: String, state: State<'_, AppState>) -> R
     if let Some(token) = token_opt {
         let plugins = state.plugins.clone();
         tokio::spawn(async move {
-            if let Some(cfg_val) = plugins.get("supabase") {
-                if let Ok(cfg) = serde_json::from_value::<serde_json::Value>(cfg_val.clone()) {
-                    let url = cfg["url"].as_str().unwrap_or("").to_string();
-                    let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
-                    if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
-                        if let Err(e) = sync.delete_session(sid, &token).await {
-                            warn!(session_id = %sid, error = %e, "Supabase session delete failed");
-                        }
+            if let Some(cfg) = crate::supabase::resolve_supabase_config(&plugins) {
+                if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(cfg.url, cfg.anon_key) {
+                    if let Err(e) = sync.delete_session(sid, &token).await {
+                        warn!(session_id = %sid, error = %e, "Supabase session delete failed");
                     }
                 }
             }
@@ -1491,6 +1498,50 @@ pub async fn delete_account(
 pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, String> {
     let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.7 — Provider API key management (Settings → Providers)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Reject any provider name that isn't in the canonical allowlist. Keeps a
+/// compromised frontend from spraying arbitrary keychain entries.
+fn validate_provider(provider: &str) -> Result<(), String> {
+    if keychain::KNOWN_API_PROVIDERS.contains(&provider) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unknown provider '{provider}' — expected one of {:?}",
+            keychain::KNOWN_API_PROVIDERS
+        ))
+    }
+}
+
+/// Persist an LLM provider API key in the OS keychain. The plaintext key
+/// is wrapped in `SecretString` immediately on entry so the IPC buffer is
+/// zeroed when this function returns.
+#[tauri::command]
+pub async fn save_provider_key(provider: String, key: String) -> Result<(), String> {
+    validate_provider(&provider)?;
+    let secret = SecretString::new(key);
+    keychain::store_api_key(&provider, secret).map_err(|e| e.to_string())
+}
+
+/// Report whether an API key for `provider` is currently stored. Never
+/// returns the key itself — the frontend only needs presence to render
+/// the Settings UI.
+#[tauri::command]
+pub async fn is_provider_key_present(provider: String) -> Result<bool, String> {
+    validate_provider(&provider)?;
+    Ok(keychain::get_api_key(&provider).is_ok())
+}
+
+/// Remove a provider's API key from the OS keychain. No-op if no key is
+/// stored.
+#[tauri::command]
+pub async fn clear_provider_key(provider: String) -> Result<(), String> {
+    validate_provider(&provider)?;
+    keychain::delete_api_key(&provider).map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
