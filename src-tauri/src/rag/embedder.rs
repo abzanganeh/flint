@@ -120,7 +120,7 @@ mod tests {
     static EMBEDDER: OnceLock<Option<Embedder>> = OnceLock::new();
 
     fn shared_embedder() -> Option<&'static Embedder> {
-        EMBEDDER.get_or_init(|| Embedder::new_if_cached()).as_ref()
+        EMBEDDER.get_or_init(Embedder::new_if_cached).as_ref()
     }
 
     macro_rules! require_embedder {
