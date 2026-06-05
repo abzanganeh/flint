@@ -3,6 +3,7 @@ mod auth_session;
 mod commands;
 pub mod confidence;
 pub mod cost;
+mod deep_link;
 pub mod digest;
 mod dto;
 mod events;
@@ -16,6 +17,7 @@ pub mod llm;
 pub mod orchestrator;
 pub mod rag;
 pub mod session;
+pub mod smart_resume;
 mod state;
 mod stealth;
 mod supabase;
@@ -54,10 +56,33 @@ fn init_tracing() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init());
+
+    #[cfg(desktop)]
+    {
+        use tauri::Emitter;
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            for arg in args {
+                if let Some(token) = deep_link::parse_import_token(&arg) {
+                    let _ = app.emit("smart_resume_import_token", token);
+                }
+            }
+        }));
+    }
+
+    builder
         .setup(|app| {
+            #[cfg(any(windows, target_os = "linux"))]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                if let Err(e) = app.deep_link().register_all() {
+                    tracing::warn!(error = %e, "deep link scheme registration failed");
+                }
+            }
+
             health::hardware::assess_hardware();
             let app_state = state::AppState::new(app)?;
             let restored = tauri::async_runtime::block_on(app_state.restore_auth_from_keychain());
@@ -110,6 +135,7 @@ pub fn run() {
             commands::ingest_context,
             commands::confirm_digest,
             commands::get_digest,
+            commands::import_from_smart_resume,
             commands::get_session_context,
             commands::get_session_snapshot,
             commands::get_rehearsal_completed,

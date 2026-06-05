@@ -32,6 +32,11 @@
     "supabase": {
       "url": "",
       "anonKey": ""
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["flint"]
+      }
     }
   },
   "bundle": {
