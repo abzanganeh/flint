@@ -97,18 +97,14 @@ jobs:
         working-directory: src-tauri
         run: cargo build --all-targets --locked
 
-      # ort copy-dylibs skips deps/ when symlinks fail on Windows CI; stage
-      # DirectML + ONNX Runtime DLLs next to test executables before running.
-      - name: Stage runtime DLLs for tests (Windows)
-        if: matrix.install == 'windows'
-        shell: pwsh
-        run: ./scripts/windows-prepare-tests.ps1
-
+      # Non-Windows: run tests directly after the all-targets build.
       - name: cargo test --lib
+        if: matrix.install != 'windows'
         working-directory: src-tauri
         run: cargo test --lib --locked
 
       - name: cargo test --bin bench_gate
+        if: matrix.install != 'windows'
         working-directory: src-tauri
         run: cargo test --bin bench_gate --locked
 
@@ -117,8 +113,24 @@ jobs:
       # work on all three platforms because the real device sections are
       # `#[ignore]`d.
       - name: cargo test --tests
+        if: matrix.install != 'windows'
         working-directory: src-tauri
         run: cargo test --tests --locked
+
+      # Windows: ort copy-dylibs skips deps/ when symlinks fail on GHA.
+      # Build all test binaries first, stage DLLs into deps/, then execute.
+      - name: Run Rust tests (Windows)
+        if: matrix.install == 'windows'
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          cargo test --lib --no-run --locked
+          cargo test --bin bench_gate --no-run --locked
+          cargo test --tests --no-run --locked
+          & "$env:GITHUB_WORKSPACE/scripts/windows-prepare-tests.ps1"
+          cargo test --lib --locked
+          cargo test --bin bench_gate --locked
+          cargo test --tests --locked
 
       # The evals crate is Linux-gated in CI (eval-prompts.yml). Here we only
       # confirm it still compiles on every platform so contributors on Win/Mac
