@@ -1120,18 +1120,43 @@ pub async fn resume_crashed_session(
     Ok(())
 }
 
-/// Discard a crashed session: delete local data and return to `IDLE`.
+/// Discard a crashed session: delete local data (SQLite + RAG vectors) and
+/// return to `IDLE`.
 #[tauri::command]
 pub async fn discard_crashed_session(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    recovery::discard_session(Arc::clone(&state.persistence), &state.state_machine)
-        .await
-        .map_err(|e| e.to_string())?;
+    recovery::discard_session(
+        Arc::clone(&state.persistence),
+        Arc::clone(&state.vector_store),
+        &state.state_machine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     emit_state(&app, SessionState::Idle);
     Ok(())
+}
+
+/// Discard every crashed session in the database. Returns the list of
+/// cleared session IDs so the UI can confirm what was purged.
+#[tauri::command]
+pub async fn discard_all_crashed_sessions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let ids = recovery::discard_all_crashed(
+        Arc::clone(&state.persistence),
+        Arc::clone(&state.vector_store),
+        &state.state_machine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let current = *state.state_machine.lock().await.current();
+    emit_state(&app, current);
+    Ok(ids.into_iter().map(|id| id.to_string()).collect())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

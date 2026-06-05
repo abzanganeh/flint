@@ -79,6 +79,7 @@ pub fn run() {
             commands::check_crash_recovery,
             commands::resume_crashed_session,
             commands::discard_crashed_session,
+            commands::discard_all_crashed_sessions,
             commands::generate_session_summary,
             commands::list_sessions,
             commands::promote_session,
