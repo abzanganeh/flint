@@ -77,6 +77,26 @@ export interface HotkeyTriggerEventPayload {
   action: string;
 }
 
+export type CostCapStatusName = "ok" | "warning_80" | "reached";
+
+export interface CostCapStatusEventPayload {
+  status: CostCapStatusName;
+  suspended: boolean;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_estimate_usd: number;
+  max_total_tokens: number | null;
+  max_cost_estimate_usd: number | null;
+  fraction_used: number | null;
+}
+
+export interface InferenceSuspendedEventPayload {
+  reason: string;
+  total_tokens: number;
+  cost_estimate_usd: number;
+}
+
 export const onTranscriptionChunk = (
   handler: (payload: TranscriptionChunkEventPayload) => void,
 ): Promise<UnlistenFn> =>
@@ -179,5 +199,19 @@ export const onHotkeyTrigger = (
   handler: (payload: HotkeyTriggerEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<HotkeyTriggerEventPayload>("hotkey_trigger", (event) =>
+    handler(event.payload),
+  );
+
+export const onCostCapStatus = (
+  handler: (payload: CostCapStatusEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<CostCapStatusEventPayload>("cost_cap_status", (event) =>
+    handler(event.payload),
+  );
+
+export const onInferenceSuspended = (
+  handler: (payload: InferenceSuspendedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<InferenceSuspendedEventPayload>("inference_suspended", (event) =>
     handler(event.payload),
   );

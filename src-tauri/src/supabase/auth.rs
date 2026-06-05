@@ -20,24 +20,14 @@ pub struct SupabaseAuth {
     anon_key: SecretString,
 }
 
-/// `plugins.supabase` block in `tauri.conf.json`.
-#[derive(Debug, Deserialize)]
-struct SupabasePluginConfig {
-    url: String,
-    #[serde(rename = "anonKey")]
-    anon_key: String,
-}
-
 impl SupabaseAuth {
-    /// Build from Tauri plugin config (`plugins.supabase.url`, `plugins.supabase.anonKey`).
+    /// Build from Tauri plugin config + env-var overrides. Env vars
+    /// `FLINT_SUPABASE_URL` / `FLINT_SUPABASE_ANON_KEY` take precedence so
+    /// the committed `tauri.conf.json` can ship without secrets.
     pub fn from_tauri_plugins(
         plugins: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<Self> {
-        let raw = plugins
-            .get("supabase")
-            .context("Missing plugins.supabase in tauri.conf.json")?;
-        let cfg: SupabasePluginConfig =
-            serde_json::from_value(raw.clone()).context("Invalid plugins.supabase config")?;
+        let cfg = crate::supabase::resolve_supabase_config_required(plugins)?;
         Self::new(cfg.url, cfg.anon_key)
     }
 
@@ -115,6 +105,15 @@ impl SupabaseAuth {
         }
     }
 
+    /// Convert a GoTrue token JSON body into an in-memory [`AuthToken`].
+    ///
+    /// Takes ownership of `body` so the plaintext `access_token` and
+    /// `refresh_token` heap allocations are *moved* into `SecretString` —
+    /// not copied. `SecretString::Drop` then zeroes the buffer when the
+    /// `AuthToken` (or the wrapping cache entry) is dropped. The only
+    /// window where these strings exist outside a `SecretString` is the
+    /// short scope between `response.json()` and this call — keep it that
+    /// way: never `.clone()`, `format!`, or log `body.access_token` etc.
     fn token_from_response(body: GoTrueTokenResponse) -> Result<AuthToken> {
         let expires_at = Utc::now() + ChronoDuration::seconds(body.expires_in);
         Ok(AuthToken {
@@ -266,12 +265,12 @@ impl AuthInterface for SupabaseAuth {
         }
     }
 
-    async fn refresh(&self, refresh_token: &str) -> Result<AuthToken> {
+    async fn refresh(&self, refresh_token: &SecretString) -> Result<AuthToken> {
         let response = self
             .client
             .post(self.auth_url("/token?grant_type=refresh_token"))
             .headers(self.anon_headers())
-            .json(&serde_json::json!({ "refresh_token": refresh_token }))
+            .json(&serde_json::json!({ "refresh_token": refresh_token.expose_secret() }))
             .send()
             .await
             .map_err(Self::map_transport_error)?;

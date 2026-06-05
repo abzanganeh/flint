@@ -364,4 +364,156 @@ mod tests {
         assert!(estimate_tokens("Hello world") > 0);
         assert_eq!(estimate_tokens(""), 0);
     }
+
+    #[test]
+    fn turn_count_and_context_window_accessors() {
+        let mut mem = ConversationMemory::new(8192);
+        assert_eq!(mem.turn_count(), 0);
+        assert_eq!(mem.context_window(), 8192);
+        mem.push_turn(make_turn("Q"));
+        mem.push_turn(make_turn("Q"));
+        assert_eq!(mem.turn_count(), 2);
+    }
+
+    /// `fit_turns_to_budget` drops oldest turns until the serialised slice
+    /// fits the budget. Hit it via the "tail exceeds budget" branch in
+    /// `build_context` — push a single very large turn so even keep_tail=1
+    /// overflows the budget.
+    #[tokio::test]
+    async fn build_context_truncates_when_single_turn_exceeds_budget() {
+        let mut mem = ConversationMemory::new(512);
+        let huge = Turn {
+            question: "word ".repeat(2000),
+            directional_response: "ans ".repeat(2000),
+            depth_response: "ans ".repeat(2000),
+        };
+        mem.push_turn(huge);
+
+        let budget = ContextBudget::from_window(512);
+        let ctx = mem
+            .build_context(&budget, None, "", uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+        assert!(ctx.truncated, "single oversized turn must set truncated");
+    }
+
+    /// Compression success path: provider returns a summary, rolling_summary
+    /// is overwritten because the prior summary is empty.
+    #[tokio::test]
+    async fn build_context_compresses_old_turns_with_provider() {
+        use crate::llm::provider::MockLLMProvider;
+
+        let mut mem = ConversationMemory::new(512);
+        // Push enough turns to exceed the 512-window budget after the first 5.
+        for i in 0..10 {
+            mem.push_turn(make_turn(format!("Q{i} ").repeat(100).as_str()));
+        }
+
+        let budget = ContextBudget::from_window(512);
+        let provider: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "Earlier the candidate discussed Rust and systems.".to_string(),
+            provider_name: "default".to_string(),
+        });
+        let template = "Summarise the following turns concisely:\n{old_turns}";
+
+        let ctx = mem
+            .build_context(&budget, Some(&provider), template, uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert!(
+            ctx.rolling_summary.contains("Earlier the candidate"),
+            "rolling_summary should contain the provider's summary, got {:?}",
+            ctx.rolling_summary
+        );
+        // Recent turns must still cover the last 5 verbatim.
+        assert!(ctx.recent_turns.contains("Q9"));
+        assert!(!ctx.truncated);
+    }
+
+    /// Pre-existing rolling summary plus new compression: the two are merged
+    /// with the older one first.
+    #[tokio::test]
+    async fn build_context_merges_existing_rolling_summary() {
+        use crate::llm::provider::MockLLMProvider;
+
+        let mut mem = ConversationMemory::new(512);
+        mem.rolling_summary = "Previously summarised content.".to_string();
+        for i in 0..10 {
+            mem.push_turn(make_turn(format!("Q{i} ").repeat(100).as_str()));
+        }
+
+        let budget = ContextBudget::from_window(512);
+        let provider: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "New addition to the rolling summary.".to_string(),
+            provider_name: "default".to_string(),
+        });
+        let template = "Summarise:\n{old_turns}";
+
+        let ctx = mem
+            .build_context(&budget, Some(&provider), template, uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert!(
+            ctx.rolling_summary
+                .contains("Previously summarised content."),
+            "must keep old summary"
+        );
+        assert!(
+            ctx.rolling_summary.contains("New addition"),
+            "must append new summary"
+        );
+    }
+
+    /// Compression failure path: provider returns Err, the prior
+    /// rolling_summary survives as fallback.
+    #[tokio::test]
+    async fn build_context_falls_back_to_old_summary_on_compression_failure() {
+        use crate::llm::provider::FailingMockLLMProvider;
+
+        let mut mem = ConversationMemory::new(512);
+        mem.rolling_summary = "Stable prior summary.".to_string();
+        for i in 0..10 {
+            mem.push_turn(make_turn(format!("Q{i} ").repeat(100).as_str()));
+        }
+
+        let budget = ContextBudget::from_window(512);
+        let provider: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
+            provider_name: "default".to_string(),
+            error_message: "compress failed".to_string(),
+        });
+        let template = "Summarise:\n{old_turns}";
+
+        let ctx = mem
+            .build_context(&budget, Some(&provider), template, uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ctx.rolling_summary, "Stable prior summary.",
+            "must fall back to existing summary"
+        );
+    }
+
+    /// No provider available + over-budget history: rolling_summary is the
+    /// previous one, recent turns are the last 5.
+    #[tokio::test]
+    async fn build_context_keeps_tail_when_no_provider_available() {
+        let mut mem = ConversationMemory::new(512);
+        mem.rolling_summary = "Prior summary kept verbatim.".to_string();
+        for i in 0..10 {
+            mem.push_turn(make_turn(format!("Q{i} ").repeat(100).as_str()));
+        }
+
+        let budget = ContextBudget::from_window(512);
+        let ctx = mem
+            .build_context(&budget, None, "", uuid::Uuid::new_v4())
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.rolling_summary, "Prior summary kept verbatim.");
+        assert!(ctx.recent_turns.contains("Q9"));
+        assert!(!ctx.truncated);
+    }
 }

@@ -339,7 +339,7 @@ mod tests {
     static EMBEDDER: OnceLock<Option<Embedder>> = OnceLock::new();
 
     fn embedder() -> Option<&'static Embedder> {
-        EMBEDDER.get_or_init(|| Embedder::new().ok()).as_ref()
+        EMBEDDER.get_or_init(Embedder::new_if_cached).as_ref()
     }
 
     macro_rules! require_embedder {
@@ -347,8 +347,8 @@ mod tests {
             match embedder() {
                 Some(e) => e,
                 None => {
-                    eprintln!(
-                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    tracing::warn!(
+                        "SKIP store test: fastembed model not cached (offline or rate-limited)"
                     );
                     return;
                 }

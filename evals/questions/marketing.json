@@ -1,0 +1,156 @@
+{
+  "domain": "marketing",
+  "version": 1,
+  "questions": [
+    {
+      "id": "mkt-t1-strat-001",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "Design a go-to-market plan to launch Stripe Issuing in Brazil."
+    },
+    {
+      "id": "mkt-t1-strat-002",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "How would you position an enterprise AI assistant against a well-funded incumbent with deeper brand recognition?"
+    },
+    {
+      "id": "mkt-t1-strat-003",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "You inherit a product with strong technical reviews but stalling sign-ups. What is the first thing you investigate?"
+    },
+    {
+      "id": "mkt-t1-strat-004",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "How would you reach a target audience for a new B2B product with zero marketing budget?"
+    },
+    {
+      "id": "mkt-t1-strat-005",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "Walk me through how you would design pricing for a product entering a category dominated by a free-tier incumbent."
+    },
+    {
+      "id": "mkt-t1-strat-006",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "Pick a Meta product you use. What are the three most important metrics for it, and why?"
+    },
+    {
+      "id": "mkt-t1-strat-007",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "Design a launch plan for a developer-focused product that needs to win the technical decision-maker first."
+    },
+    {
+      "id": "mkt-t1-camp-001",
+      "domain": "marketing",
+      "category": "campaign",
+      "text": "Walk me through a campaign you have run end to end. What was your hypothesis, what did you measure, and what would you change next time?"
+    },
+    {
+      "id": "mkt-t1-camp-002",
+      "domain": "marketing",
+      "category": "campaign",
+      "text": "How would you structure a multi-channel campaign for a product launch with a six-week runway?"
+    },
+    {
+      "id": "mkt-t1-camp-003",
+      "domain": "marketing",
+      "category": "campaign",
+      "text": "You have one million dollars to drive enterprise pipeline next quarter. How do you allocate it?"
+    },
+    {
+      "id": "mkt-t2-strat-001",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "How do you define an ICP, and how do you sharpen it once you have real customer data?"
+    },
+    {
+      "id": "mkt-t2-strat-002",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "What is the difference between brand and demand, and how would you split a budget between them for an early-stage SaaS company?"
+    },
+    {
+      "id": "mkt-t2-strat-003",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "Walk me through how you would set up an attribution model for a B2B product with long sales cycles."
+    },
+    {
+      "id": "mkt-t2-strat-004",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "Two channels show contradictory performance signals. How do you decide which one to trust?"
+    },
+    {
+      "id": "mkt-t2-strat-005",
+      "domain": "marketing",
+      "category": "strategy",
+      "text": "How do you decide when to invest in content marketing versus paid acquisition?"
+    },
+    {
+      "id": "mkt-t2-camp-001",
+      "domain": "marketing",
+      "category": "campaign",
+      "text": "Describe a campaign you ran that underperformed. What did you learn?"
+    },
+    {
+      "id": "mkt-t2-camp-002",
+      "domain": "marketing",
+      "category": "campaign",
+      "text": "Walk me through how you would write a launch email for a new feature that 90 percent of customers will not use."
+    },
+    {
+      "id": "mkt-t2-beh-001",
+      "domain": "marketing",
+      "category": "behavioural",
+      "text": "Tell me about a time you had to pivot a campaign mid-flight based on early data."
+    },
+    {
+      "id": "mkt-t2-beh-002",
+      "domain": "marketing",
+      "category": "behavioural",
+      "text": "Tell me about a time you overruled a stakeholder on a creative decision. How did it land?"
+    },
+    {
+      "id": "mkt-t2-beh-003",
+      "domain": "marketing",
+      "category": "behavioural",
+      "text": "Tell me about a time you partnered with a product team on a launch. What worked and what did not?"
+    },
+    {
+      "id": "mkt-t2-beh-004",
+      "domain": "marketing",
+      "category": "behavioural",
+      "text": "Describe a time you had to translate a complex technical product into a clear message for a non-technical buyer."
+    },
+    {
+      "id": "mkt-t3-tech-001",
+      "domain": "marketing",
+      "category": "technical",
+      "text": "What is CAC payback period, and what is a healthy benchmark for an early-stage SaaS company?"
+    },
+    {
+      "id": "mkt-t3-tech-002",
+      "domain": "marketing",
+      "category": "technical",
+      "text": "Explain the difference between MQL, SQL, and PQL. Which one is most useful for your team and why?"
+    },
+    {
+      "id": "mkt-t3-tech-003",
+      "domain": "marketing",
+      "category": "technical",
+      "text": "Walk me through how you would diagnose a sudden drop in conversion on the pricing page."
+    },
+    {
+      "id": "mkt-t3-tech-004",
+      "domain": "marketing",
+      "category": "technical",
+      "text": "What is the role of marketing in influencing product retention, not just acquisition?"
+    }
+  ]
+}

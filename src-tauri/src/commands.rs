@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Manager, State};
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -131,9 +132,13 @@ pub async fn signup(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    // Wrap immediately so the password buffer is zeroed on drop
+    // (flint-security.mdc §"Hard Constraints"). The original `password`
+    // moves into `SecretString` and is dropped at the end of this scope.
+    let password = SecretString::new(password);
     state
         .auth
-        .signup(&email, &password)
+        .signup(&email, password.expose_secret())
         .await
         .map(|_| ())
         .map_err(map_user_error)
@@ -151,9 +156,10 @@ pub async fn login(
     email: String,
     password: String,
 ) -> Result<(), String> {
+    let password = SecretString::new(password);
     let token = state
         .auth
-        .login(&email, &password)
+        .login(&email, password.expose_secret())
         .await
         .map_err(map_user_error)?;
 
@@ -241,7 +247,12 @@ pub async fn create_session(
     // Persist session row with metadata for the session list.
     state
         .persistence
-        .create_session_row(session_id, &config.name, &config.session_type, &config.domain)
+        .create_session_row(
+            session_id,
+            &config.name,
+            &config.session_type,
+            &config.domain,
+        )
         .map_err(session_error)?;
 
     info!(
@@ -299,6 +310,11 @@ pub async fn ingest_context(
         return Err(
             "Context text is empty — please paste your job description or notes.".to_string(),
         );
+    }
+
+    // Persist raw text for session cloning (best-effort — non-fatal).
+    if let Err(e) = state.persistence.store_context_text(sid, &text) {
+        warn!(session_id = %sid, error = %e, "failed to store context text");
     }
 
     // ── 2. Embed ─────────────────────────────────────────────────────────────
@@ -419,6 +435,21 @@ pub async fn confirm_digest(
     Ok(())
 }
 
+/// Return the raw context text persisted for a session (for cloning / re-open).
+///
+/// Does not require the session to be the active in-memory session.
+#[tauri::command]
+pub async fn get_session_context(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+    state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())
+}
+
 /// Return the current digest for the active session.
 ///
 /// Valid after INGESTING completes (i.e. from DIGEST_REVIEW onward).
@@ -535,8 +566,9 @@ async fn build_failover_stack(
         }
     };
 
-    let local_provider: Arc<dyn LLMProvider> =
-        Arc::new(OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?);
+    let local_provider: Arc<dyn LLMProvider> = Arc::new(
+        OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
+    );
     let rate_limiter = Arc::new(RateLimiter::new(
         primary_provider.name(),
         primary_provider.rate_limit().requests_per_minute,
@@ -545,11 +577,7 @@ async fn build_failover_stack(
     let mut failover =
         FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
     failover.start_ping_loop(app.clone());
-    Ok((
-        Arc::new(failover),
-        local_provider,
-        context_window,
-    ))
+    Ok((Arc::new(failover), local_provider, context_window))
 }
 
 fn load_compression_prompt() -> String {
@@ -596,9 +624,9 @@ pub async fn run_rehearsal_turn(
     let memory = {
         let mut guard = state.session_memory.lock().await;
         if guard.is_none() {
-            *guard = Some(Arc::new(tokio::sync::Mutex::new(
-                ConversationMemory::new(context_window),
-            )));
+            *guard = Some(Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
+                context_window,
+            ))));
         }
         Arc::clone(guard.as_ref().unwrap())
     };
@@ -632,6 +660,7 @@ pub async fn run_rehearsal_turn(
         turn_cancel,
         local_provider,
         Arc::clone(&state.persistence),
+        Arc::clone(&state.cost_tracker),
         app,
     )
     .await
@@ -685,9 +714,7 @@ pub async fn start_session(
     let sid = validate_session_id(&state, &session_id).await?;
 
     if !keychain::is_rehearsal_completed() {
-        return Err(
-            "Complete rehearsal before starting a live session.".to_string(),
-        );
+        return Err("Complete rehearsal before starting a live session.".to_string());
     }
 
     checks::run_stealth_self_test()?;
@@ -799,6 +826,7 @@ pub async fn start_session(
         local_llm: local_provider,
         turn_cancel_slot: Arc::clone(&turn_cancel_slot),
         persistence: Arc::clone(&state.persistence),
+        cost_tracker: Arc::clone(&state.cost_tracker),
     };
 
     let orch_app = app.clone();
@@ -897,6 +925,9 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
     // Clear per-session memory.
     *state.session_memory.lock().await = None;
 
+    // Phase 7.4 — zero the cost tracker so the next session starts fresh.
+    state.cost_tracker.reset();
+
     // ENDING → ENDED
     let session_id = {
         let mut machine = state.state_machine.lock().await;
@@ -927,24 +958,20 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
                         .map(|d| d.domain.clone())
                         .unwrap_or_else(|| "general".to_string()),
                 };
-                match (
-                    plugins.get("supabase"),
-                    serde_json::from_value::<serde_json::Value>(
-                        plugins.get("supabase").cloned().unwrap_or_default(),
-                    ),
-                ) {
-                    (Some(_), Ok(cfg)) => {
-                        let url = cfg["url"].as_str().unwrap_or("").to_string();
-                        let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
-                        if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
-                            if let Err(e) =
-                                sync.sync_session(sid, &token, &persistence, &metadata).await
+                match crate::supabase::resolve_supabase_config(&plugins) {
+                    Some(cfg) => {
+                        if let Ok(sync) =
+                            crate::supabase::SupabaseSessionSync::new(cfg.url, cfg.anon_key)
+                        {
+                            if let Err(e) = sync
+                                .sync_session(sid, &token, &persistence, &metadata)
+                                .await
                             {
                                 warn!(session_id = %sid, error = %e, "Supabase session sync failed");
                             }
                         }
                     }
-                    _ => {
+                    None => {
                         warn!("Supabase not configured — skipping session sync");
                     }
                 }
@@ -981,6 +1008,13 @@ pub async fn trigger_response(
         }
     }
 
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
+    }
+
     let question_text = if rephrase.unwrap_or(false) {
         format!("Rephrase your previous answer to: {question}")
     } else {
@@ -998,7 +1032,17 @@ pub async fn trigger_response(
             .question_tx
             .try_send(detected)
             .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
-        info!(session_id = %sid, question = %question_text, "manual trigger_response");
+        info!(
+            session_id = %sid,
+            question_len = question_text.len(),
+            "manual trigger_response",
+        );
+        #[cfg(debug_assertions)]
+        tracing::debug!(
+            session_id = %sid,
+            question = %question_text,
+            "manual trigger_response (debug-only content)",
+        );
     }
 
     Ok(())
@@ -1042,20 +1086,14 @@ pub async fn panic_hide_overlay(app: AppHandle) -> Result<bool, String> {
             window
                 .hide()
                 .map_err(|e| format!("Failed to hide overlay: {e}"))?;
-            emit_overlay_visibility(
-                &app,
-                OverlayVisibilityPayload { hidden: true },
-            );
+            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: true });
             Ok(true)
         } else {
             window
                 .show()
                 .map_err(|e| format!("Failed to show overlay: {e}"))?;
             let _ = window.set_focus();
-            emit_overlay_visibility(
-                &app,
-                OverlayVisibilityPayload { hidden: false },
-            );
+            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: false });
             Ok(false)
         }
     } else {
@@ -1105,18 +1143,43 @@ pub async fn resume_crashed_session(
     Ok(())
 }
 
-/// Discard a crashed session: delete local data and return to `IDLE`.
+/// Discard a crashed session: delete local data (SQLite + RAG vectors) and
+/// return to `IDLE`.
 #[tauri::command]
 pub async fn discard_crashed_session(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    recovery::discard_session(Arc::clone(&state.persistence), &state.state_machine)
-        .await
-        .map_err(|e| e.to_string())?;
+    recovery::discard_session(
+        Arc::clone(&state.persistence),
+        Arc::clone(&state.vector_store),
+        &state.state_machine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     emit_state(&app, SessionState::Idle);
     Ok(())
+}
+
+/// Discard every crashed session in the database. Returns the list of
+/// cleared session IDs so the UI can confirm what was purged.
+#[tauri::command]
+pub async fn discard_all_crashed_sessions(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let ids = recovery::discard_all_crashed(
+        Arc::clone(&state.persistence),
+        Arc::clone(&state.vector_store),
+        &state.state_machine,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let current = *state.state_machine.lock().await.current();
+    emit_state(&app, current);
+    Ok(ids.into_iter().map(|id| id.to_string()).collect())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1129,18 +1192,19 @@ pub async fn discard_crashed_session(
 /// defined in `/prompts/session_essence/`, and returns a JSON summary blob.
 /// Only callable after the session has reached `ENDED`.
 #[tauri::command]
-pub async fn generate_session_summary(
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<String, String> {
     let sid = {
         let machine = state.state_machine.lock().await;
         machine.session_id().ok_or("No session to summarise.")?
     };
 
     // Load the session_essence prompt — must come from file, never inlined.
-    let prompt_template =
-        std::fs::read_to_string(prompts_base_dir().join("session_essence").join("default.txt"))
-            .map_err(|e| format!("Failed to load session_essence prompt: {e}"))?;
+    let prompt_template = std::fs::read_to_string(
+        prompts_base_dir()
+            .join("session_essence")
+            .join("default.txt"),
+    )
+    .map_err(|e| format!("Failed to load session_essence prompt: {e}"))?;
 
     // Fetch transcript rows from SQLite and build a flat string.
     let transcript_text = {
@@ -1218,18 +1282,12 @@ pub async fn generate_session_summary(
 pub async fn list_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::dto::SessionSummaryDto>, String> {
-    state
-        .persistence
-        .list_sessions()
-        .map_err(|e| e.to_string())
+    state.persistence.list_sessions().map_err(|e| e.to_string())
 }
 
 /// Mark a session as promoted (exempted from 30-day expiry).
 #[tauri::command]
-pub async fn promote_session(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn promote_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
     state
         .persistence
@@ -1237,12 +1295,105 @@ pub async fn promote_session(
         .map_err(|e| e.to_string())
 }
 
+/// Remove the promoted flag from a session so it resumes normal 30-day expiry.
+#[tauri::command]
+pub async fn demote_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+    state
+        .persistence
+        .demote_session(sid)
+        .map_err(|e| e.to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.4 — Cost cap enforcement
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// DTO mirroring [`crate::cost::CostStatus`] for the frontend.
+#[derive(serde::Serialize)]
+pub struct CostStatusDto {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost_estimate_usd: f64,
+    pub max_total_tokens: Option<u64>,
+    pub max_cost_estimate_usd: Option<f64>,
+    pub suspended: bool,
+    pub status: String,
+    pub fraction_used: Option<f64>,
+}
+
+impl From<crate::cost::CostStatus> for CostStatusDto {
+    fn from(s: crate::cost::CostStatus) -> Self {
+        let status = match s.status {
+            crate::cost::CostCapStatus::Ok => "ok",
+            crate::cost::CostCapStatus::Warning80 => "warning_80",
+            crate::cost::CostCapStatus::Reached => "reached",
+        };
+        Self {
+            input_tokens: s.usage.input_tokens,
+            output_tokens: s.usage.output_tokens,
+            total_tokens: s.usage.total_tokens,
+            cost_estimate_usd: s.usage.cost_estimate_usd,
+            max_total_tokens: s.cap.max_total_tokens,
+            max_cost_estimate_usd: s.cap.max_cost_estimate_usd,
+            suspended: s.suspended,
+            status: status.to_string(),
+            fraction_used: s.fraction_used,
+        }
+    }
+}
+
+/// Snapshot the current cumulative usage, configured cap, and suspension flag.
+#[tauri::command]
+pub async fn get_cost_status(state: State<'_, AppState>) -> Result<CostStatusDto, String> {
+    Ok(state.cost_tracker.snapshot().into())
+}
+
+/// Configure the per-session token / cost cap. `None` on either field
+/// disables that dimension; both `None` removes the cap entirely.
+#[tauri::command]
+pub async fn set_cost_cap(
+    state: State<'_, AppState>,
+    max_total_tokens: Option<u64>,
+    max_cost_estimate_usd: Option<f64>,
+) -> Result<CostStatusDto, String> {
+    let cap = crate::cost::CostCap {
+        max_total_tokens,
+        max_cost_estimate_usd,
+    };
+    let snap = state.cost_tracker.set_cap(cap);
+    info!(
+        max_total_tokens = ?max_total_tokens,
+        max_cost_estimate_usd = ?max_cost_estimate_usd,
+        suspended = snap.suspended,
+        "cost cap updated",
+    );
+    Ok(snap.into())
+}
+
+/// Clear the suspended flag while preserving cumulative counters. The cap
+/// itself is unchanged — the next turn will re-suspend unless the user also
+/// widens the cap via `set_cost_cap`.
+#[tauri::command]
+pub async fn lift_cost_suspension(state: State<'_, AppState>) -> Result<CostStatusDto, String> {
+    let snap = state.cost_tracker.lift_suspension();
+    info!("cost-cap suspension lifted by user");
+    Ok(snap.into())
+}
+
+/// Zero all cumulative counters. Useful when the user wants a fresh budget
+/// without restarting the session.
+#[tauri::command]
+pub async fn reset_cost_tracker(state: State<'_, AppState>) -> Result<CostStatusDto, String> {
+    let snap = state.cost_tracker.reset();
+    info!("cost tracker reset by user");
+    Ok(snap.into())
+}
+
 /// Delete a session and all its data from local SQLite and Supabase.
 #[tauri::command]
-pub async fn delete_session(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn delete_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
 
     // Delete locally first (always succeeds even if Supabase is unreachable).
@@ -1256,14 +1407,10 @@ pub async fn delete_session(
     if let Some(token) = token_opt {
         let plugins = state.plugins.clone();
         tokio::spawn(async move {
-            if let Some(cfg_val) = plugins.get("supabase") {
-                if let Ok(cfg) = serde_json::from_value::<serde_json::Value>(cfg_val.clone()) {
-                    let url = cfg["url"].as_str().unwrap_or("").to_string();
-                    let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
-                    if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
-                        if let Err(e) = sync.delete_session(sid, &token).await {
-                            warn!(session_id = %sid, error = %e, "Supabase session delete failed");
-                        }
+            if let Some(cfg) = crate::supabase::resolve_supabase_config(&plugins) {
+                if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(cfg.url, cfg.anon_key) {
+                    if let Err(e) = sync.delete_session(sid, &token).await {
+                        warn!(session_id = %sid, error = %e, "Supabase session delete failed");
                     }
                 }
             }
@@ -1271,4 +1418,187 @@ pub async fn delete_session(
     }
 
     Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.5 — GDPR right-to-deletion + right-to-export
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Delete the authenticated user's account end-to-end.
+///
+/// Flow (each step is independently best-effort — see [`crate::gdpr`]):
+/// 1. Supabase `DELETE /auth/v1/user` — removes the auth row.
+/// 2. Local vector store — drops every per-session `vec_chunks_{hex}` table.
+/// 3. Local SQLite — truncates all user-data tables in one transaction.
+/// 4. OS keychain — purges tokens, consent flags, and known API keys.
+///
+/// The state machine is reset to IDLE and the in-memory auth token is
+/// cleared, regardless of whether the Supabase call succeeded.
+///
+/// Returns the per-step [`crate::gdpr::DeleteAccountReport`] so the UI can
+/// surface partial failures (e.g. "we deleted everything locally, but the
+/// server is unreachable — your account row will be removed when Supabase
+/// is back online").
+#[tauri::command]
+pub async fn delete_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::gdpr::DeleteAccountReport, String> {
+    // Refuse to delete while a live session is running — would orphan the
+    // audio thread and leave SQLite mid-write.
+    {
+        let guard = state.live_tasks.lock().await;
+        if guard.is_some() {
+            return Err(
+                "Cannot delete account while a session is live. Stop the session first."
+                    .to_string(),
+            );
+        }
+    }
+
+    let token = active_auth_token(&state).await?;
+
+    let report = crate::gdpr::delete_account(
+        Arc::clone(&state.auth),
+        token,
+        Arc::clone(&state.persistence),
+        Arc::clone(&state.vector_store),
+        Box::new(keychain::clear_all_user_secrets),
+    )
+    .await;
+
+    // Reset the in-memory auth + session state so the next request looks
+    // like a fresh launch.
+    state.set_auth_token(None).await;
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine.reset_to_idle();
+    }
+    state.cost_tracker.reset();
+    *state.session_digest.write().await = None;
+    *state.session_memory.lock().await = None;
+    state.prewarm_cache.lock().await.clear();
+
+    emit_state(&app, SessionState::Idle);
+
+    info!(
+        all_succeeded = report.all_succeeded(),
+        "account deletion finished"
+    );
+    Ok(report)
+}
+
+/// Produce a JSON dump of all locally-stored sessions, transcripts,
+/// responses, and state transitions for the GDPR right-to-export.
+///
+/// Returns the JSON as a string so the frontend can hand it to the user
+/// (download, copy to clipboard, etc.). The backend deliberately does NOT
+/// write to disk — file I/O belongs in the platform-native dialog layer.
+#[tauri::command]
+pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, String> {
+    let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.7 — Provider API key management (Settings → Providers)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Reject any provider name that isn't in the canonical allowlist. Keeps a
+/// compromised frontend from spraying arbitrary keychain entries.
+fn validate_provider(provider: &str) -> Result<(), String> {
+    if keychain::KNOWN_API_PROVIDERS.contains(&provider) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Unknown provider '{provider}' — expected one of {:?}",
+            keychain::KNOWN_API_PROVIDERS
+        ))
+    }
+}
+
+/// Persist an LLM provider API key in the OS keychain. The plaintext key
+/// is wrapped in `SecretString` immediately on entry so the IPC buffer is
+/// zeroed when this function returns.
+#[tauri::command]
+pub async fn save_provider_key(provider: String, key: String) -> Result<(), String> {
+    validate_provider(&provider)?;
+    let secret = SecretString::new(key);
+    keychain::store_api_key(&provider, secret).map_err(|e| e.to_string())
+}
+
+/// Report whether an API key for `provider` is currently stored. Never
+/// returns the key itself — the frontend only needs presence to render
+/// the Settings UI.
+#[tauri::command]
+pub async fn is_provider_key_present(provider: String) -> Result<bool, String> {
+    validate_provider(&provider)?;
+    Ok(keychain::get_api_key(&provider).is_ok())
+}
+
+/// Remove a provider's API key from the OS keychain. No-op if no key is
+/// stored.
+#[tauri::command]
+pub async fn clear_provider_key(provider: String) -> Result<(), String> {
+    validate_provider(&provider)?;
+    keychain::delete_api_key(&provider).map_err(|e| e.to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.6 — Feature flag commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the evaluation context for the current request. Falls back to
+/// an anonymous user (nil UUID + Free plan) when no auth token is loaded
+/// so the UI can still gate features pre-login.
+async fn evaluation_context(state: &AppState) -> crate::flags::EvaluationContext {
+    if let Some(token) = state.auth_token().await {
+        if let Ok(user) = state.auth.get_current_user(&token).await {
+            return crate::flags::EvaluationContext {
+                user_id: user.id,
+                plan: user.plan,
+            };
+        }
+    }
+    crate::flags::EvaluationContext {
+        user_id: Uuid::nil(),
+        plan: crate::interfaces::auth::Plan::Free,
+    }
+}
+
+/// Evaluate a single feature flag for the currently authenticated user.
+///
+/// Reads from the in-memory cache that was either pulled from Supabase or
+/// loaded from disk on startup — no network call here, even on first hit.
+#[tauri::command]
+pub async fn is_feature_enabled(flag: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let ctx = evaluation_context(&state).await;
+    Ok(state.feature_flags.is_enabled(&flag, &ctx))
+}
+
+/// Trigger a refresh from the Supabase Edge Function. On failure the
+/// existing cache (or compiled defaults) stays authoritative — the error
+/// is returned to the caller for logging but is not fatal.
+#[tauri::command]
+pub async fn refresh_feature_flags(state: State<'_, AppState>) -> Result<(), String> {
+    let source = match crate::flags::supabase_source_from_plugins(&state.plugins) {
+        Some(s) => s,
+        None => return Err("Supabase plugin config is missing or malformed".to_string()),
+    };
+    state
+        .feature_flags
+        .refresh_from(&source)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Dev/debug helper: dump the currently active flag set and its provenance
+/// (remote / cache / defaults). Useful when a tester reports "I don't see
+/// the new panel" — `source = Defaults` tells you the device never reached
+/// Supabase.
+#[tauri::command]
+pub async fn get_feature_flags_snapshot(
+    state: State<'_, AppState>,
+) -> Result<crate::flags::ClientSnapshot, String> {
+    Ok(state.feature_flags.snapshot())
 }

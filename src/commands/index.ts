@@ -161,6 +161,10 @@ export const confirmDigest = (sessionId: string, digest: DigestDto): Promise<voi
 export const getDigest = (sessionId: string): Promise<DigestDto> =>
   invoke<DigestDto>("get_digest", { sessionId });
 
+/** Return persisted context text for any session (Past Sessions → Start similar). */
+export const getSessionContext = (sessionId: string): Promise<string> =>
+  invoke<string>("get_session_context", { sessionId });
+
 /** Return the full session state snapshot for React resync. */
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");
@@ -211,6 +215,215 @@ export const listSessions = (): Promise<SessionSummaryDto[]> =>
 export const promoteSession = (sessionId: string): Promise<void> =>
   invoke<void>("promote_session", { sessionId });
 
+/** Remove the promoted flag — session resumes normal 30-day expiry. */
+export const demoteSession = (sessionId: string): Promise<void> =>
+  invoke<void>("demote_session", { sessionId });
+
 /** Delete a session and all its data from local SQLite. */
 export const deleteSession = (sessionId: string): Promise<void> =>
   invoke<void>("delete_session", { sessionId });
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 7.4 — cost cap enforcement
+// ──────────────────────────────────────────────────────────────────────────────
+
+export type CostCapStatusName = "ok" | "warning_80" | "reached";
+
+export interface CostStatusDto {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costEstimateUsd: number;
+  maxTotalTokens: number | null;
+  maxCostEstimateUsd: number | null;
+  suspended: boolean;
+  status: CostCapStatusName;
+  fractionUsed: number | null;
+}
+
+interface RawCostStatus {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost_estimate_usd: number;
+  max_total_tokens: number | null;
+  max_cost_estimate_usd: number | null;
+  suspended: boolean;
+  status: CostCapStatusName;
+  fraction_used: number | null;
+}
+
+const adaptCostStatus = (raw: RawCostStatus): CostStatusDto => ({
+  inputTokens: raw.input_tokens,
+  outputTokens: raw.output_tokens,
+  totalTokens: raw.total_tokens,
+  costEstimateUsd: raw.cost_estimate_usd,
+  maxTotalTokens: raw.max_total_tokens,
+  maxCostEstimateUsd: raw.max_cost_estimate_usd,
+  suspended: raw.suspended,
+  status: raw.status,
+  fractionUsed: raw.fraction_used,
+});
+
+/** Snapshot cumulative usage, cap, and suspension flag. */
+export const getCostStatus = async (): Promise<CostStatusDto> =>
+  adaptCostStatus(await invoke<RawCostStatus>("get_cost_status"));
+
+/** Configure caps. Pass null on either field to remove that dimension. */
+export const setCostCap = async (
+  maxTotalTokens: number | null,
+  maxCostEstimateUsd: number | null,
+): Promise<CostStatusDto> =>
+  adaptCostStatus(
+    await invoke<RawCostStatus>("set_cost_cap", {
+      maxTotalTokens,
+      maxCostEstimateUsd,
+    }),
+  );
+
+/** Clear the suspended flag; counters and cap unchanged. */
+export const liftCostSuspension = async (): Promise<CostStatusDto> =>
+  adaptCostStatus(await invoke<RawCostStatus>("lift_cost_suspension"));
+
+/** Zero all cumulative counters. */
+export const resetCostTracker = async (): Promise<CostStatusDto> =>
+  adaptCostStatus(await invoke<RawCostStatus>("reset_cost_tracker"));
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 7.5 — GDPR right-to-deletion + right-to-export
+// ──────────────────────────────────────────────────────────────────────────────
+
+export interface DeleteAccountReport {
+  supabaseDeleted: boolean;
+  supabaseError: string | null;
+  keychainCleared: boolean;
+  keychainError: string | null;
+  vectorStoreCleared: boolean;
+  vectorStoreError: string | null;
+  sqliteCleared: boolean;
+  sqliteError: string | null;
+  sessionsCleared: number;
+}
+
+interface RawDeleteAccountReport {
+  supabase_deleted: boolean;
+  supabase_error: string | null;
+  keychain_cleared: boolean;
+  keychain_error: string | null;
+  vector_store_cleared: boolean;
+  vector_store_error: string | null;
+  sqlite_cleared: boolean;
+  sqlite_error: string | null;
+  sessions_cleared: number;
+}
+
+const adaptDeleteAccountReport = (raw: RawDeleteAccountReport): DeleteAccountReport => ({
+  supabaseDeleted: raw.supabase_deleted,
+  supabaseError: raw.supabase_error,
+  keychainCleared: raw.keychain_cleared,
+  keychainError: raw.keychain_error,
+  vectorStoreCleared: raw.vector_store_cleared,
+  vectorStoreError: raw.vector_store_error,
+  sqliteCleared: raw.sqlite_cleared,
+  sqliteError: raw.sqlite_error,
+  sessionsCleared: raw.sessions_cleared,
+});
+
+/**
+ * Run the GDPR right-to-deletion flow end-to-end.
+ *
+ * Wipes the Supabase auth user, the OS keychain, the local SQLite database,
+ * and the per-session vector store. Each step is independently best-effort —
+ * inspect the returned report to surface partial failures to the user.
+ */
+export const deleteAccount = async (): Promise<DeleteAccountReport> =>
+  adaptDeleteAccountReport(await invoke<RawDeleteAccountReport>("delete_account"));
+
+/**
+ * Return a JSON blob of every locally-stored session, transcript, and
+ * response. The caller is responsible for writing it to disk (or sharing it
+ * via the system share sheet).
+ */
+export const exportUserData = (): Promise<string> => invoke<string>("export_user_data");
+
+// ── Phase 7.6 — Feature flags ────────────────────────────────────────────────
+
+export type FlagsOrigin = "remote" | "cache" | "defaults";
+
+export interface FeatureFlag {
+  name: string;
+  enabled: boolean;
+  allowed_plans: UserPlan[];
+  rollout_percentage: number;
+  ga: boolean;
+}
+
+export interface FeatureFlagsSnapshot {
+  origin: FlagsOrigin;
+  fetchedAt: string;
+  flagCount: number;
+  flags: FeatureFlag[];
+}
+
+interface RawFeatureFlagsSnapshot {
+  origin: FlagsOrigin;
+  fetched_at: string;
+  flag_count: number;
+  flags: FeatureFlag[];
+}
+
+const adaptSnapshot = (raw: RawFeatureFlagsSnapshot): FeatureFlagsSnapshot => ({
+  origin: raw.origin,
+  fetchedAt: raw.fetched_at,
+  flagCount: raw.flag_count,
+  flags: raw.flags,
+});
+
+/**
+ * Resolve a flag against the currently authenticated user's plan + a
+ * stable hash of their UUID. Pure read — never hits the network.
+ */
+export const isFeatureEnabled = (flag: string): Promise<boolean> =>
+  invoke<boolean>("is_feature_enabled", { flag });
+
+/**
+ * Pull the latest flag set from the Supabase `/flags` Edge Function and
+ * write it through to the local cache. Failures leave the previous flag
+ * set authoritative — caller can ignore the rejection.
+ */
+export const refreshFeatureFlags = (): Promise<void> =>
+  invoke<void>("refresh_feature_flags");
+
+/**
+ * Diagnostics: which source is currently authoritative (remote / cache /
+ * compiled defaults), when it was last fetched, and the full flag list.
+ * Useful for the dev dashboard and for "why is this flag off?" reports.
+ */
+export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =>
+  adaptSnapshot(await invoke<RawFeatureFlagsSnapshot>("get_feature_flags_snapshot"));
+
+// ── Phase 7.7 — Provider API key management ──────────────────────────────────
+
+export type LlmProvider = "groq" | "openai" | "anthropic";
+
+/**
+ * Store an LLM provider API key in the OS keychain. The plaintext value
+ * lives in JS for the duration of this call only and is never echoed by
+ * the backend.
+ */
+export const saveProviderKey = (provider: LlmProvider, key: string): Promise<void> =>
+  invoke<void>("save_provider_key", { provider, key });
+
+/**
+ * Whether a key is currently stored for `provider`. The actual key value
+ * is never sent over IPC.
+ */
+export const isProviderKeyPresent = (provider: LlmProvider): Promise<boolean> =>
+  invoke<boolean>("is_provider_key_present", { provider });
+
+/**
+ * Remove `provider`'s key from the OS keychain. Safe to call when no key
+ * is stored.
+ */
+export const clearProviderKey = (provider: LlmProvider): Promise<void> =>
+  invoke<void>("clear_provider_key", { provider });

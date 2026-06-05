@@ -1,7 +1,6 @@
 //! Keychain-backed session restore and refresh (Task 1.9).
 
 use chrono::Utc;
-use secrecy::ExposeSecret;
 use tracing::info;
 
 use crate::interfaces::auth::{AuthInterface, AuthToken};
@@ -22,8 +21,7 @@ pub async fn restore_auth_from_keychain(auth: &dyn AuthInterface) -> Option<Auth
     }
 
     info!(event = "auth_token_expired_refreshing");
-    let refresh_secret = token.refresh_token.expose_secret().clone();
-    match auth.refresh(&refresh_secret).await {
+    match auth.refresh(&token.refresh_token).await {
         Ok(new_token) => {
             if keychain::store_auth_token(&new_token).is_ok() {
                 info!(event = "auth_session_refreshed");

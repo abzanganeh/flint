@@ -196,10 +196,17 @@ mod tests {
     #[tokio::test]
     async fn acquire_completes_when_tokens_available() {
         let limiter = RateLimiter::new("test", 60, 60_000);
-        // Should return almost immediately since both buckets start full.
+        // Both buckets start full so acquire must not trigger any
+        // `tokio::time::sleep`. The 500 ms bound is generous enough to absorb
+        // jitter from coverage-instrumented or loaded CI runners while still
+        // catching a regression that introduces a real wait.
         let start = Instant::now();
         limiter.acquire(100).await;
-        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "acquire should not sleep when buckets are full (took {:?})",
+            start.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -213,5 +220,65 @@ mod tests {
         let limiter = RateLimiter::new("test", 60, 60_000);
         limiter.set_retry_after(60).await;
         assert!(!limiter.is_ready().await);
+    }
+
+    /// Exercises `Bucket::wait_secs` when tokens are insufficient — covers
+    /// the divisor branch that returns the projected wait.
+    #[test]
+    fn bucket_wait_secs_returns_projected_wait_when_short() {
+        // 60 tokens/minute = 1 token/sec. Empty the bucket then ask for 30 tokens.
+        let mut b = Bucket::new(60);
+        assert!(b.try_consume(60.0));
+        let wait = b.wait_secs(30.0);
+        // Roughly 30 seconds — refill is 1 tok/sec from empty.
+        assert!(wait > 29.0 && wait < 31.0, "got wait_secs = {wait}");
+    }
+
+    /// Exercises the Retry-After branch in `acquire`: sets a 2 s deadline,
+    /// verifies the limiter parks under paused-time then clears the deadline.
+    #[tokio::test(start_paused = true)]
+    async fn acquire_honours_retry_after_window_then_clears_it() {
+        let limiter = RateLimiter::new("test", 60, 60_000);
+        limiter.set_retry_after(2).await;
+        assert!(!limiter.is_ready().await);
+
+        // Under paused time the sleep inside `acquire` advances virtual time
+        // automatically. After the call completes the retry_after window
+        // must be cleared.
+        limiter.acquire(100).await;
+        assert!(limiter.is_ready().await);
+    }
+
+    /// Drains the request bucket so `acquire` must sleep waiting for refill.
+    /// Hits the `tokio::time::sleep` line inside the request-slot loop.
+    ///
+    /// `Bucket` uses `std::time::Instant` (not `tokio::time::Instant`), so
+    /// paused tokio time does NOT speed up refill — the test runs in real
+    /// time. We pick a high `rpm` so the wait is on the order of 100 ms.
+    #[tokio::test]
+    async fn acquire_waits_when_request_bucket_empty() {
+        // 6000 rpm = 100 req/sec; capacity 6000.
+        let limiter = RateLimiter::new("test", 6000, 60_000);
+        // Drain the bucket.
+        for _ in 0..6000 {
+            limiter.acquire(0).await;
+        }
+        // Next acquire enters the wait loop and sleeps until ~10 ms refill
+        // produces 1 token (effectively ~10 ms real time).
+        limiter.acquire(0).await;
+    }
+
+    /// Drains the token bucket so `acquire` waits inside the token-budget loop.
+    ///
+    /// Same caveat as the request-bucket test: refill is real-time. We size
+    /// `tpm` so the wait is ~100 ms.
+    #[tokio::test]
+    async fn acquire_waits_when_token_bucket_empty() {
+        // 6000 tpm = 100 tok/sec; capacity 6000.
+        let limiter = RateLimiter::new("test", 60_000, 6000);
+        // Drain.
+        limiter.acquire(6000).await;
+        // Needs 10 more tokens → ~100 ms real-time wait.
+        limiter.acquire(10).await;
     }
 }

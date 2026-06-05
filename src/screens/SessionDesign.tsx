@@ -29,25 +29,43 @@ Example — interview:
   Requirements: 5+ years in distributed systems, Rust or Go, ownership mindset…
   About the team: …`;
 
+const PROFILE_PLACEHOLDER = `Paste your resume, LinkedIn summary, or a quick bio here…
+
+This is stored locally and re-used across sessions. Smart Resume integration will auto-fill this field.`;
+
 const MIN_CONTEXT_CHARS = 50;
 const CHAR_WARN_THRESHOLD = 3_000;
+const PROFILE_STORAGE_KEY = "flint.userProfile";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Component
 // ──────────────────────────────────────────────────────────────────────────────
+
+export interface SessionPreFill {
+  name: string;
+  sessionType: string;
+  domain: string;
+  /** Reconstructed from the session's digest — pre-fills the context textarea. */
+  contextText?: string;
+}
 
 export interface SessionDesignProps {
   /** Called with the new session UUID once the digest is ready. */
   onComplete: (sessionId: string) => void;
   /** Navigate to the past sessions list. */
   onViewSessions?: () => void;
+  /** Pre-populate form fields (e.g. when cloning a past session). */
+  preFill?: SessionPreFill;
 }
 
-export default function SessionDesign({ onComplete, onViewSessions }: SessionDesignProps) {
-  const [name, setName] = useState("");
-  const [sessionType, setSessionType] = useState("interview");
-  const [domain, setDomain] = useState("software engineering");
-  const [contextText, setContextText] = useState("");
+export default function SessionDesign({ onComplete, onViewSessions, preFill }: SessionDesignProps) {
+  const [name, setName] = useState(preFill?.name ?? "");
+  const [sessionType, setSessionType] = useState(preFill?.sessionType ?? "interview");
+  const [domain, setDomain] = useState(preFill?.domain ?? "software engineering");
+  const [contextText, setContextText] = useState(preFill?.contextText ?? "");
+  const [profileText, setProfileText] = useState<string>(
+    () => localStorage.getItem(PROFILE_STORAGE_KEY) ?? ""
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,6 +111,8 @@ export default function SessionDesign({ onComplete, onViewSessions }: SessionDes
   // ── Extract digest handler ────────────────────────────────────────────────
   const handleExtract = async () => {
     const trimmedContext = contextText.trim();
+    const trimmedProfile = profileText.trim();
+
     if (!name.trim()) {
       setError("Please enter a session name.");
       return;
@@ -105,6 +125,14 @@ export default function SessionDesign({ onComplete, onViewSessions }: SessionDes
     }
 
     setError(null);
+
+    // Combine session context and user profile into a single text block that
+    // the Rust digest extractor and RAG pipeline will embed together.
+    const parts: string[] = [`[SESSION CONTEXT]\n${trimmedContext}`];
+    if (trimmedProfile.length > 0) {
+      parts.push(`[YOUR PROFILE]\n${trimmedProfile}`);
+    }
+    const combinedText = parts.join("\n\n");
 
     try {
       const config: SessionConfigDto = {
@@ -119,7 +147,7 @@ export default function SessionDesign({ onComplete, onViewSessions }: SessionDes
 
       // Fire ingest_context — do not await for navigation; the DIGEST_REVIEW
       // event drives that (task rule: all state changes come from events).
-      ingestContext(sid, trimmedContext).catch((err: unknown) => {
+      ingestContext(sid, combinedText).catch((err: unknown) => {
         setIsLoading(false);
         setError(String(err));
       });
@@ -127,6 +155,11 @@ export default function SessionDesign({ onComplete, onViewSessions }: SessionDes
       setError(String(err));
       setIsLoading(false);
     }
+  };
+
+  const handleProfileChange = (value: string) => {
+    setProfileText(value);
+    localStorage.setItem(PROFILE_STORAGE_KEY, value);
   };
 
   const charCount = contextText.length;
@@ -185,10 +218,27 @@ export default function SessionDesign({ onComplete, onViewSessions }: SessionDes
           />
         </div>
 
-        {/* Context textarea */}
+        {/* User profile / resume */}
         <div className="sd-field">
           <div className="sd-context-label">
-            <label htmlFor="sd-context">Context</label>
+            <label htmlFor="sd-profile">Your profile / resume</label>
+            <span className="sd-char-count sd-hint">Saved locally — reused across sessions</span>
+          </div>
+          <textarea
+            id="sd-profile"
+            className="sd-textarea sd-textarea--profile"
+            placeholder={PROFILE_PLACEHOLDER}
+            value={profileText}
+            onChange={(e) => handleProfileChange(e.target.value)}
+            disabled={isLoading}
+            rows={5}
+          />
+        </div>
+
+        {/* Session context (JD / brief) */}
+        <div className="sd-field">
+          <div className="sd-context-label">
+            <label htmlFor="sd-context">Session context</label>
             <span
               className={`sd-char-count${charCount > CHAR_WARN_THRESHOLD ? " warning" : ""}`}
             >
@@ -202,7 +252,7 @@ export default function SessionDesign({ onComplete, onViewSessions }: SessionDes
             value={contextText}
             onChange={(e) => setContextText(e.target.value)}
             disabled={isLoading}
-            rows={10}
+            rows={9}
           />
         </div>
 

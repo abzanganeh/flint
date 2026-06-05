@@ -98,8 +98,8 @@ impl AuthInterface for MockAuth {
         Ok(())
     }
 
-    async fn refresh(&self, refresh_token: &str) -> Result<AuthToken> {
-        if refresh_token != FIXTURE_REFRESH {
+    async fn refresh(&self, refresh_token: &SecretString) -> Result<AuthToken> {
+        if refresh_token.expose_secret() != FIXTURE_REFRESH {
             return Err(anyhow!("Invalid credentials"));
         }
         let mut state = self.inner.lock().map_err(|_| anyhow!("lock poisoned"))?;
@@ -173,7 +173,7 @@ mod tests {
             .await
             .expect("login");
         let refreshed = auth
-            .refresh(FIXTURE_REFRESH)
+            .refresh(&SecretString::new(FIXTURE_REFRESH.to_string()))
             .await
             .expect("refresh succeeds");
         assert_eq!(

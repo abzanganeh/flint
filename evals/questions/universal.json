@@ -1,0 +1,246 @@
+{
+  "domain": "universal",
+  "version": 1,
+  "questions": [
+    {
+      "id": "uni-intro-001",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "Tell me about yourself."
+    },
+    {
+      "id": "uni-intro-002",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "Walk me through your resume."
+    },
+    {
+      "id": "uni-intro-003",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "Why are you interested in this role, and why now?"
+    },
+    {
+      "id": "uni-intro-004",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "Why this company over others you are talking to?"
+    },
+    {
+      "id": "uni-intro-005",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "Where do you see yourself in five years?"
+    },
+    {
+      "id": "uni-intro-006",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "What are you looking for in your next role that you do not have today?"
+    },
+    {
+      "id": "uni-intro-007",
+      "domain": "universal",
+      "category": "introduction",
+      "text": "What questions do you have for me about the role or the team?"
+    },
+    {
+      "id": "uni-strength-001",
+      "domain": "universal",
+      "category": "strengths",
+      "text": "What is your greatest strength, and how has it shown up in your work?"
+    },
+    {
+      "id": "uni-strength-002",
+      "domain": "universal",
+      "category": "strengths",
+      "text": "What are you better at than 90 percent of your peers?"
+    },
+    {
+      "id": "uni-strength-003",
+      "domain": "universal",
+      "category": "strengths",
+      "text": "What would your last manager say is the most valuable thing you brought to the team?"
+    },
+    {
+      "id": "uni-strength-004",
+      "domain": "universal",
+      "category": "strengths",
+      "text": "Tell me about the accomplishment you are most proud of."
+    },
+    {
+      "id": "uni-weakness-001",
+      "domain": "universal",
+      "category": "weaknesses",
+      "text": "What is a weakness you have actively worked on improving?"
+    },
+    {
+      "id": "uni-weakness-002",
+      "domain": "universal",
+      "category": "weaknesses",
+      "text": "Tell me about a time you failed. What did you take away from it?"
+    },
+    {
+      "id": "uni-weakness-003",
+      "domain": "universal",
+      "category": "weaknesses",
+      "text": "Tell me about a piece of feedback that was hard to hear. What did you do with it?"
+    },
+    {
+      "id": "uni-weakness-004",
+      "domain": "universal",
+      "category": "weaknesses",
+      "text": "What is something you would do differently if you could go back to your last role?"
+    },
+    {
+      "id": "uni-star-001",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you led a project from start to finish."
+    },
+    {
+      "id": "uni-star-002",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to make a decision without enough information."
+    },
+    {
+      "id": "uni-star-003",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to resolve a conflict with a colleague."
+    },
+    {
+      "id": "uni-star-004",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to influence someone more senior than you."
+    },
+    {
+      "id": "uni-star-005",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to push back on a decision you disagreed with."
+    },
+    {
+      "id": "uni-star-006",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to work with someone who was very different from you."
+    },
+    {
+      "id": "uni-star-007",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you went above and beyond your job description."
+    },
+    {
+      "id": "uni-star-008",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you took on something outside your area of expertise."
+    },
+    {
+      "id": "uni-star-009",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to deliver a project under a tight deadline."
+    },
+    {
+      "id": "uni-star-010",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you handled a high-pressure situation. What kept you grounded?"
+    },
+    {
+      "id": "uni-star-011",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you turned an unhappy customer or stakeholder around."
+    },
+    {
+      "id": "uni-star-012",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you spotted a problem before anyone else did."
+    },
+    {
+      "id": "uni-star-013",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to make an unpopular decision."
+    },
+    {
+      "id": "uni-star-014",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you mentored or coached someone. What changed for them?"
+    },
+    {
+      "id": "uni-star-015",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to recover from a public mistake."
+    },
+    {
+      "id": "uni-star-016",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to manage your own time across competing priorities."
+    },
+    {
+      "id": "uni-star-017",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to step into a leadership role you were not formally given."
+    },
+    {
+      "id": "uni-star-018",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to make a trade-off between speed and quality."
+    },
+    {
+      "id": "uni-star-019",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you had to advocate for something you believed in against pushback."
+    },
+    {
+      "id": "uni-star-020",
+      "domain": "universal",
+      "category": "star_story",
+      "text": "Tell me about a time you adapted quickly to a major change at work."
+    },
+    {
+      "id": "uni-beh-001",
+      "domain": "universal",
+      "category": "behavioural",
+      "text": "How do you handle stress when multiple priorities collide?"
+    },
+    {
+      "id": "uni-beh-002",
+      "domain": "universal",
+      "category": "behavioural",
+      "text": "How do you handle disagreement with someone you respect?"
+    },
+    {
+      "id": "uni-beh-003",
+      "domain": "universal",
+      "category": "behavioural",
+      "text": "How do you keep learning in a field that moves quickly?"
+    },
+    {
+      "id": "uni-beh-004",
+      "domain": "universal",
+      "category": "behavioural",
+      "text": "Describe the kind of manager you do your best work for."
+    },
+    {
+      "id": "uni-beh-005",
+      "domain": "universal",
+      "category": "behavioural",
+      "text": "Why are you leaving your current role?"
+    }
+  ]
+}

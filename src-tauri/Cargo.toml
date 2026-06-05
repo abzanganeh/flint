@@ -37,7 +37,11 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 chrono = { version = "0.4", features = ["serde"] }
 keyring = "2"
 sysinfo = "0.33"
-fastembed = "5"
+fastembed = { version = "5", default-features = false, features = [
+    "ort-load-dynamic",
+    "hf-hub-native-tls",
+    "image-models",
+] }
 sqlite-vec = "0.1.9"
 bytemuck = "1"
 
@@ -60,6 +64,12 @@ tauri-plugin-global-shortcut = "2"
 
 [dev-dependencies]
 tempfile = "3"
+# test-util gives us paused virtual time (`tokio::test(start_paused = true)`)
+# so timing-dependent tests run deterministically without real sleeps.
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread", "time", "sync"] }
+# Phase 7.3 — Performance benchmark suite (criterion produces per-bench
+# JSON percentiles consumed by the CI bench gate).
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [[test]]
 name = "rag_pipeline"
@@ -76,4 +86,48 @@ path = "tests/integration/orchestrator.rs"
 [[test]]
 name = "crash_recovery"
 path = "tests/integration/crash_recovery.rs"
+
+[[test]]
+name = "gdpr"
+path = "tests/integration/gdpr.rs"
+
+[[test]]
+name = "feature_flags"
+path = "tests/integration/feature_flags.rs"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 7.3 benchmarks — measured against NFR targets in flint-performance.mdc.
+# Run with: cargo bench --bench <name>
+# Gate with: cargo run --bin bench_gate
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[bench]]
+name = "rag_retrieval"
+harness = false
+
+[[bench]]
+name = "question_detection"
+harness = false
+
+[[bench]]
+name = "rnnoise_frame"
+harness = false
+
+[[bench]]
+name = "prompt_loading"
+harness = false
+
+[[bench]]
+name = "confidence_scoring"
+harness = false
+
+[[bench]]
+name = "orchestrator_ttft"
+harness = false
+
+# CI bench gate — parses criterion sample JSON, computes P50/P95/P99, and
+# enforces the NFR thresholds from flint-performance.mdc.
+[[bin]]
+name = "bench_gate"
+path = "src/bin/bench_gate.rs"
 

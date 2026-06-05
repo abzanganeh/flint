@@ -62,6 +62,16 @@
   transition: border-color 0.15s;
 }
 
+.sd-field select {
+  appearance: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%23a1a1aa' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  padding-right: 2.25rem;
+}
+
 .sd-field input:focus,
 .sd-field select:focus {
   border-color: rgba(99, 102, 241, 0.6);
@@ -69,6 +79,7 @@
 
 .sd-field select option {
   background: #1c1c24;
+  color: #f4f4f5;
 }
 
 .sd-field-row {
@@ -90,6 +101,23 @@
 
 .sd-char-count.warning {
   color: #fbbf24;
+}
+
+.sd-hint {
+  color: #3f3f46;
+  font-style: italic;
+  font-size: 0.73rem;
+}
+
+.sd-textarea--profile {
+  min-height: 6rem;
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+.sd-textarea--profile:focus {
+  opacity: 1;
+  border-style: solid;
 }
 
 .sd-textarea {

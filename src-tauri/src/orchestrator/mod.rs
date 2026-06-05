@@ -36,9 +36,10 @@ use crate::audio::pipeline::DetectedQuestion;
 use crate::confidence::{compute_confidence, ConfidenceLevel, ConfidenceSignals};
 use crate::digest::Digest;
 use crate::events::{
-    emit_confidence_score, emit_context_truncated, emit_rag_chunks_update,
-    emit_response_metadata, emit_thread_status, emit_token_usage_update, ConfidenceScorePayload,
-    ContextTruncatedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
+    emit_confidence_score, emit_context_truncated, emit_cost_cap_status, emit_inference_suspended,
+    emit_rag_chunks_update, emit_response_metadata, emit_thread_status, emit_token_usage_update,
+    ConfidenceScorePayload, ContextTruncatedPayload, CostCapStatusPayload,
+    InferenceSuspendedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
     ThreadStatusPayload, TokenUsageUpdatePayload,
 };
 use crate::interfaces::vector::{ScoredChunk, VectorInterface};
@@ -112,6 +113,121 @@ fn mean_rag_score(chunks: &[ScoredChunk]) -> f32 {
     sum / chunks.len().min(3) as f32
 }
 
+/// Collapse the nested `JoinError`/thread `Result` into a plain text payload.
+/// Emits a `thread_status` error event whenever the task panicked or the
+/// thread itself returned an error. Extracted so tarpaulin attributes the
+/// panic and error branches to the call site (inline closures + macros were
+/// reported as uncovered even when hit).
+fn persist_thread_response(
+    persistence: &SessionPersistence,
+    session_id: Uuid,
+    response_type: ResponseType,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let r = Response {
+        id: Uuid::new_v4(),
+        session_id,
+        response_type,
+        content: text.to_string(),
+        confidence: 0.0,
+    };
+    if let Err(e) = persistence.write_response(&r) {
+        warn!(
+            session_id = %session_id,
+            error = %e,
+            "thread persist failed"
+        );
+    }
+}
+
+fn collect_thread_text<R: Runtime>(
+    result: std::result::Result<Result<String>, tokio::task::JoinError>,
+    session_id: Uuid,
+    thread: &str,
+    app: &AppHandle<R>,
+) -> String {
+    match result {
+        Ok(Ok(text)) => text,
+        Ok(Err(e)) => {
+            log_thread_failed(session_id, thread, &e);
+            emit_thread_error(app, thread);
+            String::new()
+        }
+        Err(join_err) => {
+            log_thread_panicked(session_id, thread, &join_err);
+            emit_thread_error(app, thread);
+            String::new()
+        }
+    }
+}
+
+fn collect_clarifying(
+    result: std::result::Result<Result<Option<String>>, tokio::task::JoinError>,
+    session_id: Uuid,
+) -> bool {
+    match result {
+        Ok(Ok(Some(_))) => true,
+        Ok(Ok(None)) => false,
+        Ok(Err(e)) => {
+            log_thread_failed(session_id, "clarifying", &e);
+            false
+        }
+        Err(join_err) => {
+            log_thread_panicked(session_id, "clarifying", &join_err);
+            false
+        }
+    }
+}
+
+fn emit_thread_error<R: Runtime>(app: &AppHandle<R>, thread: &str) {
+    emit_thread_status(
+        app,
+        ThreadStatusPayload {
+            thread: thread.to_string(),
+            status: "error".to_string(),
+        },
+    );
+}
+
+fn log_thread_failed(session_id: Uuid, thread: &str, error: &anyhow::Error) {
+    warn!(session_id = %session_id, thread, error = %error, "thread failed");
+}
+
+fn log_thread_panicked(session_id: Uuid, thread: &str, join_err: &tokio::task::JoinError) {
+    warn!(session_id = %session_id, thread, "task panicked: {join_err}");
+}
+
+/// Helper extracted so tarpaulin attributes coverage to the call site.
+/// Inline `info!` arguments are otherwise reported as uncovered even when hit.
+#[allow(clippy::too_many_arguments)]
+fn log_confidence_computed(
+    session_id: Uuid,
+    turn: usize,
+    confidence_score: f32,
+    confidence_level: ConfidenceLevel,
+    provider: &str,
+    cache_hit: bool,
+    rag_latency_ms: u64,
+    failover_triggered: bool,
+) {
+    info!(
+        session_id = %session_id,
+        turn = turn,
+        event = "directional_thread_complete",
+        thread_type = "directional",
+        confidence = confidence_score,
+        level = %confidence_level.as_str(),
+        provider = %provider,
+        cache_hit = cache_hit,
+        rag_latency_ms,
+        failover_triggered = failover_triggered,
+        "confidence computed"
+    );
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Main orchestrator loop
 // ──────────────────────────────────────────────────────────────────────────────
@@ -133,6 +249,9 @@ pub struct OrchestratorConfig {
     pub turn_cancel_slot: Arc<Mutex<Option<TurnCancelFlag>>>,
     /// Write-through SQLite persistence for crash recovery.
     pub persistence: Arc<SessionPersistence>,
+    /// Phase 7.4 — cumulative cost / token accounting. Checked pre-dispatch
+    /// to enforce the cap and updated post-dispatch with the turn's usage.
+    pub cost_tracker: Arc<crate::cost::CostTracker>,
 }
 
 /// Receive detected questions and run the three parallel response threads.
@@ -158,11 +277,22 @@ pub async fn run_orchestrator<R: Runtime>(
         turn_number += 1;
         let turn = turn_number;
 
+        // Question text is session content and must not appear at INFO or
+        // above in release builds (flint-security.mdc §"Hard Constraints").
+        // We log a length proxy for operability while gating the literal
+        // text behind a debug-only sibling event.
         info!(
             session_id = %config.session_id,
             turn = turn,
-            question = %question.text,
+            question_len = question.text.len(),
             "orchestrator dispatching turn"
+        );
+        #[cfg(debug_assertions)]
+        tracing::debug!(
+            session_id = %config.session_id,
+            turn = turn,
+            question = %question.text,
+            "orchestrator dispatching turn (debug-only content)",
         );
 
         let turn_cancel = Arc::new(AtomicBool::new(false));
@@ -189,6 +319,7 @@ pub async fn run_orchestrator<R: Runtime>(
             turn_cancel,
             local_llm: Arc::clone(&config.local_llm),
             persistence: Arc::clone(&config.persistence),
+            cost_tracker: Arc::clone(&config.cost_tracker),
         };
 
         let span = info_span!(
@@ -243,10 +374,29 @@ struct OrchestratorTurnConfig {
     turn_cancel: TurnCancelFlag,
     local_llm: Arc<dyn LLMProvider>,
     persistence: Arc<SessionPersistence>,
+    cost_tracker: Arc<crate::cost::CostTracker>,
 }
 
 async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
     if cfg.turn_cancel.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    // ── Phase 7.4 — cap pre-check ────────────────────────────────────────
+    // Reject the turn before any LLM call when the tracker is suspended.
+    // The frontend already received an `inference_suspended` event on the
+    // transition; this gate just guarantees no further spend can accrue
+    // until the user explicitly lifts the suspension.
+    if cfg.cost_tracker.is_suspended() {
+        let snap = cfg.cost_tracker.snapshot();
+        emit_inference_suspended(
+            &app,
+            InferenceSuspendedPayload {
+                reason: "cost_cap_reached",
+                total_tokens: snap.usage.total_tokens,
+                cost_estimate_usd: snap.usage.cost_estimate_usd,
+            },
+        );
         return Ok(());
     }
 
@@ -305,12 +455,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     );
 
     if from_cache {
-        emit_response_metadata(
-            &app,
-            ResponseMetadataPayload {
-                pre_prepared: true,
-            },
-        );
+        emit_response_metadata(&app, ResponseMetadataPayload { pre_prepared: true });
     }
 
     // ── 3. Build memory context ───────────────────────────────────────────
@@ -391,66 +536,9 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // Collect results — one thread failing never crashes the others.
     let (dir_result, dep_result, _cla_result) = tokio::join!(dir_task, dep_task, cla_task);
 
-    let directional_text = dir_result
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, "directional task panicked: {e}");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "directional".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            Err(anyhow::anyhow!("directional panic"))
-        })
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, error = %e, "directional thread failed");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "directional".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            String::new()
-        });
-
-    let depth_text = dep_result
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, "depth task panicked: {e}");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "depth".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            Err(anyhow::anyhow!("depth panic"))
-        })
-        .unwrap_or_else(|e| {
-            warn!(session_id = %cfg.session_id, error = %e, "depth thread failed");
-            emit_thread_status(
-                &app,
-                ThreadStatusPayload {
-                    thread: "depth".to_string(),
-                    status: "error".to_string(),
-                },
-            );
-            String::new()
-        });
-
-    let clarifying_emitted = match _cla_result {
-        Ok(Ok(Some(_))) => true,
-        Ok(Ok(None)) => false,
-        Ok(Err(e)) => {
-            warn!(session_id = %cfg.session_id, error = %e, "clarifying thread failed");
-            false
-        }
-        Err(e) => {
-            warn!(session_id = %cfg.session_id, "clarifying task panicked: {e}");
-            false
-        }
-    };
+    let directional_text = collect_thread_text(dir_result, cfg.session_id, "directional", &app);
+    let depth_text = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
+    let clarifying_emitted = collect_clarifying(_cla_result, cfg.session_id);
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
     if clarifying_emitted {
@@ -478,18 +566,15 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         };
         let (confidence_score, confidence_level) = compute_confidence(&signals);
 
-        info!(
-            session_id = %cfg.session_id,
-            turn = cfg.turn_number,
-            event = "directional_thread_complete",
-            thread_type = "directional",
-            confidence = confidence_score,
-            level = %confidence_level.as_str(),
-            provider = %cfg.failover.active_provider_name(),
-            cache_hit = from_cache,
+        log_confidence_computed(
+            cfg.session_id,
+            cfg.turn_number,
+            confidence_score,
+            confidence_level,
+            cfg.failover.active_provider_name(),
+            from_cache,
             rag_latency_ms,
-            failover_triggered = cfg.failover.is_using_local(),
-            "confidence computed"
+            cfg.failover.is_using_local(),
         );
 
         emit_confidence_score(
@@ -501,31 +586,18 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     }
 
     // ── 7. Persist responses — crash-recovery insurance ───────────────────
-    if !directional_text.is_empty() {
-        let r = Response {
-            id: Uuid::new_v4(),
-            session_id: cfg.session_id,
-            response_type: ResponseType::Directional,
-            content: directional_text.clone(),
-            confidence: 0.0,
-        };
-        if let Err(e) = cfg.persistence.write_response(&r) {
-            warn!(session_id = %cfg.session_id, error = %e, "directional persist failed");
-        }
-    }
-
-    if !depth_text.is_empty() {
-        let r = Response {
-            id: Uuid::new_v4(),
-            session_id: cfg.session_id,
-            response_type: ResponseType::Depth,
-            content: depth_text.clone(),
-            confidence: 0.0,
-        };
-        if let Err(e) = cfg.persistence.write_response(&r) {
-            warn!(session_id = %cfg.session_id, error = %e, "depth persist failed");
-        }
-    }
+    persist_thread_response(
+        &cfg.persistence,
+        cfg.session_id,
+        ResponseType::Directional,
+        &directional_text,
+    );
+    persist_thread_response(
+        &cfg.persistence,
+        cfg.session_id,
+        ResponseType::Depth,
+        &depth_text,
+    );
 
     // ── 8. Update conversation memory ─────────────────────────────────────
     {
@@ -538,9 +610,11 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     }
 
     // ── 8. Token usage estimate (4 chars ≈ 1 token) ───────────────────────
+    // The +500 fudge accounts for the system prompt + RAG chunks injected
+    // into every call. It overestimates slightly, which is the safer side
+    // to err on for a hard cost cap.
     let turn_input = (cfg.question_text.len() as u64 + 500) / 4;
-    let turn_output =
-        (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
+    let turn_output = (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
     let total = turn_input + turn_output;
     let cost_estimate = total as f64 * 0.0000002;
     emit_token_usage_update(
@@ -552,6 +626,42 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
             cost_estimate,
         },
     );
+
+    // ── 9. Phase 7.4 — record against the cap and emit transitions ───────
+    let (snap, is_transition) =
+        cfg.cost_tracker
+            .record_turn_with_transition(turn_input, turn_output, cost_estimate);
+    if is_transition {
+        let status_str: &'static str = match snap.status {
+            crate::cost::CostCapStatus::Ok => "ok",
+            crate::cost::CostCapStatus::Warning80 => "warning_80",
+            crate::cost::CostCapStatus::Reached => "reached",
+        };
+        emit_cost_cap_status(
+            &app,
+            CostCapStatusPayload {
+                status: status_str,
+                suspended: snap.suspended,
+                input_tokens: snap.usage.input_tokens,
+                output_tokens: snap.usage.output_tokens,
+                total_tokens: snap.usage.total_tokens,
+                cost_estimate_usd: snap.usage.cost_estimate_usd,
+                max_total_tokens: snap.cap.max_total_tokens,
+                max_cost_estimate_usd: snap.cap.max_cost_estimate_usd,
+                fraction_used: snap.fraction_used,
+            },
+        );
+        if matches!(snap.status, crate::cost::CostCapStatus::Reached) {
+            emit_inference_suspended(
+                &app,
+                InferenceSuspendedPayload {
+                    reason: "cost_cap_reached",
+                    total_tokens: snap.usage.total_tokens,
+                    cost_estimate_usd: snap.usage.cost_estimate_usd,
+                },
+            );
+        }
+    }
 
     Ok(())
 }
@@ -573,6 +683,7 @@ pub async fn dispatch_turn<R: Runtime>(
     turn_cancel: TurnCancelFlag,
     local_llm: Arc<dyn LLMProvider>,
     persistence: Arc<SessionPersistence>,
+    cost_tracker: Arc<crate::cost::CostTracker>,
     app: AppHandle<R>,
 ) -> Result<()> {
     run_turn(
@@ -591,6 +702,7 @@ pub async fn dispatch_turn<R: Runtime>(
             turn_cancel,
             local_llm,
             persistence,
+            cost_tracker,
         },
         app,
     )

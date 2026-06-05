@@ -95,10 +95,7 @@ impl SupabaseSessionSync {
         let mut h = reqwest::header::HeaderMap::new();
         h.insert(
             "apikey",
-            self.anon_key
-                .expose_secret()
-                .parse()
-                .expect("valid apikey"),
+            self.anon_key.expose_secret().parse().expect("valid apikey"),
         );
         h.insert(
             reqwest::header::AUTHORIZATION,
@@ -170,14 +167,18 @@ impl SupabaseSessionSync {
                     .context("session upsert retry failed")?
             }
         };
-        resp.error_for_status().context("session upsert HTTP error")?;
+        resp.error_for_status()
+            .context("session upsert HTTP error")?;
 
         info!(session_id = %sid, "session row synced");
 
         // 2. Insert transcript chunks (idempotent — Supabase ignores duplicate PKs).
         if !data.transcript_chunks.is_empty() {
-            let chunk_ids: Vec<String> =
-                data.transcript_chunks.iter().map(|c| c.id.to_string()).collect();
+            let chunk_ids: Vec<String> = data
+                .transcript_chunks
+                .iter()
+                .map(|c| c.id.to_string())
+                .collect();
             let rows: Vec<InsertTranscriptRow<'_>> = data
                 .transcript_chunks
                 .iter()
@@ -249,18 +250,18 @@ impl SupabaseSessionSync {
     /// Delete a session's data from Supabase (cascading: transcripts + responses).
     ///
     /// Used when the user explicitly deletes a session.
-    pub async fn delete_session(
-        &self,
-        session_id: Uuid,
-        token: &AuthToken,
-    ) -> Result<()> {
+    pub async fn delete_session(&self, session_id: Uuid, token: &AuthToken) -> Result<()> {
         let sid = session_id.to_string();
         let bearer = token.access_token.expose_secret();
         let headers = self.headers(bearer);
 
         // Delete in dependency order: responses → transcripts → session.
         for table in &["responses", "transcripts", "sessions"] {
-            let filter_col = if *table == "sessions" { "id" } else { "session_id" };
+            let filter_col = if *table == "sessions" {
+                "id"
+            } else {
+                "session_id"
+            };
             let url = format!("{}?{}=eq.{}", self.rest_url(table), filter_col, sid);
             self.client
                 .delete(&url)

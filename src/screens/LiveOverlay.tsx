@@ -5,6 +5,7 @@ import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
 import { startSession, stopSession } from "../commands";
 import { onSessionStateChange } from "../events";
+import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import DirectionalPanel from "../panels/DirectionalPanel";
@@ -26,6 +27,7 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
   const lastManualQuestion = useUIStore((s) => s.lastManualQuestion);
 
   useTokenUsage();
+  useCostCap();
   useHotkeys(sessionId, lastManualQuestion, !starting);
 
   useEffect(() => {

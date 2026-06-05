@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use tauri::{AppHandle, Runtime};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::events::{
     emit_directional_token, emit_thread_status, DirectionalTokenPayload, ThreadStatusPayload,
@@ -39,17 +40,7 @@ pub async fn run_directional<R: Runtime>(
     if let Some(cached) = ctx.cached_directional {
         let text = emit_cached_directional_tokens(&cached, &app, &ctx.turn_cancel);
         let ttft_ms = ttft_start.elapsed().as_millis() as u64;
-        info!(
-            session_id = %ctx.session_id,
-            event = "directional_thread_complete",
-            thread_type = "directional",
-            ttft_ms,
-            stream_complete_ms = ttft_ms,
-            provider = %provider_name,
-            cache_hit = true,
-            model = %provider_name,
-            "directional served from pre-warm cache"
-        );
+        log_cache_served(ctx.session_id, ttft_ms, &provider_name);
         emit_thread_status(
             &app,
             ThreadStatusPayload {
@@ -85,21 +76,9 @@ pub async fn run_directional<R: Runtime>(
 
         if first_token {
             let ttft_ms = ttft_start.elapsed().as_millis() as u64;
-            info!(
-                session_id = %ctx.session_id,
-                event = "directional_ttft",
-                thread_type = "directional",
-                ttft_ms,
-                provider = %provider_name,
-                model = %provider_name,
-                "directional first token"
-            );
+            log_first_token(ctx.session_id, ttft_ms, &provider_name);
             if ttft_ms > 900 {
-                warn!(
-                    session_id = %ctx.session_id,
-                    ttft_ms,
-                    "directional TTFT > 900ms — NFR breach"
-                );
+                log_ttft_breach(ctx.session_id, ttft_ms);
             }
             first_token = false;
         }
@@ -109,16 +88,7 @@ pub async fn run_directional<R: Runtime>(
     }
 
     let stream_ms = ttft_start.elapsed().as_millis() as u64;
-    info!(
-        session_id = %ctx.session_id,
-        event = "directional_thread_complete",
-        thread_type = "directional",
-        stream_complete_ms = stream_ms,
-        provider = %provider_name,
-        model = %provider_name,
-        cache_hit = ctx.from_cache,
-        "directional thread finished"
-    );
+    log_complete(ctx.session_id, stream_ms, &provider_name, ctx.from_cache);
 
     emit_thread_status(
         &app,
@@ -149,6 +119,55 @@ fn emit_cached_directional_tokens<R: Runtime>(
         );
     }
     text.to_string()
+}
+
+/// Helpers extracted so tarpaulin attributes coverage to the call site —
+/// inline tracing macro arguments are reported as uncovered even when hit.
+fn log_cache_served(session_id: Uuid, ttft_ms: u64, provider: &str) {
+    info!(
+        session_id = %session_id,
+        event = "directional_thread_complete",
+        thread_type = "directional",
+        ttft_ms,
+        stream_complete_ms = ttft_ms,
+        provider = %provider,
+        cache_hit = true,
+        model = %provider,
+        "directional served from pre-warm cache"
+    );
+}
+
+fn log_first_token(session_id: Uuid, ttft_ms: u64, provider: &str) {
+    info!(
+        session_id = %session_id,
+        event = "directional_ttft",
+        thread_type = "directional",
+        ttft_ms,
+        provider = %provider,
+        model = %provider,
+        "directional first token"
+    );
+}
+
+fn log_ttft_breach(session_id: Uuid, ttft_ms: u64) {
+    warn!(
+        session_id = %session_id,
+        ttft_ms,
+        "directional TTFT > 900ms — NFR breach"
+    );
+}
+
+fn log_complete(session_id: Uuid, stream_ms: u64, provider: &str, cache_hit: bool) {
+    info!(
+        session_id = %session_id,
+        event = "directional_thread_complete",
+        thread_type = "directional",
+        stream_complete_ms = stream_ms,
+        provider = %provider,
+        model = %provider,
+        cache_hit = cache_hit,
+        "directional thread finished"
+    );
 }
 
 fn build_prompt(

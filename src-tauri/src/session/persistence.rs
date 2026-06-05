@@ -92,13 +92,28 @@ pub struct RecoveryData {
     pub responses: Vec<Response>,
 }
 
+/// Lightweight metadata returned alongside the recovery offer so the user
+/// can decide whether to resume or discard.
+#[derive(Debug, Clone)]
+pub struct SessionRecoverySummary {
+    pub session_id: Uuid,
+    /// Unix epoch seconds.
+    pub created_at: i64,
+    pub name: String,
+    pub session_type: String,
+    pub domain: String,
+    /// Wall-clock offset of the most recent transcript chunk in ms, or
+    /// `None` if the session crashed before any audio was captured.
+    pub last_chunk_timestamp_ms: Option<i64>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Schema
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 4;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -179,6 +194,20 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         info!("sqlite schema migrated to version 3");
     }
 
+    if current < 4 {
+        // Store the raw context text so sessions can be cloned with the same
+        // context pre-filled. Existing sessions default to empty string.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN context_text TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 4;
+            ",
+        )
+        .context("schema migration v4")?;
+        info!("sqlite schema migrated to version 4");
+    }
+
     Ok(())
 }
 
@@ -198,6 +227,17 @@ pub struct SessionPersistence {
 impl SessionPersistence {
     /// Open (or create) the local session database at `db_path`.
     /// Pass `":memory:"` for ephemeral use in tests.
+    ///
+    /// Phase 7.5 hardening:
+    /// * `PRAGMA synchronous = FULL` on file-backed DBs — fsync on every
+    ///   commit, so a kill-9 or power loss between two `write_response`
+    ///   calls cannot lose more than the in-flight statement.
+    /// * `PRAGMA integrity_check` runs immediately after migrations. A
+    ///   corrupted file produces a hard error with the full sqlite report
+    ///   so the user can be guided to reset local data.
+    /// * `PRAGMA user_version` is rejected when greater than
+    ///   [`SCHEMA_VERSION`] — that means the file came from a newer Flint
+    ///   build and downgrading would silently drop columns.
     pub fn new(db_path: &str) -> Result<Self> {
         let conn =
             rusqlite::Connection::open(db_path).context("failed to open session database")?;
@@ -206,15 +246,26 @@ impl SessionPersistence {
         let mode: String = conn
             .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
             .context("set journal_mode WAL")?;
-        if mode != "wal" {
-            warn!(mode = %mode, "WAL mode not active (expected for :memory: in tests)");
+        let is_in_memory = db_path == ":memory:";
+        if mode != "wal" && !is_in_memory {
+            warn!(mode = %mode, "WAL mode not active on file-backed DB");
+        }
+
+        // Durability fence for crash recovery. `FULL` syncs the WAL on every
+        // commit; `NORMAL` (the default) can lose the last commit on power
+        // loss. In-memory DBs ignore the pragma but tolerate it cleanly.
+        if !is_in_memory {
+            conn.execute_batch("PRAGMA synchronous = FULL;")
+                .context("set synchronous = FULL")?;
         }
 
         // Foreign-key enforcement.
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .context("enable foreign keys")?;
 
+        verify_user_version_compatible(&conn)?;
         run_migrations(&conn)?;
+        verify_integrity(&conn).context("integrity check")?;
 
         Ok(Self {
             db: Mutex::new(conn),
@@ -253,14 +304,19 @@ impl SessionPersistence {
     /// Persist a state transition. Creates the session row if it doesn't exist
     /// (UPSERT), updates `sessions.state`, and appends to the audit log.
     ///
-    /// Called by the [`StatePersister`] impl on every successful transition.
+    /// Phase 7.5: both writes happen inside a single transaction so a crash
+    /// between them cannot leave `sessions.state` out of sync with the audit
+    /// log. With WAL + `synchronous = FULL` this gives all-or-nothing
+    /// durability per transition — the contract `SessionStateMachine`
+    /// depends on.
     pub fn write_state_transition(&self, session_id: Uuid, state: &SessionState) -> Result<()> {
-        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         let state_str = state.as_str();
 
-        // Upsert the session row.
-        conn.execute(
+        let tx = conn.transaction().context("begin state transition tx")?;
+
+        tx.execute(
             "INSERT INTO sessions (id, state) VALUES (?1, ?2)
              ON CONFLICT(id) DO UPDATE SET
                  state = excluded.state,
@@ -269,12 +325,13 @@ impl SessionPersistence {
         )
         .context("upsert sessions row")?;
 
-        // Append to the full transition audit log.
-        conn.execute(
+        tx.execute(
             "INSERT INTO session_state_transitions (session_id, state) VALUES (?1, ?2)",
             params![sid, state_str],
         )
         .context("insert session_state_transitions row")?;
+
+        tx.commit().context("commit state transition tx")?;
 
         debug!(session_id = %session_id, state = %state_str, "state transition persisted");
         Ok(())
@@ -341,7 +398,12 @@ impl SessionPersistence {
     // ── Recovery ─────────────────────────────────────────────────────────────
 
     /// Return recovery data for the most recently incomplete session, or
-    /// `None` if no session is in `LIVE`, `ENDING`, or `CRASHED` state.
+    /// `None` if no session is in a recoverable state.
+    ///
+    /// Recoverable states are `LIVE`, `ENDING`, `CRASHED`, and `RECOVERING`.
+    /// `RECOVERING` is included so that crashing during a recovery flow
+    /// re-offers the same session on the next launch instead of stranding
+    /// it forever.
     ///
     /// Called on app startup. If `Some(data)` is returned the orchestrator
     /// offers the user the option to resume or discard the session.
@@ -354,7 +416,7 @@ impl SessionPersistence {
             .query_row(
                 "SELECT id, state FROM sessions
                  WHERE id = ?1
-                   AND state IN ('LIVE', 'ENDING', 'CRASHED')
+                   AND state IN ('LIVE', 'ENDING', 'CRASHED', 'RECOVERING')
                  LIMIT 1",
                 params![sid],
                 |r| Ok((r.get(0)?, r.get(1)?)),
@@ -549,16 +611,24 @@ impl SessionPersistence {
         }))
     }
 
-    /// Find any incomplete session (LIVE/ENDING/CRASHED) regardless of ID.
+    /// Find the most recent incomplete session (LIVE/ENDING/CRASHED/
+    /// RECOVERING).
     ///
     /// Used on app startup to detect crash-interrupted sessions proactively.
+    /// Older incomplete sessions are still in the database; use
+    /// [`Self::list_incomplete_sessions`] to inspect or batch-clean them.
+    ///
+    /// `rowid` ties `updated_at` so that two sessions written in the same
+    /// second still resolve deterministically — the last insert wins. This
+    /// matters after `mark_stale_sessions_as_crashed` because it rewrites
+    /// every stale row's `updated_at` in a single transaction.
     pub fn find_incomplete_session(&self) -> Result<Option<Uuid>> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let row: Option<String> = conn
             .query_row(
                 "SELECT id FROM sessions
-                 WHERE state IN ('LIVE', 'ENDING', 'CRASHED')
-                 ORDER BY updated_at DESC
+                 WHERE state IN ('LIVE', 'ENDING', 'CRASHED', 'RECOVERING')
+                 ORDER BY updated_at DESC, rowid DESC
                  LIMIT 1",
                 [],
                 |r| r.get(0),
@@ -568,6 +638,127 @@ impl SessionPersistence {
 
         row.map(|s| Uuid::parse_str(&s).context("parse session uuid from DB"))
             .transpose()
+    }
+
+    /// Return every incomplete session, most recent first. Used by startup
+    /// hardening to mark stale sessions as CRASHED before offering recovery.
+    pub fn list_incomplete_sessions(&self) -> Result<Vec<Uuid>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM sessions
+                 WHERE state IN ('LIVE', 'ENDING', 'CRASHED', 'RECOVERING')
+                 ORDER BY updated_at DESC, rowid DESC",
+            )
+            .context("prepare list_incomplete_sessions")?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("query list_incomplete_sessions")?
+            .map(|row| {
+                let id = row.context("read incomplete session row")?;
+                Uuid::parse_str(&id).context("parse session uuid")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Force any session in `LIVE`, `ENDING`, or `RECOVERING` to `CRASHED`.
+    ///
+    /// Returns the IDs that were flipped. Called once at startup so the
+    /// recovery surface only ever has to deal with the `CRASHED` state. Each
+    /// flip is recorded in `session_state_transitions` so the audit log
+    /// reflects the post-crash truth.
+    pub fn mark_stale_sessions_as_crashed(&self) -> Result<Vec<Uuid>> {
+        let mut conn = self.db.lock().expect("session persistence mutex poisoned");
+        let tx = conn
+            .transaction()
+            .context("begin mark_stale_sessions_as_crashed tx")?;
+
+        let mut stale: Vec<String> = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT id FROM sessions
+                     WHERE state IN ('LIVE', 'ENDING', 'RECOVERING')",
+                )
+                .context("prepare select stale sessions")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .context("query stale sessions")?;
+            for row in rows {
+                stale.push(row.context("read stale session row")?);
+            }
+        }
+
+        for sid in &stale {
+            tx.execute(
+                "UPDATE sessions SET state = 'CRASHED', updated_at = strftime('%s','now')
+                 WHERE id = ?1",
+                params![sid],
+            )
+            .context("flip stale session to CRASHED")?;
+            tx.execute(
+                "INSERT INTO session_state_transitions (session_id, state)
+                 VALUES (?1, 'CRASHED')",
+                params![sid],
+            )
+            .context("audit crashed transition")?;
+        }
+
+        tx.commit()
+            .context("commit mark_stale_sessions_as_crashed")?;
+
+        let parsed: Result<Vec<Uuid>> = stale
+            .iter()
+            .map(|s| Uuid::parse_str(s).context("parse stale session uuid"))
+            .collect();
+        let ids = parsed?;
+        if !ids.is_empty() {
+            info!(
+                count = ids.len(),
+                "stale sessions flipped to CRASHED at startup"
+            );
+        }
+        Ok(ids)
+    }
+
+    /// Lightweight metadata for the recovery offer — used to give the user
+    /// enough context to decide whether to resume or discard.
+    pub fn session_summary(&self, session_id: Uuid) -> Result<Option<SessionRecoverySummary>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+
+        let summary: Option<(i64, String, String, String)> = conn
+            .query_row(
+                "SELECT created_at, name, session_type, domain FROM sessions WHERE id = ?1",
+                params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()
+            .context("query session summary")?;
+        let (created_at, name, session_type, domain) = match summary {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        let last_chunk_ms: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(timestamp_ms) FROM transcript_chunks WHERE session_id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("query last chunk timestamp")?
+            .flatten();
+
+        Ok(Some(SessionRecoverySummary {
+            session_id,
+            created_at,
+            name,
+            session_type,
+            domain,
+            last_chunk_timestamp_ms: last_chunk_ms,
+        }))
     }
 
     /// List all sessions in the database, most recent first.
@@ -632,6 +823,47 @@ impl SessionPersistence {
         Ok(())
     }
 
+    /// Remove the promoted flag from a session so it resumes normal 30-day expiry.
+    pub fn demote_session(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET promoted = 0 WHERE id = ?1",
+            params![sid],
+        )
+        .context("demote session")?;
+        debug!(session_id = %session_id, "session demoted");
+        Ok(())
+    }
+
+    /// Persist the raw context text supplied during ingest so it can be
+    /// retrieved later when the user wants to clone the session.
+    pub fn store_context_text(&self, session_id: Uuid, text: &str) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET context_text = ?1 WHERE id = ?2",
+            params![text, sid],
+        )
+        .context("store context text")?;
+        debug!(session_id = %session_id, "context text stored");
+        Ok(())
+    }
+
+    /// Return the raw context text for a session (empty string if not stored).
+    pub fn get_session_context(&self, session_id: Uuid) -> Result<String> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let text: String = conn
+            .query_row(
+                "SELECT context_text FROM sessions WHERE id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .context("get session context")?;
+        Ok(text)
+    }
+
     /// Delete all persisted data for `session_id`.
     ///
     /// Called after a session is successfully ended and synced, or when the
@@ -658,6 +890,239 @@ impl SessionPersistence {
         debug!(session_id = %session_id, "session data cleared");
         Ok(())
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // GDPR helpers — Phase 7.5
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Return every session id currently persisted, regardless of state.
+    /// Used during account deletion to clear each session's vector store.
+    pub fn list_all_session_ids(&self) -> Result<Vec<Uuid>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT id FROM sessions")
+            .context("prepare list_all_session_ids")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("query session ids")?
+            .map(|row| {
+                let id = row.context("read session id row")?;
+                Uuid::parse_str(&id).context("parse session uuid")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    /// Atomically truncate every user-data table in the database.
+    ///
+    /// Wrapped in a single transaction so the SQLite file is never observed
+    /// in a partially-cleared state. Schema (PRAGMA `user_version`, table
+    /// definitions, WAL mode) is preserved — only rows are removed.
+    pub fn clear_all_user_data(&self) -> Result<()> {
+        let mut conn = self.db.lock().expect("session persistence mutex poisoned");
+        let tx = conn.transaction().context("begin clear_all transaction")?;
+
+        for table in [
+            "transcript_chunks",
+            "responses",
+            "session_state_transitions",
+            "sessions",
+        ] {
+            tx.execute(&format!("DELETE FROM {table}"), [])
+                .with_context(|| format!("delete from {table}"))?;
+        }
+
+        tx.commit().context("commit clear_all transaction")?;
+        info!("all local session data cleared");
+        Ok(())
+    }
+
+    /// Dump every persisted session (with transcripts, responses, and state
+    /// transitions) into an in-memory structure suitable for JSON export.
+    pub fn export_all_data(&self) -> Result<Vec<SessionExport>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, state, created_at, expires_at, promoted, name,
+                        session_type, domain, COALESCE(context_text, '')
+                 FROM sessions
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare export sessions")?;
+
+        let session_rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                ))
+            })
+            .context("query sessions for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read sessions rows for export")?;
+
+        let mut exports = Vec::with_capacity(session_rows.len());
+        for row in session_rows {
+            let (id, state, created_at, expires_at, promoted, name, session_type, domain, ctx) =
+                row;
+            let sid = Uuid::parse_str(&id).context("parse session uuid for export")?;
+
+            let transcripts = Self::select_transcripts_for_export(&conn, &id)?;
+            let responses = Self::select_responses_for_export(&conn, &id)?;
+            let transitions = Self::select_transitions_for_export(&conn, &id)?;
+
+            exports.push(SessionExport {
+                id: sid,
+                state,
+                created_at,
+                expires_at,
+                promoted: promoted != 0,
+                name,
+                session_type,
+                domain,
+                context_text: ctx,
+                transcript_chunks: transcripts,
+                responses,
+                state_transitions: transitions,
+            });
+        }
+
+        Ok(exports)
+    }
+
+    fn select_transcripts_for_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<Vec<TranscriptChunkExport>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, speaker, text, timestamp_ms, created_at
+                 FROM transcript_chunks
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare export transcripts")?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok(TranscriptChunkExport {
+                    id: r.get::<_, String>(0)?,
+                    speaker: r.get::<_, String>(1)?,
+                    text: r.get::<_, String>(2)?,
+                    timestamp_ms: r.get::<_, i64>(3)?,
+                    created_at: r.get::<_, i64>(4)?,
+                })
+            })
+            .context("query transcript chunks for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read transcript rows for export")?;
+        Ok(rows)
+    }
+
+    fn select_responses_for_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<Vec<ResponseExport>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, response_type, content, confidence, created_at
+                 FROM responses
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare export responses")?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok(ResponseExport {
+                    id: r.get::<_, String>(0)?,
+                    response_type: r.get::<_, String>(1)?,
+                    content: r.get::<_, String>(2)?,
+                    confidence: r.get::<_, f64>(3)?,
+                    created_at: r.get::<_, i64>(4)?,
+                })
+            })
+            .context("query responses for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read response rows for export")?;
+        Ok(rows)
+    }
+
+    fn select_transitions_for_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<Vec<StateTransitionExport>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT state, transitioned_at
+                 FROM session_state_transitions
+                 WHERE session_id = ?1
+                 ORDER BY transitioned_at ASC, id ASC",
+            )
+            .context("prepare export transitions")?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok(StateTransitionExport {
+                    state: r.get::<_, String>(0)?,
+                    transitioned_at: r.get::<_, i64>(1)?,
+                })
+            })
+            .context("query transitions for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read transition rows for export")?;
+        Ok(rows)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Export DTOs — only used by Phase 7.5 GDPR right-to-export
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Full snapshot of a single session for inclusion in a user-data export.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionExport {
+    pub id: Uuid,
+    pub state: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub promoted: bool,
+    pub name: String,
+    pub session_type: String,
+    pub domain: String,
+    pub context_text: String,
+    pub transcript_chunks: Vec<TranscriptChunkExport>,
+    pub responses: Vec<ResponseExport>,
+    pub state_transitions: Vec<StateTransitionExport>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptChunkExport {
+    pub id: String,
+    pub speaker: String,
+    pub text: String,
+    pub timestamp_ms: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResponseExport {
+    pub id: String,
+    pub response_type: String,
+    pub content: String,
+    pub confidence: f64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StateTransitionExport {
+    pub state: String,
+    pub transitioned_at: i64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -674,6 +1139,46 @@ impl StatePersister for SessionPersistence {
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Refuse to open a database whose `user_version` is ahead of the version
+/// this build knows how to handle. Migrating an older Flint binary against
+/// a DB written by a newer one would silently drop columns added in the
+/// newer schema — fail loud instead.
+fn verify_user_version_compatible(conn: &rusqlite::Connection) -> Result<()> {
+    let current: u32 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .context("read user_version for compatibility check")?;
+    if current > SCHEMA_VERSION {
+        bail!(
+            "session database is from a newer Flint build (user_version={current}, \
+             this build supports up to {SCHEMA_VERSION}). Refusing to open to avoid \
+             silent data loss."
+        );
+    }
+    Ok(())
+}
+
+/// Run `PRAGMA integrity_check` and surface non-`ok` results as a hard
+/// error. sqlite returns the literal string `"ok"` on success and a
+/// human-readable list of problems otherwise.
+fn verify_integrity(conn: &rusqlite::Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare("PRAGMA integrity_check")
+        .context("prepare integrity_check")?;
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .context("execute integrity_check")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("collect integrity_check rows")?;
+
+    if rows.len() == 1 && rows[0] == "ok" {
+        return Ok(());
+    }
+    bail!(
+        "session database integrity check failed: {}",
+        rows.join("; ")
+    );
+}
 
 fn parse_session_state(s: &str) -> Result<SessionState> {
     match s {
@@ -1010,6 +1515,269 @@ mod tests {
             .unwrap();
         let found = db.find_incomplete_session().unwrap();
         assert_eq!(found, None);
+    }
+
+    // ── Phase 7.5 hardening ──────────────────────────────────────────────────
+
+    /// Helper: write the given `user_version` into a fresh DB file, then try
+    /// to reopen it through `SessionPersistence::new`.
+    fn try_open_with_user_version(version: u32) -> Result<()> {
+        use std::path::PathBuf;
+        let dir = std::env::temp_dir();
+        let db_path: PathBuf = dir.join(format!("flint_uv_test_{}.sqlite", Uuid::new_v4()));
+        let path_str = db_path.to_str().unwrap().to_string();
+        {
+            let raw = rusqlite::Connection::open(&path_str).unwrap();
+            raw.execute_batch(&format!("PRAGMA user_version = {version};"))
+                .unwrap();
+        }
+        let result = SessionPersistence::new(&path_str).map(|_| ());
+        let _ = std::fs::remove_file(&db_path);
+        result
+    }
+
+    #[test]
+    fn future_schema_version_is_rejected() {
+        let err = try_open_with_user_version(SCHEMA_VERSION + 10).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("newer Flint build"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn current_or_older_schema_version_opens_cleanly() {
+        try_open_with_user_version(0).expect("legacy DB must migrate forward");
+        try_open_with_user_version(SCHEMA_VERSION).expect("current schema must open");
+    }
+
+    #[test]
+    fn integrity_check_passes_on_fresh_db() {
+        let db = new_db();
+        let conn = db.db.lock().unwrap();
+        assert!(verify_integrity(&conn).is_ok());
+    }
+
+    #[test]
+    fn mark_stale_sessions_flips_live_ending_recovering_to_crashed() {
+        let db = new_db();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let untouched = Uuid::new_v4();
+        db.write_state_transition(a, &SessionState::Live).unwrap();
+        db.write_state_transition(b, &SessionState::Ending).unwrap();
+        db.write_state_transition(c, &SessionState::Recovering)
+            .unwrap();
+        db.write_state_transition(untouched, &SessionState::Ready)
+            .unwrap();
+
+        let flipped = db.mark_stale_sessions_as_crashed().unwrap();
+        assert_eq!(flipped.len(), 3);
+        for id in [a, b, c] {
+            let data = db.load_session_for_recovery(id).unwrap().unwrap();
+            assert_eq!(data.state, SessionState::Crashed);
+        }
+        // Sessions in clean states are not touched.
+        let conn = db.db.lock().unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM sessions WHERE id = ?1",
+                params![untouched.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "READY");
+    }
+
+    #[test]
+    fn mark_stale_sessions_appends_audit_row_per_flip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.write_state_transition(sid, &SessionState::Live).unwrap();
+        db.mark_stale_sessions_as_crashed().unwrap();
+
+        let conn = db.db.lock().unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_state_transitions
+                 WHERE session_id = ?1 AND state = 'CRASHED'",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn list_incomplete_sessions_returns_all_in_recent_order() {
+        let db = new_db();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        db.write_state_transition(a, &SessionState::Live).unwrap();
+        db.write_state_transition(b, &SessionState::Crashed)
+            .unwrap();
+        db.write_state_transition(c, &SessionState::Recovering)
+            .unwrap();
+
+        // c was inserted last → highest rowid → sorts first under the
+        // (updated_at DESC, rowid DESC) ordering when all three writes
+        // land in the same SQLite second.
+        let list = db.list_incomplete_sessions().unwrap();
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], c, "most recent insert must lead the list");
+    }
+
+    #[test]
+    fn recovering_state_is_now_loadable_for_recovery() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.write_state_transition(sid, &SessionState::Recovering)
+            .unwrap();
+        let result = db.load_session_for_recovery(sid).unwrap();
+        assert!(
+            result.is_some(),
+            "RECOVERING must be in the recoverable set"
+        );
+    }
+
+    #[test]
+    fn write_state_transition_is_atomic_per_row() {
+        // After a successful transition, sessions.state and the audit log
+        // must agree. We can't easily inject a mid-transaction crash, but we
+        // can assert the post-condition invariant after a normal write.
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.write_state_transition(sid, &SessionState::Configuring)
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::Ingesting)
+            .unwrap();
+        let conn = db.db.lock().unwrap();
+        let (sessions_state, last_audit): (String, String) = conn
+            .query_row(
+                "SELECT s.state, t.state FROM sessions s
+                 JOIN (
+                     SELECT session_id, state
+                     FROM session_state_transitions
+                     WHERE session_id = ?1
+                     ORDER BY id DESC LIMIT 1
+                 ) t ON t.session_id = s.id
+                 WHERE s.id = ?1",
+                params![sid.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(sessions_state, last_audit);
+        assert_eq!(sessions_state, "INGESTING");
+    }
+
+    #[test]
+    fn session_summary_returns_metadata_and_last_chunk() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "My interview", "interview", "software")
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::Live).unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 500, "first"))
+            .unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 12_000, "later"))
+            .unwrap();
+
+        let summary = db.session_summary(sid).unwrap().expect("summary");
+        assert_eq!(summary.name, "My interview");
+        assert_eq!(summary.session_type, "interview");
+        assert_eq!(summary.domain, "software");
+        assert_eq!(summary.last_chunk_timestamp_ms, Some(12_000));
+        assert!(summary.created_at > 0);
+    }
+
+    #[test]
+    fn session_summary_returns_none_for_unknown_id() {
+        let db = new_db();
+        let summary = db.session_summary(Uuid::new_v4()).unwrap();
+        assert!(summary.is_none());
+    }
+
+    // ── GDPR helpers (Phase 7.5) ────────────────────────────────────────────
+
+    #[test]
+    fn list_all_session_ids_returns_every_session() {
+        let db = new_db();
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4();
+        let s3 = Uuid::new_v4();
+        db.create_session_row(s1, "A", "interview", "swe").unwrap();
+        db.create_session_row(s2, "B", "interview", "swe").unwrap();
+        db.create_session_row(s3, "C", "interview", "swe").unwrap();
+        let ids = db.list_all_session_ids().unwrap();
+        assert_eq!(ids.len(), 3);
+        for id in [s1, s2, s3] {
+            assert!(ids.contains(&id), "missing {id}");
+        }
+    }
+
+    #[test]
+    fn clear_all_user_data_truncates_every_table() {
+        let db = new_db();
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4();
+        db.create_session_row(s1, "A", "interview", "swe").unwrap();
+        db.create_session_row(s2, "B", "interview", "swe").unwrap();
+        db.write_state_transition(s1, &SessionState::Live).unwrap();
+        db.write_transcript_chunk(&sample_chunk(s1, 100, "hi"))
+            .unwrap();
+        db.write_response(&sample_response(s1)).unwrap();
+
+        db.clear_all_user_data().unwrap();
+
+        assert!(db.list_all_session_ids().unwrap().is_empty());
+        let conn = db.db.lock().unwrap();
+        for table in [
+            "transcript_chunks",
+            "responses",
+            "session_state_transitions",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table} not truncated");
+        }
+        // Schema is preserved.
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(version > 0, "schema version dropped after wipe");
+    }
+
+    #[test]
+    fn clear_all_user_data_is_idempotent() {
+        let db = new_db();
+        db.clear_all_user_data().unwrap();
+        db.clear_all_user_data().unwrap();
+        assert!(db.list_all_session_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn export_all_data_round_trips_transcripts_and_responses() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Export", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::Configuring)
+            .unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 250, "hello world"))
+            .unwrap();
+        db.write_response(&sample_response(sid)).unwrap();
+
+        let export = db.export_all_data().unwrap();
+        assert_eq!(export.len(), 1);
+        let session = &export[0];
+        assert_eq!(session.id, sid);
+        assert_eq!(session.name, "Export");
+        assert_eq!(session.transcript_chunks.len(), 1);
+        assert_eq!(session.transcript_chunks[0].text, "hello world");
+        assert_eq!(session.responses.len(), 1);
+        // Both the create (IDLE) and explicit CONFIGURING write should be present.
+        assert!(!session.state_transitions.is_empty());
     }
 
     // ── WAL mode ─────────────────────────────────────────────────────────────

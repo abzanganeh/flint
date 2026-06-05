@@ -179,6 +179,25 @@ impl SessionStateMachine {
         );
     }
 
+    /// Force the machine back to `IDLE` and drop any bound `session_id`.
+    ///
+    /// Reserved for `gdpr::delete_account` (Phase 7.5): after the user
+    /// confirms account deletion every backing store has been wiped, so the
+    /// only sane in-memory state is `IDLE` with no session bound. This skips
+    /// the transition allow-list deliberately — the allow-list assumes the
+    /// underlying session data still exists, which is no longer true here.
+    pub fn reset_to_idle(&mut self) {
+        let from = self.current;
+        let prior_id = self.session_id;
+        self.current = SessionState::Idle;
+        self.session_id = None;
+        tracing::info!(
+            from = %from,
+            prior_session_id = ?prior_id,
+            "state machine forced to IDLE (account deletion)"
+        );
+    }
+
     /// Drive the machine to `to`.
     ///
     /// Order of operations:
@@ -194,14 +213,16 @@ impl SessionStateMachine {
     ///    INFO with `from`/`to`/`session_id`.
     pub fn transition(&mut self, to: SessionState) -> Result<()> {
         let from = self.current;
+        // Compute once so the tracing macros stay simple and stay coverable —
+        // an inline `.map(|id| id.to_string())` lives inside the macro
+        // expansion and is reported as uncovered by both ptrace and llvm
+        // engines even when the macro fires.
+        let session_id_str = session_id_for_log(self.session_id);
 
         if !is_valid_transition(from, to) {
             warn!(
                 event = "state_transition_rejected",
-                session_id = self
-                    .session_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_default(),
+                session_id = %session_id_str,
                 from = %from,
                 to = %to,
                 "invalid session state transition rejected",
@@ -219,16 +240,26 @@ impl SessionStateMachine {
 
         info!(
             event = "state_transition",
-            session_id = self
-                .session_id
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
+            session_id = %session_id_str,
             from = %from,
             to = %to,
             "session state transitioned",
         );
 
         Ok(())
+    }
+}
+
+/// Render `Option<Uuid>` for structured-logging fields.
+///
+/// Returns the empty string when no session is bound. Extracted from
+/// [`SessionStateMachine::transition`] so the formatting logic lives outside
+/// of `tracing` macros — both coverage engines record this branch correctly,
+/// and the helper is trivially unit-testable.
+fn session_id_for_log(id: Option<Uuid>) -> String {
+    match id {
+        Some(uuid) => uuid.to_string(),
+        None => String::new(),
     }
 }
 
@@ -993,9 +1024,82 @@ mod tests {
 
     #[test]
     fn state_display_matches_canonical_names() {
+        // Exhaustive: every variant must Display to its design-doc §25 name.
         assert_eq!(SessionState::Idle.to_string(), "IDLE");
+        assert_eq!(SessionState::Configuring.to_string(), "CONFIGURING");
+        assert_eq!(SessionState::Ingesting.to_string(), "INGESTING");
         assert_eq!(SessionState::DigestReview.to_string(), "DIGEST_REVIEW");
         assert_eq!(SessionState::PreWarming.to_string(), "PRE_WARMING");
+        assert_eq!(SessionState::Rehearsing.to_string(), "REHEARSING");
+        assert_eq!(SessionState::Ready.to_string(), "READY");
+        assert_eq!(SessionState::Live.to_string(), "LIVE");
+        assert_eq!(SessionState::Paused.to_string(), "PAUSED");
+        assert_eq!(SessionState::Ending.to_string(), "ENDING");
+        assert_eq!(SessionState::Ended.to_string(), "ENDED");
+        assert_eq!(SessionState::Crashed.to_string(), "CRASHED");
         assert_eq!(SessionState::Recovering.to_string(), "RECOVERING");
+    }
+
+    /// `NoopStatePersister` is the default impl used when no SQLite is wired
+    /// (e.g. unit tests, app startup before a session exists). Ensure its
+    /// `Ok(())` path is exercised directly.
+    #[test]
+    fn noop_persister_returns_ok() {
+        let p = NoopStatePersister;
+        let result = p.write_state_transition(Uuid::new_v4(), SessionState::Configuring);
+        assert!(result.is_ok());
+    }
+
+    /// `Default` is the entry point used by `AppState` on startup; covers
+    /// the trait impl that the constructor tests bypass.
+    #[test]
+    fn default_starts_at_idle_without_session() {
+        let sm = SessionStateMachine::default();
+        assert_eq!(*sm.current(), SessionState::Idle);
+        assert!(sm.session_id().is_none());
+    }
+
+    /// Exercises the `Some(_)` branch of `session_id.map(...)` inside both
+    /// the rejection (`warn!`) and the success (`info!`) tracing macros, so
+    /// the structured-logging arms are not dead under coverage.
+    #[test]
+    fn tracing_emits_session_id_when_bound_for_success_and_rejection() {
+        let persister = Arc::new(RecordingPersister::default());
+        let mut sm = SessionStateMachine::with_persister(persister.clone());
+        let session_id = Uuid::new_v4();
+        sm.set_session_id(session_id).unwrap();
+
+        // Successful transition exercises the info! macro with Some(id).
+        sm.transition(SessionState::Configuring).unwrap();
+        assert_eq!(*sm.current(), SessionState::Configuring);
+
+        // Invalid transition from CONFIGURING exercises the warn! macro
+        // with Some(id) and leaves state unchanged.
+        let err = sm.transition(SessionState::Live).unwrap_err();
+        assert!(err.to_string().contains("Invalid transition"));
+        assert_eq!(*sm.current(), SessionState::Configuring);
+
+        // Only the successful transition should reach the persister.
+        let calls = persister.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0], (session_id, SessionState::Configuring));
+    }
+
+    /// `restore_state_for_recovery` is the only API that bypasses the
+    /// transition guard — guarantee both fields are restored exactly.
+    #[test]
+    fn restore_state_for_recovery_sets_state_and_session_id() {
+        let mut sm = SessionStateMachine::new();
+        let session_id = Uuid::new_v4();
+        sm.restore_state_for_recovery(SessionState::Crashed, session_id);
+        assert_eq!(*sm.current(), SessionState::Crashed);
+        assert_eq!(sm.session_id(), Some(session_id));
+    }
+
+    #[test]
+    fn session_id_for_log_renders_some_and_none() {
+        assert_eq!(session_id_for_log(None), "");
+        let id = Uuid::new_v4();
+        assert_eq!(session_id_for_log(Some(id)), id.to_string());
     }
 }

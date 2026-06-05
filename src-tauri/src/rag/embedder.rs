@@ -11,11 +11,12 @@
 
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{get_cache_dir, EmbeddingModel, InitOptions, TextEmbedding};
 use tracing::debug;
 
 /// Fixed output dimension for BAAI/bge-small-en-v1.5.
@@ -44,6 +45,31 @@ impl Embedder {
         Ok(Self {
             model: Mutex::new(model),
         })
+    }
+
+    /// Load the model only if it is already cached on disk. Returns `None`
+    /// immediately without any network I/O when the HuggingFace snapshot is
+    /// absent (typical on CI runners).
+    ///
+    /// Use this in test helpers instead of `Embedder::new().ok()` so that a
+    /// HuggingFace 429 (or any other network stall) never hangs the test suite.
+    /// Do not spawn a background thread with a timeout — Rust keeps the process
+    /// alive until every thread exits, so a timed-out download would hang CI
+    /// even after all tests pass.
+    pub fn new_if_cached() -> Option<Self> {
+        if !Self::is_bge_model_cached() {
+            return None;
+        }
+        Self::new().ok()
+    }
+
+    /// HuggingFace hub cache layout for `Xenova/bge-small-en-v1.5`.
+    fn is_bge_model_cached() -> bool {
+        let cache = std::env::var("HF_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(get_cache_dir()));
+
+        snapshot_has_embedding_artifacts(&cache.join("models--Xenova--bge-small-en-v1.5"))
     }
 
     /// Embed a batch of texts in one ONNX inference pass. Prefer this over
@@ -80,6 +106,20 @@ impl Embedder {
     }
 }
 
+/// True when a HuggingFace hub snapshot contains the ONNX + tokenizer files
+/// fastembed needs for bge-small-en-v1.5 (no network call).
+fn snapshot_has_embedding_artifacts(model_hub_dir: &Path) -> bool {
+    let snapshots = model_hub_dir.join("snapshots");
+    let Ok(entries) = std::fs::read_dir(snapshots) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let snap = entry.path();
+        snap.join("onnx/model.onnx").is_file() && snap.join("tokenizer.json").is_file()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::OnceLock;
@@ -95,7 +135,7 @@ mod tests {
     static EMBEDDER: OnceLock<Option<Embedder>> = OnceLock::new();
 
     fn shared_embedder() -> Option<&'static Embedder> {
-        EMBEDDER.get_or_init(|| Embedder::new().ok()).as_ref()
+        EMBEDDER.get_or_init(Embedder::new_if_cached).as_ref()
     }
 
     macro_rules! require_embedder {
@@ -103,8 +143,8 @@ mod tests {
             match shared_embedder() {
                 Some(e) => e,
                 None => {
-                    eprintln!(
-                        "SKIP: fastembed model not cached (no internet or rate-limited on CI)"
+                    tracing::warn!(
+                        "SKIP embedder test: fastembed model not cached (offline or rate-limited)"
                     );
                     return;
                 }

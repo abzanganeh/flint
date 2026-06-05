@@ -5,6 +5,14 @@ import { useUIStore } from "../store/ui";
 
 // ── Panel wrapper ─────────────────────────────────────────────────────────────
 
+const PANEL_LABELS: Record<PanelId, string> = {
+  transcript: "Transcript",
+  directional: "Directional",
+  depth: "Depth",
+  clarifying: "Clarifying",
+  context: "Context",
+};
+
 interface PanelSlotProps {
   id: PanelId;
   children: ReactNode;
@@ -27,25 +35,35 @@ const PanelSlot = ({ id, children }: PanelSlotProps) => {
         transition: "flex 0.18s ease",
       }}
     >
-      {/* Collapse toggle strip */}
+      {/* Collapse strip — shows label when collapsed, just arrow when expanded */}
       <button
-        aria-label={collapsed ? `Expand ${id}` : `Collapse ${id}`}
+        aria-label={collapsed ? `Expand ${PANEL_LABELS[id]}` : `Collapse ${PANEL_LABELS[id]}`}
         onClick={() => togglePanelCollapsed(id)}
+        title={collapsed ? `Expand ${PANEL_LABELS[id]}` : `Collapse ${PANEL_LABELS[id]}`}
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: collapsed ? "center" : "flex-end",
-          padding: "0 6px",
-          height: 20,
+          padding: "0 8px",
+          height: collapsed ? 40 : 20,
           background: "none",
           border: "none",
           cursor: "pointer",
-          color: "#4b5563",
-          fontSize: 10,
+          color: "#52525b",
+          fontSize: collapsed ? 10 : 9,
+          fontWeight: 600,
+          letterSpacing: "0.06em",
+          textTransform: "uppercase",
           flexShrink: 0,
+          width: "100%",
+          boxSizing: "border-box",
+          writingMode: collapsed ? "vertical-rl" : "horizontal-tb",
+          transition: "color 0.12s",
         }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#9ca3af"; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#52525b"; }}
       >
-        {collapsed ? "▶" : "◀"}
+        {collapsed ? PANEL_LABELS[id] : "◀"}
       </button>
 
       {!collapsed && (
@@ -152,8 +170,8 @@ const OverlayLayout = ({
       style={{
         display: "flex",
         flexDirection: "row",
-        height: "100vh",
-        width: "100vw",
+        height: "100%",
+        width: "100%",
         backgroundColor: "#0f1117",
         overflow: "hidden",
       }}

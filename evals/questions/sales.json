@@ -1,0 +1,126 @@
+{
+  "domain": "sales",
+  "version": 1,
+  "questions": [
+    {
+      "id": "sales-t1-obj-001",
+      "domain": "sales",
+      "category": "objection_handling",
+      "text": "A prospect says, 'We are already working with your largest competitor.' Walk me through your response."
+    },
+    {
+      "id": "sales-t1-obj-002",
+      "domain": "sales",
+      "category": "objection_handling",
+      "text": "A prospect tells you the budget is gone for this fiscal year. How do you keep the opportunity alive?"
+    },
+    {
+      "id": "sales-t1-obj-003",
+      "domain": "sales",
+      "category": "objection_handling",
+      "text": "What is the toughest objection you have ever faced, and how did you work through it?"
+    },
+    {
+      "id": "sales-t1-obj-004",
+      "domain": "sales",
+      "category": "objection_handling",
+      "text": "A technical buyer raises a security concern you cannot answer in the moment. What do you do?"
+    },
+    {
+      "id": "sales-t1-obj-005",
+      "domain": "sales",
+      "category": "objection_handling",
+      "text": "Tell me about a deal you lost. What would you do differently?"
+    },
+    {
+      "id": "sales-t1-process-001",
+      "domain": "sales",
+      "category": "process",
+      "text": "Walk me through your discovery call structure. What questions do you absolutely have to ask?"
+    },
+    {
+      "id": "sales-t1-process-002",
+      "domain": "sales",
+      "category": "process",
+      "text": "How do you decide when to advance a deal versus disqualify it?"
+    },
+    {
+      "id": "sales-t1-process-003",
+      "domain": "sales",
+      "category": "process",
+      "text": "Walk me through what your pipeline looks like at the end of a typical week."
+    },
+    {
+      "id": "sales-t1-process-004",
+      "domain": "sales",
+      "category": "process",
+      "text": "A deal has gone dark for two weeks. What is your re-engagement playbook?"
+    },
+    {
+      "id": "sales-t1-process-005",
+      "domain": "sales",
+      "category": "process",
+      "text": "Walk me through how you build a mutual close plan with a champion at a complex enterprise."
+    },
+    {
+      "id": "sales-t2-beh-001",
+      "domain": "sales",
+      "category": "behavioural",
+      "text": "Tell me about your largest deal. What made it close?"
+    },
+    {
+      "id": "sales-t2-beh-002",
+      "domain": "sales",
+      "category": "behavioural",
+      "text": "Describe a deal that should have closed but did not. What was the lesson?"
+    },
+    {
+      "id": "sales-t2-beh-003",
+      "domain": "sales",
+      "category": "behavioural",
+      "text": "Tell me about a difficult prospect you eventually won over."
+    },
+    {
+      "id": "sales-t2-beh-004",
+      "domain": "sales",
+      "category": "behavioural",
+      "text": "Tell me about a quarter where you missed quota. What did you change for the next one?"
+    },
+    {
+      "id": "sales-t2-beh-005",
+      "domain": "sales",
+      "category": "behavioural",
+      "text": "Describe a time you received tough feedback from a sales leader. How did you act on it?"
+    },
+    {
+      "id": "sales-t2-process-001",
+      "domain": "sales",
+      "category": "process",
+      "text": "How do you decide which prospects deserve your time in a quarter?"
+    },
+    {
+      "id": "sales-t2-process-002",
+      "domain": "sales",
+      "category": "process",
+      "text": "Describe your ideal hand-off between SDR and AE. What information matters most?"
+    },
+    {
+      "id": "sales-t2-process-003",
+      "domain": "sales",
+      "category": "process",
+      "text": "Walk me through how you forecast a deal you think will close this quarter."
+    },
+    {
+      "id": "sales-t3-tech-001",
+      "domain": "sales",
+      "category": "technical",
+      "text": "What is the difference between MEDDIC and BANT, and when do you reach for each?"
+    },
+    {
+      "id": "sales-t3-tech-002",
+      "domain": "sales",
+      "category": "technical",
+      "text": "How do you use AI tools in your daily sales workflow, and what is one decision you would not delegate to them?"
+    }
+  ]
+}

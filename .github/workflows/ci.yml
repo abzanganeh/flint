@@ -6,20 +6,21 @@ on:
       - main
   pull_request:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ─── Lint jobs: OS-independent, run only on Linux for speed ───────────────
   cargo-fmt:
     name: cargo fmt --check
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-
-      - name: Run cargo fmt --check
+      - name: cargo fmt --check
         working-directory: src-tauri
         run: cargo fmt --check
 
@@ -27,57 +28,129 @@ jobs:
     name: cargo clippy -- -D warnings
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Linux dependencies
+      - uses: actions/checkout@v4
+      - name: Install Linux deps
         run: |
           ./scripts/install-linux-deps.sh
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-
-      - name: Run cargo clippy -- -D warnings
+      - name: cargo clippy --all-targets
         working-directory: src-tauri
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
+  # ─── Phase 7.4 cross-platform matrix ──────────────────────────────────────
   cargo-test:
-    name: cargo test
-    runs-on: ubuntu-latest
+    name: cargo test (${{ matrix.label }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-latest
+            install: linux
+          - label: windows-x86_64
+            runner: windows-latest
+            install: windows
+          - label: macos-arm64
+            runner: macos-14
+            install: macos
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Linux dependencies
+      - name: Install platform deps (Linux)
+        if: matrix.install == 'linux'
         run: |
           ./scripts/install-linux-deps.sh
           echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install platform deps (macOS)
+        if: matrix.install == 'macos'
+        run: ./scripts/install-macos-deps.sh
 
-      - name: Run cargo test
+      - name: Install platform deps (Windows)
+        if: matrix.install == 'windows'
+        shell: pwsh
+        run: ./scripts/install-windows-deps.ps1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+            evals/target
+          key: cargo-${{ matrix.label }}-${{ hashFiles('src-tauri/Cargo.lock', 'evals/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.label }}-
+
+      # Build everything first so a missing platform-specific symbol shows up
+      # as a build failure (per OS) rather than a test failure deep in cargo's
+      # test runner.
+      - name: cargo build --all-targets
         working-directory: src-tauri
-        run: cargo test
+        run: cargo build --all-targets --locked
+
+      # Non-Windows: run tests directly after the all-targets build.
+      - name: cargo test --lib
+        if: matrix.install != 'windows'
+        working-directory: src-tauri
+        run: cargo test --lib --locked
+
+      - name: cargo test --bin bench_gate
+        if: matrix.install != 'windows'
+        working-directory: src-tauri
+        run: cargo test --bin bench_gate --locked
+
+      # Integration tests touch SQLite, mock Tauri runtime, and the audio
+      # pipeline (compile-only on Win/Mac per audio_pipeline.rs §A/B). They
+      # work on all three platforms because the real device sections are
+      # `#[ignore]`d.
+      - name: cargo test --tests
+        if: matrix.install != 'windows'
+        working-directory: src-tauri
+        run: cargo test --tests --locked
+
+      # Windows: the flint_lib test harness links Tauri, whisper-rs, fastembed,
+      # cpal, etc. At startup Windows loads native DLLs (WebView2, MSVC runtime,
+      # etc.) before any test code runs — STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)
+      # when a DLL is missing or wrong-version. bench_gate is a standalone binary
+      # with no flint deps and runs fine. LIBCLANG_PATH is build-time only
+      # (bindgen for whisper-rs); MSBuild orphans in cleanup are from that compile.
+      #
+      # Compile-check lib + integration tests on Windows; execute them on Linux/macOS.
+      - name: Run Rust tests (Windows)
+        if: matrix.install == 'windows'
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          # Chocolatey LLVM adds bin/ to machine PATH; keep it out of test runtime.
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\LLVM\\' }) -join ';'
+          cargo test --lib --no-run --locked
+          cargo test --tests --no-run --locked
+          cargo test --bin bench_gate --locked
+
+      # The evals crate is Linux-gated in CI (eval-prompts.yml). Here we only
+      # confirm it still compiles on every platform so contributors on Win/Mac
+      # can iterate locally.
+      - name: cargo build (evals)
+        working-directory: evals
+        run: cargo build --locked
 
   vitest:
     name: npx vitest run
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Run npx vitest run
-        run: npx vitest run
+      - run: npm ci
+      - run: npx vitest run

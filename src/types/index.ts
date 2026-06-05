@@ -61,6 +61,16 @@ export interface TokenUsage {
   costEstimate: number;
 }
 
+export type CostCapStatus = "ok" | "warning_80" | "reached";
+
+export interface CostCapState {
+  status: CostCapStatus;
+  suspended: boolean;
+  fractionUsed: number | null;
+  maxTotalTokens: number | null;
+  maxCostEstimateUsd: number | null;
+}
+
 export interface UIState {
   panelLayout: PanelLayout;
   focusedPanel: PanelId | null;
@@ -75,6 +85,7 @@ export interface UIState {
   clarifyingQuestions: ClarifyingQuestion[];
   ragChunks: RagChunk[];
   tokenUsage: TokenUsage;
+  costCap: CostCapState;
   notificationQueue: Notification[];
   theme: "light" | "dark" | "system";
   overlayMinimised: boolean;

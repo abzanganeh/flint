@@ -3,6 +3,7 @@ import { create } from "zustand";
 import type {
   ClarifyingQuestion,
   ConfidenceLevel,
+  CostCapState,
   Notification,
   PanelId,
   PanelLayout,
@@ -32,6 +33,7 @@ interface UIStore extends UIState {
     output: number,
     costDelta: number,
   ) => void;
+  setCostCap: (cap: CostCapState) => void;
   setNotificationQueue: (notificationQueue: Notification[]) => void;
   pushNotification: (n: Notification) => void;
   setTheme: (theme: UIState["theme"]) => void;
@@ -64,6 +66,14 @@ const defaultTokenUsage: TokenUsage = {
   costEstimate: 0,
 };
 
+const defaultCostCap: CostCapState = {
+  status: "ok",
+  suspended: false,
+  fractionUsed: null,
+  maxTotalTokens: null,
+  maxCostEstimateUsd: null,
+};
+
 export const useUIStore = create<UIStore>((set) => ({
   panelLayout: defaultPanelLayout,
   focusedPanel: null,
@@ -75,6 +85,7 @@ export const useUIStore = create<UIStore>((set) => ({
   clarifyingQuestions: [],
   ragChunks: [],
   tokenUsage: defaultTokenUsage,
+  costCap: defaultCostCap,
   notificationQueue: [],
   theme: "system",
   overlayMinimised: false,
@@ -156,6 +167,8 @@ export const useUIStore = create<UIStore>((set) => ({
         costEstimate: s.tokenUsage.costEstimate + costDelta,
       },
     })),
+
+  setCostCap: (costCap) => set({ costCap }),
 
   setNotificationQueue: (notificationQueue) => set({ notificationQueue }),
 
