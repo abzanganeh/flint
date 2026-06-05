@@ -50,6 +50,15 @@ sudo apt install -y libwebkit2gtk-4.1-dev build-essential libssl-dev \
 
 ## Development
 
+Copy environment template and set Supabase credentials (required after Phase 7.7 — anon key is not committed in `tauri.conf.json`):
+
+```bash
+cp .env.example .env
+# Edit .env, then export vars (or use direnv / dotenv):
+export FLINT_SUPABASE_URL=http://127.0.0.1:54321
+export FLINT_SUPABASE_ANON_KEY=<from supabase status>
+```
+
 ```bash
 npm install
 npm run tauri dev

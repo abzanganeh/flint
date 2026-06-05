@@ -13,8 +13,9 @@ dist-ssr
 *.local
 .env
 .env.*
+!.env.example
 
-# Supabase CLI (local state; keys live in tauri.conf or .env)
+# Supabase CLI (local state; keys live in .env via FLINT_SUPABASE_* — see .env.example)
 supabase/.branches
 supabase/.temp
 
