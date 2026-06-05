@@ -241,7 +241,12 @@ pub async fn create_session(
     // Persist session row with metadata for the session list.
     state
         .persistence
-        .create_session_row(session_id, &config.name, &config.session_type, &config.domain)
+        .create_session_row(
+            session_id,
+            &config.name,
+            &config.session_type,
+            &config.domain,
+        )
         .map_err(session_error)?;
 
     info!(
@@ -555,8 +560,9 @@ async fn build_failover_stack(
         }
     };
 
-    let local_provider: Arc<dyn LLMProvider> =
-        Arc::new(OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?);
+    let local_provider: Arc<dyn LLMProvider> = Arc::new(
+        OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
+    );
     let rate_limiter = Arc::new(RateLimiter::new(
         primary_provider.name(),
         primary_provider.rate_limit().requests_per_minute,
@@ -565,11 +571,7 @@ async fn build_failover_stack(
     let mut failover =
         FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
     failover.start_ping_loop(app.clone());
-    Ok((
-        Arc::new(failover),
-        local_provider,
-        context_window,
-    ))
+    Ok((Arc::new(failover), local_provider, context_window))
 }
 
 fn load_compression_prompt() -> String {
@@ -616,9 +618,9 @@ pub async fn run_rehearsal_turn(
     let memory = {
         let mut guard = state.session_memory.lock().await;
         if guard.is_none() {
-            *guard = Some(Arc::new(tokio::sync::Mutex::new(
-                ConversationMemory::new(context_window),
-            )));
+            *guard = Some(Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
+                context_window,
+            ))));
         }
         Arc::clone(guard.as_ref().unwrap())
     };
@@ -705,9 +707,7 @@ pub async fn start_session(
     let sid = validate_session_id(&state, &session_id).await?;
 
     if !keychain::is_rehearsal_completed() {
-        return Err(
-            "Complete rehearsal before starting a live session.".to_string(),
-        );
+        return Err("Complete rehearsal before starting a live session.".to_string());
     }
 
     checks::run_stealth_self_test()?;
@@ -957,8 +957,9 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
                         let url = cfg["url"].as_str().unwrap_or("").to_string();
                         let key = cfg["anonKey"].as_str().unwrap_or("").to_string();
                         if let Ok(sync) = crate::supabase::SupabaseSessionSync::new(url, key) {
-                            if let Err(e) =
-                                sync.sync_session(sid, &token, &persistence, &metadata).await
+                            if let Err(e) = sync
+                                .sync_session(sid, &token, &persistence, &metadata)
+                                .await
                             {
                                 warn!(session_id = %sid, error = %e, "Supabase session sync failed");
                             }
@@ -1062,20 +1063,14 @@ pub async fn panic_hide_overlay(app: AppHandle) -> Result<bool, String> {
             window
                 .hide()
                 .map_err(|e| format!("Failed to hide overlay: {e}"))?;
-            emit_overlay_visibility(
-                &app,
-                OverlayVisibilityPayload { hidden: true },
-            );
+            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: true });
             Ok(true)
         } else {
             window
                 .show()
                 .map_err(|e| format!("Failed to show overlay: {e}"))?;
             let _ = window.set_focus();
-            emit_overlay_visibility(
-                &app,
-                OverlayVisibilityPayload { hidden: false },
-            );
+            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: false });
             Ok(false)
         }
     } else {
@@ -1149,18 +1144,19 @@ pub async fn discard_crashed_session(
 /// defined in `/prompts/session_essence/`, and returns a JSON summary blob.
 /// Only callable after the session has reached `ENDED`.
 #[tauri::command]
-pub async fn generate_session_summary(
-    state: State<'_, AppState>,
-) -> Result<String, String> {
+pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<String, String> {
     let sid = {
         let machine = state.state_machine.lock().await;
         machine.session_id().ok_or("No session to summarise.")?
     };
 
     // Load the session_essence prompt — must come from file, never inlined.
-    let prompt_template =
-        std::fs::read_to_string(prompts_base_dir().join("session_essence").join("default.txt"))
-            .map_err(|e| format!("Failed to load session_essence prompt: {e}"))?;
+    let prompt_template = std::fs::read_to_string(
+        prompts_base_dir()
+            .join("session_essence")
+            .join("default.txt"),
+    )
+    .map_err(|e| format!("Failed to load session_essence prompt: {e}"))?;
 
     // Fetch transcript rows from SQLite and build a flat string.
     let transcript_text = {
@@ -1238,18 +1234,12 @@ pub async fn generate_session_summary(
 pub async fn list_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::dto::SessionSummaryDto>, String> {
-    state
-        .persistence
-        .list_sessions()
-        .map_err(|e| e.to_string())
+    state.persistence.list_sessions().map_err(|e| e.to_string())
 }
 
 /// Mark a session as promoted (exempted from 30-day expiry).
 #[tauri::command]
-pub async fn promote_session(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn promote_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
     state
         .persistence
@@ -1259,10 +1249,7 @@ pub async fn promote_session(
 
 /// Remove the promoted flag from a session so it resumes normal 30-day expiry.
 #[tauri::command]
-pub async fn demote_session(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn demote_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
     state
         .persistence
@@ -1272,10 +1259,7 @@ pub async fn demote_session(
 
 /// Delete a session and all its data from local SQLite and Supabase.
 #[tauri::command]
-pub async fn delete_session(
-    session_id: String,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
+pub async fn delete_session(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
 
     // Delete locally first (always succeeds even if Supabase is unreachable).

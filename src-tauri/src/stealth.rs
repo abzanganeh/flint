@@ -166,9 +166,7 @@ pub fn place_on_non_primary_monitor<R: Runtime>(app: &AppHandle<R>) {
     };
 
     let primary_pos = primary.position();
-    let target = monitors
-        .iter()
-        .find(|m| m.position() != primary_pos);
+    let target = monitors.iter().find(|m| m.position() != primary_pos);
     let Some(target) = target else {
         return;
     };
@@ -225,11 +223,7 @@ pub fn configure_dev_window<R: Runtime>(app: &AppHandle<R>) {
 
 #[cfg(debug_assertions)]
 fn place_on_primary_monitor_centred<R: Runtime>(window: &tauri::WebviewWindow<R>) {
-    let Some(primary) = window
-        .primary_monitor()
-        .ok()
-        .flatten()
-    else {
+    let Some(primary) = window.primary_monitor().ok().flatten() else {
         return;
     };
 

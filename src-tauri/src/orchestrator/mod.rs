@@ -36,10 +36,10 @@ use crate::audio::pipeline::DetectedQuestion;
 use crate::confidence::{compute_confidence, ConfidenceLevel, ConfidenceSignals};
 use crate::digest::Digest;
 use crate::events::{
-    emit_confidence_score, emit_context_truncated, emit_rag_chunks_update,
-    emit_response_metadata, emit_thread_status, emit_token_usage_update, ConfidenceScorePayload,
-    ContextTruncatedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
-    ThreadStatusPayload, TokenUsageUpdatePayload,
+    emit_confidence_score, emit_context_truncated, emit_rag_chunks_update, emit_response_metadata,
+    emit_thread_status, emit_token_usage_update, ConfidenceScorePayload, ContextTruncatedPayload,
+    RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload, ThreadStatusPayload,
+    TokenUsageUpdatePayload,
 };
 use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::llm::failover::FailoverManager;
@@ -420,12 +420,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     );
 
     if from_cache {
-        emit_response_metadata(
-            &app,
-            ResponseMetadataPayload {
-                pre_prepared: true,
-            },
-        );
+        emit_response_metadata(&app, ResponseMetadataPayload { pre_prepared: true });
     }
 
     // ── 3. Build memory context ───────────────────────────────────────────
@@ -506,12 +501,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // Collect results — one thread failing never crashes the others.
     let (dir_result, dep_result, _cla_result) = tokio::join!(dir_task, dep_task, cla_task);
 
-    let directional_text = collect_thread_text(
-        dir_result,
-        cfg.session_id,
-        "directional",
-        &app,
-    );
+    let directional_text = collect_thread_text(dir_result, cfg.session_id, "directional", &app);
     let depth_text = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
     let clarifying_emitted = collect_clarifying(_cla_result, cfg.session_id);
 
@@ -586,8 +576,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 
     // ── 8. Token usage estimate (4 chars ≈ 1 token) ───────────────────────
     let turn_input = (cfg.question_text.len() as u64 + 500) / 4;
-    let turn_output =
-        (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
+    let turn_output = (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
     let total = turn_input + turn_output;
     let cost_estimate = total as f64 * 0.0000002;
     emit_token_usage_update(

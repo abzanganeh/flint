@@ -125,7 +125,10 @@ impl FailoverManager {
         // Acquire rate-limit slot before calling primary.
         self.rate_limiter.acquire(estimated_tokens).await;
 
-        let first_result = self.primary.complete_stream(prompt.clone(), config.clone()).await;
+        let first_result = self
+            .primary
+            .complete_stream(prompt.clone(), config.clone())
+            .await;
 
         match first_result {
             Ok(stream) => return Ok(stream),
@@ -144,7 +147,10 @@ impl FailoverManager {
 
         // One immediate retry.
         tokio::time::sleep(INITIAL_RETRY_DELAY).await;
-        let retry_result = self.primary.complete_stream(prompt.clone(), config.clone()).await;
+        let retry_result = self
+            .primary
+            .complete_stream(prompt.clone(), config.clone())
+            .await;
 
         match retry_result {
             Ok(stream) => return Ok(stream),

@@ -11,8 +11,8 @@ use flint_lib::audio::pipeline::DetectedQuestion;
 use flint_lib::digest::Digest;
 use flint_lib::llm::failover::FailoverManager;
 use flint_lib::llm::provider::{
-    CompletionConfig, FailingMockLLMProvider, LLMProvider, MockLLMProvider, PanickingMockLLMProvider,
-    RateLimit,
+    CompletionConfig, FailingMockLLMProvider, LLMProvider, MockLLMProvider,
+    PanickingMockLLMProvider, RateLimit,
 };
 use flint_lib::llm::rate_limiter::RateLimiter;
 use flint_lib::orchestrator::depth;
@@ -196,20 +196,23 @@ fn fast_failover(response: &str, name: &str) -> Arc<FailoverManager> {
 /// wired up. Skips silently when the fastembed model isn't cached locally.
 #[tokio::test]
 async fn dispatch_turn_runs_full_pipeline_end_to_end() {
-    let embedder = try_embedder().expect("embedder must load (model cached in src-tauri/.fastembed_cache)");
+    let embedder =
+        try_embedder().expect("embedder must load (model cached in src-tauri/.fastembed_cache)");
 
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
 
     let persistence = fresh_persistence();
     persistence
-        .create_session_row(session_id, "Test Session", "interview", "software engineering")
+        .create_session_row(
+            session_id,
+            "Test Session",
+            "interview",
+            "software engineering",
+        )
         .expect("session row");
     persistence
-        .write_state_transition(
-            session_id,
-            &flint_lib::session::state::SessionState::Live,
-        )
+        .write_state_transition(session_id, &flint_lib::session::state::SessionState::Live)
         .expect("state -> LIVE");
 
     let vector_store = fresh_vector_store();
@@ -257,7 +260,12 @@ async fn dispatch_turn_survives_primary_llm_failure() {
 
     let persistence = fresh_persistence();
     persistence
-        .create_session_row(session_id, "Failover Test", "interview", "software engineering")
+        .create_session_row(
+            session_id,
+            "Failover Test",
+            "interview",
+            "software engineering",
+        )
         .expect("session row");
 
     // Both primary and local fail — verifies the orchestrator doesn't crash.
@@ -297,7 +305,10 @@ async fn dispatch_turn_survives_primary_llm_failure() {
     .await;
 
     // The orchestrator catches per-thread errors and returns Ok overall.
-    assert!(result.is_ok(), "must not bubble per-thread failure: {result:?}");
+    assert!(
+        result.is_ok(),
+        "must not bubble per-thread failure: {result:?}"
+    );
 }
 
 /// Pre-warm cache hit: dispatch_turn serves cached directional + depth without
@@ -324,7 +335,12 @@ async fn dispatch_turn_serves_prewarm_cache_hit() {
 
     let persistence = fresh_persistence();
     persistence
-        .create_session_row(session_id, "Cache Test", "interview", "software engineering")
+        .create_session_row(
+            session_id,
+            "Cache Test",
+            "interview",
+            "software engineering",
+        )
         .expect("session row");
 
     // Use a failing primary to prove the LLM was NOT called.
@@ -417,7 +433,9 @@ async fn run_orchestrator_processes_question_and_exits_when_channel_closed() {
     .expect("send question");
     drop(tx);
 
-    handle.await.expect("orchestrator loop must shut down cleanly");
+    handle
+        .await
+        .expect("orchestrator loop must shut down cleanly");
 }
 
 /// Two questions arriving inside the silence-debounce window collapse into
@@ -647,7 +665,10 @@ async fn dispatch_turn_recovers_from_panicking_llm_provider() {
     )
     .await;
 
-    assert!(result.is_ok(), "orchestrator must absorb provider panics: {result:?}");
+    assert!(
+        result.is_ok(),
+        "orchestrator must absorb provider panics: {result:?}"
+    );
 }
 
 /// Writes to a closed/invalid persistence so `write_response` fails, exercising
@@ -684,7 +705,10 @@ async fn dispatch_turn_logs_when_persistence_write_fails() {
     )
     .await;
 
-    assert!(result.is_ok(), "persist failure must not crash turn: {result:?}");
+    assert!(
+        result.is_ok(),
+        "persist failure must not crash turn: {result:?}"
+    );
 }
 
 /// Cancelled turn exits early at the top of `run_turn`.

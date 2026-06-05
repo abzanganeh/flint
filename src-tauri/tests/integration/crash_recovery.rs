@@ -141,7 +141,10 @@ async fn discard_session_clears_data_and_returns_idle() {
     let offer = persistence
         .load_session_for_recovery(sid)
         .expect("load after discard");
-    assert!(offer.is_none(), "session data should be cleared after discard");
+    assert!(
+        offer.is_none(),
+        "session data should be cleared after discard"
+    );
 }
 
 /// No incomplete session in SQLite → check_for_recovery returns None.

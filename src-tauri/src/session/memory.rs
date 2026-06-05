@@ -456,7 +456,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            ctx.rolling_summary.contains("Previously summarised content."),
+            ctx.rolling_summary
+                .contains("Previously summarised content."),
             "must keep old summary"
         );
         assert!(

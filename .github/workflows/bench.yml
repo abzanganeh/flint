@@ -1,0 +1,110 @@
+name: Performance Benchmarks
+
+on:
+  pull_request:
+    paths:
+      - "src-tauri/src/**"
+      - "src-tauri/benches/**"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "prompts/**"
+      - ".github/workflows/bench.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1"
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench-gate-unit:
+    name: bench_gate unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        run: |
+          ./scripts/install-linux-deps.sh
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: bench-gate-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: cargo test --bin bench_gate
+        working-directory: src-tauri
+        run: cargo test --bin bench_gate
+
+  performance-gate:
+    name: NFR performance gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        run: |
+          ./scripts/install-linux-deps.sh
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: bench-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      # CI runners have noisy P95s — we deliberately use a reduced sample size
+      # but a measurement window long enough for criterion's bootstrap to
+      # produce stable percentiles (~10s per bench).
+      - name: Run benchmarks
+        working-directory: src-tauri
+        env:
+          CARGO_TERM_COLOR: always
+          CRITERION_DEBUG: "1"
+        run: |
+          for bench in rag_retrieval question_detection rnnoise_frame \
+                       prompt_loading confidence_scoring orchestrator_ttft; do
+            echo "::group::cargo bench --bench ${bench}"
+            cargo bench --bench "${bench}" -- \
+              --sample-size 30 \
+              --measurement-time 8 \
+              --warm-up-time 2
+            echo "::endgroup::"
+          done
+
+      - name: Enforce NFR gates
+        working-directory: src-tauri
+        run: |
+          cargo run --release --bin bench_gate -- \
+            --criterion-dir target/criterion \
+            --report-dir target/bench-report
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-report-${{ github.run_id }}
+          path: src-tauri/target/bench-report/
+          retention-days: 30
+
+      - name: Upload criterion raw output
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-raw-${{ github.run_id }}
+          path: src-tauri/target/criterion/
+          retention-days: 14
