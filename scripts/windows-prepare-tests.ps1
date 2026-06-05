@@ -20,20 +20,35 @@ if (-not (Test-Path $Deps)) {
 }
 
 function Stage-Dll($SourcePath) {
-    if (-not (Test-Path $SourcePath)) {
+    if (-not (Test-Path -LiteralPath $SourcePath)) {
         return
     }
     $name = Split-Path -Leaf $SourcePath
-    Copy-Item -LiteralPath $SourcePath -Destination (Join-Path $Deps $name) -Force
+    $dest = Join-Path $Deps $name
+
+    # Cargo may hard-link cdylib output; symlinks can make resolved paths equal.
+    $srcFull = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $SourcePath).Path)
+    $destFull = [System.IO.Path]::GetFullPath($dest)
+    if ($srcFull -eq $destFull) {
+        return
+    }
+    if (Test-Path -LiteralPath $dest) {
+        return
+    }
+
+    Copy-Item -LiteralPath $SourcePath -Destination $dest -Force
     Write-Host "  staged $name -> deps/"
 }
 
 Write-Host "Staging runtime DLLs for cargo test (Windows)..."
 
 # 1. Root of target/debug — ort copy-dylibs landing zone on copy-fallback.
-Get-ChildItem -Path $TargetDebug -Filter "*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
-    Stage-Dll $_.FullName
-}
+# Exclude DLLs already living in deps/ (cdylib outputs land there directly).
+Get-ChildItem -Path $TargetDebug -Filter "*.dll" -File -ErrorAction SilentlyContinue |
+    Where-Object { $_.DirectoryName -ne $Deps } |
+    ForEach-Object {
+        Stage-Dll $_.FullName
+    }
 
 # 2. ort.pyke.io prebuilt bundle cache (DirectML + any bundled dylibs).
 $OrtCacheRoot = Join-Path $env:LOCALAPPDATA "ort.pyke.io\dfbin\x86_64-pc-windows-msvc"
