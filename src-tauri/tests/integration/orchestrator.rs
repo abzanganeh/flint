@@ -201,8 +201,10 @@ fn fast_failover(response: &str, name: &str) -> Arc<FailoverManager> {
 /// wired up. Skips silently when the fastembed model isn't cached locally.
 #[tokio::test]
 async fn dispatch_turn_runs_full_pipeline_end_to_end() {
-    let embedder =
-        try_embedder().expect("embedder must load (model cached in src-tauri/.fastembed_cache)");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
 
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
@@ -259,7 +261,10 @@ async fn dispatch_turn_runs_full_pipeline_end_to_end() {
 /// Failover routes to the local provider; responses are still persisted.
 #[tokio::test]
 async fn dispatch_turn_survives_primary_llm_failure() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
 
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
@@ -322,7 +327,10 @@ async fn dispatch_turn_survives_primary_llm_failure() {
 /// hitting the LLM. Exercises the cache-hit branch inside `run_turn`.
 #[tokio::test]
 async fn dispatch_turn_serves_prewarm_cache_hit() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
 
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
@@ -395,7 +403,10 @@ async fn dispatch_turn_serves_prewarm_cache_hit() {
 /// in `mod.rs` (lines 143-209) that are unreachable through `dispatch_turn`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_orchestrator_processes_question_and_exits_when_channel_closed() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
 
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
@@ -452,7 +463,10 @@ async fn run_orchestrator_processes_question_and_exits_when_channel_closed() {
 /// branch of `debounce`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_orchestrator_debounces_rapid_questions() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
 
@@ -506,7 +520,10 @@ async fn run_orchestrator_debounces_rapid_questions() {
 /// forces compression, exercising `emit_context_truncated`.
 #[tokio::test]
 async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
     let persistence = fresh_persistence();
@@ -585,7 +602,10 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
 /// branch in `depth::run_depth`.
 #[tokio::test]
 async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
 
@@ -636,7 +656,10 @@ async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
 /// of `collect_thread_text` and `collect_clarifying`.
 #[tokio::test]
 async fn dispatch_turn_recovers_from_panicking_llm_provider() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
     let persistence = fresh_persistence();
@@ -688,7 +711,10 @@ async fn dispatch_turn_recovers_from_panicking_llm_provider() {
 /// the warning branch in `persist_thread_response`.
 #[tokio::test]
 async fn dispatch_turn_logs_when_persistence_write_fails() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
 
@@ -728,7 +754,10 @@ async fn dispatch_turn_logs_when_persistence_write_fails() {
 /// Cancelled turn exits early at the top of `run_turn`.
 #[tokio::test]
 async fn dispatch_turn_returns_early_when_cancel_flag_set() {
-    let embedder = try_embedder().expect("embedder must load");
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
     let session_id = Uuid::new_v4();
     let persistence = fresh_persistence();
