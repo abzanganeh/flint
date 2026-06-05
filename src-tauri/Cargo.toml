@@ -37,13 +37,11 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 chrono = { version = "0.4", features = ["serde"] }
 keyring = "2"
 sysinfo = "0.33"
-fastembed = "5"
-# On Windows CI, ort's copy-dylibs never puts onnxruntime.dll under target/
-# so the test binary crashes at startup (0xc0000139) when Windows loads the
-# incompatible System32 copy. load-dynamic removes the PE import: ort loads
-# the DLL at runtime and returns Err if it is absent or wrong-versioned.
-# All Embedder::new() call-sites already have a skip guard for that case.
-ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
+fastembed = { version = "5", default-features = false, features = [
+    "ort-load-dynamic",
+    "hf-hub-native-tls",
+    "image-models",
+] }
 sqlite-vec = "0.1.9"
 bytemuck = "1"
 

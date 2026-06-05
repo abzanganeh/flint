@@ -118,10 +118,11 @@ jobs:
         run: cargo test --tests --locked
 
       # Windows: ort's copy-dylibs never puts onnxruntime.dll under target/
-      # on GHA (no Developer Mode for symlinks, and download cache is external).
-      # We use ort's load-dynamic feature instead so the test binary has no PE
-      # import on onnxruntime.dll at startup; Embedder::new() returns Err when
-      # the DLL is absent/wrong-versioned, and all call-sites skip gracefully.
+      # on GHA Windows runners. We disable fastembed's default ort feature
+      # (download-binaries) and switch to ort's load-dynamic strategy so the
+      # test binary has no PE import on onnxruntime.dll. ort calls dlopen at
+      # runtime; Embedder::new() returns Err if the DLL is missing/wrong, and
+      # all call-sites already skip gracefully on Err.
       - name: Run Rust tests (Windows)
         if: matrix.install == 'windows'
         working-directory: src-tauri
