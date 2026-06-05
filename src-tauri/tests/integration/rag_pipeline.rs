@@ -104,9 +104,9 @@ async fn test_rag_pipeline_end_to_end() {
 
     // ── 2 & 3. Embed all chunks in one batch ─────────────────────────────────
 
-    let embedder = match Embedder::new() {
-        Ok(e) => e,
-        Err(_) => {
+    let embedder = match Embedder::new_if_cached() {
+        Some(e) => e,
+        None => {
             eprintln!("SKIP test_rag_pipeline_end_to_end: fastembed model not cached");
             return;
         }
