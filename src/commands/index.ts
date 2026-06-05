@@ -129,6 +129,21 @@ export interface SessionConfigDto {
   domain: string;
 }
 
+export interface SmartResumeImportDto {
+  sessionName: string;
+  sessionType: string;
+  domain: string;
+  jdText: string;
+  resumeSummary: string;
+  smartResumeSessionId: string;
+  exportVersion: number;
+}
+
+export const importFromSmartResume = (
+  token: string,
+): Promise<SmartResumeImportDto> =>
+  invoke<SmartResumeImportDto>("import_from_smart_resume", { token });
+
 export interface DigestDto {
   role: string;
   company: string;

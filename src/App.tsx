@@ -5,9 +5,12 @@ import {
   checkCrashRecovery,
   getCurrentUser,
   getLegalConsentAccepted,
+  importFromSmartResume,
   setSessionState,
   type RecoveryOffer,
 } from "./commands";
+import { onSmartResumeImportToken } from "./events";
+import { parseFlintImportToken } from "./lib/smartResumeImport";
 import { SessionState } from "./types";
 import "./App.css";
 import DigestReview from "./screens/DigestReview";
@@ -63,6 +66,76 @@ function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [recoveryOffer, setRecoveryOffer] = useState<RecoveryOffer | null>(null);
   const [sessionPreFill, setSessionPreFill] = useState<SessionPreFill | null>(null);
+  const [pendingImportToken, setPendingImportToken] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importLoading, setImportLoading] = useState(false);
+
+  const queueImportToken = (token: string | null) => {
+    if (token) setPendingImportToken(token);
+  };
+
+  const processSmartResumeImport = async (token: string) => {
+    setImportLoading(true);
+    setImportError(null);
+    try {
+      const result = await importFromSmartResume(token);
+      setSessionPreFill({
+        name: result.sessionName,
+        sessionType: result.sessionType,
+        domain: result.domain,
+        contextText: result.jdText,
+        profileText: result.resumeSummary,
+        smartResumeSessionId: result.smartResumeSessionId,
+      });
+      setScreen("session-design");
+    } catch (err) {
+      setImportError(String(err));
+    } finally {
+      setImportLoading(false);
+      setPendingImportToken(null);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+    const unlistenPromise = onSmartResumeImportToken((token) => {
+      if (active) queueImportToken(token);
+    });
+
+    void (async () => {
+      try {
+        const { getCurrent, onOpenUrl } = await import("@tauri-apps/plugin-deep-link");
+        const startUrls = await getCurrent();
+        if (active && startUrls) {
+          for (const url of startUrls) {
+            const token = parseFlintImportToken(url);
+            if (token) queueImportToken(token);
+          }
+        }
+        await onOpenUrl((urls) => {
+          if (!active) return;
+          for (const url of urls) {
+            const token = parseFlintImportToken(url);
+            if (token) queueImportToken(token);
+          }
+        });
+      } catch {
+        // Deep-link plugin unavailable outside Tauri shell (e.g. vitest).
+      }
+    })();
+
+    return () => {
+      active = false;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!pendingImportToken || importLoading) return;
+    const readyScreens: AppScreen[] = ["health", "session-design", "session-list"];
+    if (!readyScreens.includes(screen)) return;
+    void processSmartResumeImport(pendingImportToken);
+  }, [pendingImportToken, screen, importLoading]);
 
   useEffect(() => {
     let cancelled = false;
@@ -206,6 +279,16 @@ function App() {
   if (screen === "session-design") {
     return (
       <Shell nav={nav}>
+        {importLoading && (
+          <div className="sd-import-banner" role="status" aria-live="polite">
+            Importing from Smart Resume…
+          </div>
+        )}
+        {importError && (
+          <div className="sd-import-error" role="alert">
+            {importError}
+          </div>
+        )}
         <SessionDesign
           // key forces a fresh mount when preFill changes so useState
           // initial values pick up the new data.

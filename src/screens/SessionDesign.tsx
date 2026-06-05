@@ -6,6 +6,7 @@ import {
   type SessionConfigDto,
 } from "../commands";
 import { onSessionStateChange } from "../events";
+import { SMART_RESUME_SESSION_ID_KEY } from "../lib/smartResumeImport";
 import { SessionState } from "../types";
 import "./SessionDesign.css";
 
@@ -47,6 +48,10 @@ export interface SessionPreFill {
   domain: string;
   /** Reconstructed from the session's digest — pre-fills the context textarea. */
   contextText?: string;
+  /** Tailored resume summary from Smart Resume handoff. */
+  profileText?: string;
+  /** Source Smart Resume session id (Phase 3 digest sync). */
+  smartResumeSessionId?: string;
 }
 
 export interface SessionDesignProps {
@@ -64,7 +69,7 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
   const [domain, setDomain] = useState(preFill?.domain ?? "software engineering");
   const [contextText, setContextText] = useState(preFill?.contextText ?? "");
   const [profileText, setProfileText] = useState<string>(
-    () => localStorage.getItem(PROFILE_STORAGE_KEY) ?? ""
+    () => preFill?.profileText ?? localStorage.getItem(PROFILE_STORAGE_KEY) ?? "",
   );
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,6 +166,12 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
     setProfileText(value);
     localStorage.setItem(PROFILE_STORAGE_KEY, value);
   };
+
+  useEffect(() => {
+    if (preFill?.smartResumeSessionId) {
+      localStorage.setItem(SMART_RESUME_SESSION_ID_KEY, preFill.smartResumeSessionId);
+    }
+  }, [preFill?.smartResumeSessionId]);
 
   const charCount = contextText.length;
   const canExtract =

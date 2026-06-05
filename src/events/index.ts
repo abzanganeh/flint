@@ -215,3 +215,8 @@ export const onInferenceSuspended = (
   listen<InferenceSuspendedEventPayload>("inference_suspended", (event) =>
     handler(event.payload),
   );
+
+export const onSmartResumeImportToken = (
+  handler: (token: string) => void,
+): Promise<UnlistenFn> =>
+  listen<string>("smart_resume_import_token", (event) => handler(event.payload));
