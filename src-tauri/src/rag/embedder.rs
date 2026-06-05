@@ -46,6 +46,31 @@ impl Embedder {
         })
     }
 
+    /// Load the model only if it is already cached on disk. Returns `None`
+    /// immediately (without any network activity) if the model is absent or
+    /// if loading takes more than 10 seconds.
+    ///
+    /// Use this in test helpers instead of `Embedder::new().ok()` so that a
+    /// HuggingFace 429 (or any other network stall) never hangs the test suite.
+    /// `OnceLock::get_or_init` holds a lock while its closure runs — one hung
+    /// `Embedder::new()` call blocks every other test in the process.
+    pub fn new_if_cached() -> Option<Self> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Self::new());
+        });
+
+        // If the model is already on disk `new()` finishes in well under a
+        // second.  A hung download never completes — abort after 10 s.
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(e)) => Some(e),
+            _ => None,
+        }
+    }
+
     /// Embed a batch of texts in one ONNX inference pass. Prefer this over
     /// calling `embed_one` in a loop.
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
@@ -95,7 +120,7 @@ mod tests {
     static EMBEDDER: OnceLock<Option<Embedder>> = OnceLock::new();
 
     fn shared_embedder() -> Option<&'static Embedder> {
-        EMBEDDER.get_or_init(|| Embedder::new().ok()).as_ref()
+        EMBEDDER.get_or_init(|| Embedder::new_if_cached()).as_ref()
     }
 
     macro_rules! require_embedder {

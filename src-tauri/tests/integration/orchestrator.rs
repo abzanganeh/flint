@@ -168,7 +168,7 @@ static EMBEDDER: OnceLock<Option<Arc<Embedder>>> = OnceLock::new();
 
 fn try_embedder() -> Option<Arc<Embedder>> {
     EMBEDDER
-        .get_or_init(|| Embedder::new().ok().map(Arc::new))
+        .get_or_init(|| Embedder::new_if_cached().map(Arc::new))
         .clone()
 }
 

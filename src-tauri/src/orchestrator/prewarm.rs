@@ -383,7 +383,7 @@ mod tests {
 
     fn embedder() -> Option<Arc<Embedder>> {
         EMBEDDER
-            .get_or_init(|| Embedder::new().ok().map(Arc::new))
+            .get_or_init(|| Embedder::new_if_cached().map(Arc::new))
             .clone()
     }
 
