@@ -99,6 +99,13 @@ impl PreWarmCache {
         key
     }
 
+    /// Drop every cached entry. Called from `gdpr::delete_account` after the
+    /// user's data has been wiped — the pre-warm cache references questions
+    /// that no longer have a backing session.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     /// Return the cached entry whose question embedding has the highest cosine
     /// similarity to `embedding`, if that similarity is ≥ 0.85 (§13 rule).
     ///

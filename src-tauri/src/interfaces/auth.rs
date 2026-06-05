@@ -36,6 +36,5 @@ pub trait AuthInterface: Send + Sync {
     async fn logout(&self, token: &AuthToken) -> Result<()>;
     async fn refresh(&self, refresh_token: &str) -> Result<AuthToken>;
     async fn get_current_user(&self, token: &AuthToken) -> Result<User>;
-    #[allow(dead_code)]
     async fn delete_account(&self, token: &AuthToken) -> Result<()>;
 }

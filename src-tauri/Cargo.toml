@@ -83,6 +83,10 @@ path = "tests/integration/orchestrator.rs"
 name = "crash_recovery"
 path = "tests/integration/crash_recovery.rs"
 
+[[test]]
+name = "gdpr"
+path = "tests/integration/gdpr.rs"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 7.3 benchmarks — measured against NFR targets in flint-performance.mdc.
 # Run with: cargo bench --bench <name>

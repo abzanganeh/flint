@@ -18,6 +18,11 @@ const AUTH_EXPIRES_ENTRY: &str = "auth_token_expires_at";
 const LEGAL_CONSENT_ENTRY: &str = "legal_consent_accepted";
 const REHEARSAL_COMPLETED_ENTRY: &str = "rehearsal_completed";
 
+/// Every LLM provider that may have an API key stored under
+/// `api_key_{provider}`. Kept in sync with the providers Flint can connect
+/// to so [`clear_all_user_secrets`] never leaves orphan entries behind.
+pub const KNOWN_API_PROVIDERS: &[&str] = &["groq", "openai", "anthropic"];
+
 const READ_CREDENTIALS_MSG: &str = "Could not read credentials. Please log in again.";
 const SAVE_CREDENTIALS_MSG: &str = "Could not save credentials. Please try again.";
 
@@ -123,6 +128,43 @@ pub fn clear_auth_token() -> Result<()> {
     delete_password(AUTH_REFRESH_ENTRY)?;
     delete_password(AUTH_EXPIRES_ENTRY)?;
     Ok(())
+}
+
+/// Phase 7.5 — purge every keychain entry Flint controls for the current user.
+///
+/// Best-effort: each `delete_password` call already tolerates `NoEntry`. We
+/// continue past individual failures so a corrupt single entry cannot block
+/// the GDPR delete flow, and report the first error (if any) back to the
+/// caller so the UI can warn the user that manual cleanup may be required.
+///
+/// Cleared entries:
+/// * Auth tokens (access, refresh, expires_at)
+/// * Legal-consent flag
+/// * Rehearsal-completed flag
+/// * Every API key registered under [`KNOWN_API_PROVIDERS`]
+pub fn clear_all_user_secrets() -> Result<()> {
+    let mut first_error: Option<anyhow::Error> = None;
+
+    let entries: Vec<String> = std::iter::once(AUTH_ACCESS_ENTRY.to_string())
+        .chain(std::iter::once(AUTH_REFRESH_ENTRY.to_string()))
+        .chain(std::iter::once(AUTH_EXPIRES_ENTRY.to_string()))
+        .chain(std::iter::once(LEGAL_CONSENT_ENTRY.to_string()))
+        .chain(std::iter::once(REHEARSAL_COMPLETED_ENTRY.to_string()))
+        .chain(KNOWN_API_PROVIDERS.iter().map(|p| api_key_entry_name(p)))
+        .collect();
+
+    for entry in entries {
+        if let Err(e) = delete_password(&entry) {
+            if first_error.is_none() {
+                first_error = Some(e);
+            }
+        }
+    }
+
+    match first_error {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

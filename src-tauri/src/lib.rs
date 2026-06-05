@@ -6,6 +6,7 @@ pub mod cost;
 pub mod digest;
 mod dto;
 mod events;
+pub mod gdpr;
 mod health;
 mod hotkeys;
 pub mod interfaces;
@@ -91,6 +92,9 @@ pub fn run() {
             commands::set_cost_cap,
             commands::lift_cost_suspension,
             commands::reset_cost_tracker,
+            // Phase 7.5 — GDPR right-to-deletion + right-to-export
+            commands::delete_account,
+            commands::export_user_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

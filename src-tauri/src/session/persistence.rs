@@ -890,6 +890,239 @@ impl SessionPersistence {
         debug!(session_id = %session_id, "session data cleared");
         Ok(())
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // GDPR helpers — Phase 7.5
+    // ──────────────────────────────────────────────────────────────────────
+
+    /// Return every session id currently persisted, regardless of state.
+    /// Used during account deletion to clear each session's vector store.
+    pub fn list_all_session_ids(&self) -> Result<Vec<Uuid>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT id FROM sessions")
+            .context("prepare list_all_session_ids")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("query session ids")?
+            .map(|row| {
+                let id = row.context("read session id row")?;
+                Uuid::parse_str(&id).context("parse session uuid")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    /// Atomically truncate every user-data table in the database.
+    ///
+    /// Wrapped in a single transaction so the SQLite file is never observed
+    /// in a partially-cleared state. Schema (PRAGMA `user_version`, table
+    /// definitions, WAL mode) is preserved — only rows are removed.
+    pub fn clear_all_user_data(&self) -> Result<()> {
+        let mut conn = self.db.lock().expect("session persistence mutex poisoned");
+        let tx = conn.transaction().context("begin clear_all transaction")?;
+
+        for table in [
+            "transcript_chunks",
+            "responses",
+            "session_state_transitions",
+            "sessions",
+        ] {
+            tx.execute(&format!("DELETE FROM {table}"), [])
+                .with_context(|| format!("delete from {table}"))?;
+        }
+
+        tx.commit().context("commit clear_all transaction")?;
+        info!("all local session data cleared");
+        Ok(())
+    }
+
+    /// Dump every persisted session (with transcripts, responses, and state
+    /// transitions) into an in-memory structure suitable for JSON export.
+    pub fn export_all_data(&self) -> Result<Vec<SessionExport>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, state, created_at, expires_at, promoted, name,
+                        session_type, domain, COALESCE(context_text, '')
+                 FROM sessions
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare export sessions")?;
+
+        let session_rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
+                    r.get::<_, String>(7)?,
+                    r.get::<_, String>(8)?,
+                ))
+            })
+            .context("query sessions for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read sessions rows for export")?;
+
+        let mut exports = Vec::with_capacity(session_rows.len());
+        for row in session_rows {
+            let (id, state, created_at, expires_at, promoted, name, session_type, domain, ctx) =
+                row;
+            let sid = Uuid::parse_str(&id).context("parse session uuid for export")?;
+
+            let transcripts = Self::select_transcripts_for_export(&conn, &id)?;
+            let responses = Self::select_responses_for_export(&conn, &id)?;
+            let transitions = Self::select_transitions_for_export(&conn, &id)?;
+
+            exports.push(SessionExport {
+                id: sid,
+                state,
+                created_at,
+                expires_at,
+                promoted: promoted != 0,
+                name,
+                session_type,
+                domain,
+                context_text: ctx,
+                transcript_chunks: transcripts,
+                responses,
+                state_transitions: transitions,
+            });
+        }
+
+        Ok(exports)
+    }
+
+    fn select_transcripts_for_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<Vec<TranscriptChunkExport>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, speaker, text, timestamp_ms, created_at
+                 FROM transcript_chunks
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare export transcripts")?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok(TranscriptChunkExport {
+                    id: r.get::<_, String>(0)?,
+                    speaker: r.get::<_, String>(1)?,
+                    text: r.get::<_, String>(2)?,
+                    timestamp_ms: r.get::<_, i64>(3)?,
+                    created_at: r.get::<_, i64>(4)?,
+                })
+            })
+            .context("query transcript chunks for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read transcript rows for export")?;
+        Ok(rows)
+    }
+
+    fn select_responses_for_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<Vec<ResponseExport>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, response_type, content, confidence, created_at
+                 FROM responses
+                 WHERE session_id = ?1
+                 ORDER BY created_at ASC",
+            )
+            .context("prepare export responses")?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok(ResponseExport {
+                    id: r.get::<_, String>(0)?,
+                    response_type: r.get::<_, String>(1)?,
+                    content: r.get::<_, String>(2)?,
+                    confidence: r.get::<_, f64>(3)?,
+                    created_at: r.get::<_, i64>(4)?,
+                })
+            })
+            .context("query responses for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read response rows for export")?;
+        Ok(rows)
+    }
+
+    fn select_transitions_for_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<Vec<StateTransitionExport>> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT state, transitioned_at
+                 FROM session_state_transitions
+                 WHERE session_id = ?1
+                 ORDER BY transitioned_at ASC, id ASC",
+            )
+            .context("prepare export transitions")?;
+        let rows = stmt
+            .query_map(params![session_id], |r| {
+                Ok(StateTransitionExport {
+                    state: r.get::<_, String>(0)?,
+                    transitioned_at: r.get::<_, i64>(1)?,
+                })
+            })
+            .context("query transitions for export")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read transition rows for export")?;
+        Ok(rows)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Export DTOs — only used by Phase 7.5 GDPR right-to-export
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Full snapshot of a single session for inclusion in a user-data export.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionExport {
+    pub id: Uuid,
+    pub state: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub promoted: bool,
+    pub name: String,
+    pub session_type: String,
+    pub domain: String,
+    pub context_text: String,
+    pub transcript_chunks: Vec<TranscriptChunkExport>,
+    pub responses: Vec<ResponseExport>,
+    pub state_transitions: Vec<StateTransitionExport>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TranscriptChunkExport {
+    pub id: String,
+    pub speaker: String,
+    pub text: String,
+    pub timestamp_ms: i64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResponseExport {
+    pub id: String,
+    pub response_type: String,
+    pub content: String,
+    pub confidence: f64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StateTransitionExport {
+    pub state: String,
+    pub transitioned_at: i64,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1462,6 +1695,89 @@ mod tests {
         let db = new_db();
         let summary = db.session_summary(Uuid::new_v4()).unwrap();
         assert!(summary.is_none());
+    }
+
+    // ── GDPR helpers (Phase 7.5) ────────────────────────────────────────────
+
+    #[test]
+    fn list_all_session_ids_returns_every_session() {
+        let db = new_db();
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4();
+        let s3 = Uuid::new_v4();
+        db.create_session_row(s1, "A", "interview", "swe").unwrap();
+        db.create_session_row(s2, "B", "interview", "swe").unwrap();
+        db.create_session_row(s3, "C", "interview", "swe").unwrap();
+        let ids = db.list_all_session_ids().unwrap();
+        assert_eq!(ids.len(), 3);
+        for id in [s1, s2, s3] {
+            assert!(ids.contains(&id), "missing {id}");
+        }
+    }
+
+    #[test]
+    fn clear_all_user_data_truncates_every_table() {
+        let db = new_db();
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4();
+        db.create_session_row(s1, "A", "interview", "swe").unwrap();
+        db.create_session_row(s2, "B", "interview", "swe").unwrap();
+        db.write_state_transition(s1, &SessionState::Live).unwrap();
+        db.write_transcript_chunk(&sample_chunk(s1, 100, "hi"))
+            .unwrap();
+        db.write_response(&sample_response(s1)).unwrap();
+
+        db.clear_all_user_data().unwrap();
+
+        assert!(db.list_all_session_ids().unwrap().is_empty());
+        let conn = db.db.lock().unwrap();
+        for table in [
+            "transcript_chunks",
+            "responses",
+            "session_state_transitions",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0, "{table} not truncated");
+        }
+        // Schema is preserved.
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert!(version > 0, "schema version dropped after wipe");
+    }
+
+    #[test]
+    fn clear_all_user_data_is_idempotent() {
+        let db = new_db();
+        db.clear_all_user_data().unwrap();
+        db.clear_all_user_data().unwrap();
+        assert!(db.list_all_session_ids().unwrap().is_empty());
+    }
+
+    #[test]
+    fn export_all_data_round_trips_transcripts_and_responses() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Export", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::Configuring)
+            .unwrap();
+        db.write_transcript_chunk(&sample_chunk(sid, 250, "hello world"))
+            .unwrap();
+        db.write_response(&sample_response(sid)).unwrap();
+
+        let export = db.export_all_data().unwrap();
+        assert_eq!(export.len(), 1);
+        let session = &export[0];
+        assert_eq!(session.id, sid);
+        assert_eq!(session.name, "Export");
+        assert_eq!(session.transcript_chunks.len(), 1);
+        assert_eq!(session.transcript_chunks[0].text, "hello world");
+        assert_eq!(session.responses.len(), 1);
+        // Both the create (IDLE) and explicit CONFIGURING write should be present.
+        assert!(!session.state_transitions.is_empty());
     }
 
     // ── WAL mode ─────────────────────────────────────────────────────────────

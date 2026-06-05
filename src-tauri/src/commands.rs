@@ -1412,3 +1412,83 @@ pub async fn delete_session(session_id: String, state: State<'_, AppState>) -> R
 
     Ok(())
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.5 — GDPR right-to-deletion + right-to-export
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Delete the authenticated user's account end-to-end.
+///
+/// Flow (each step is independently best-effort — see [`crate::gdpr`]):
+/// 1. Supabase `DELETE /auth/v1/user` — removes the auth row.
+/// 2. Local vector store — drops every per-session `vec_chunks_{hex}` table.
+/// 3. Local SQLite — truncates all user-data tables in one transaction.
+/// 4. OS keychain — purges tokens, consent flags, and known API keys.
+///
+/// The state machine is reset to IDLE and the in-memory auth token is
+/// cleared, regardless of whether the Supabase call succeeded.
+///
+/// Returns the per-step [`crate::gdpr::DeleteAccountReport`] so the UI can
+/// surface partial failures (e.g. "we deleted everything locally, but the
+/// server is unreachable — your account row will be removed when Supabase
+/// is back online").
+#[tauri::command]
+pub async fn delete_account(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::gdpr::DeleteAccountReport, String> {
+    // Refuse to delete while a live session is running — would orphan the
+    // audio thread and leave SQLite mid-write.
+    {
+        let guard = state.live_tasks.lock().await;
+        if guard.is_some() {
+            return Err(
+                "Cannot delete account while a session is live. Stop the session first."
+                    .to_string(),
+            );
+        }
+    }
+
+    let token = active_auth_token(&state).await?;
+
+    let report = crate::gdpr::delete_account(
+        Arc::clone(&state.auth),
+        token,
+        Arc::clone(&state.persistence),
+        Arc::clone(&state.vector_store),
+        Box::new(keychain::clear_all_user_secrets),
+    )
+    .await;
+
+    // Reset the in-memory auth + session state so the next request looks
+    // like a fresh launch.
+    state.set_auth_token(None).await;
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine.reset_to_idle();
+    }
+    state.cost_tracker.reset();
+    *state.session_digest.write().await = None;
+    *state.session_memory.lock().await = None;
+    state.prewarm_cache.lock().await.clear();
+
+    emit_state(&app, SessionState::Idle);
+
+    info!(
+        all_succeeded = report.all_succeeded(),
+        "account deletion finished"
+    );
+    Ok(report)
+}
+
+/// Produce a JSON dump of all locally-stored sessions, transcripts,
+/// responses, and state transitions for the GDPR right-to-export.
+///
+/// Returns the JSON as a string so the frontend can hand it to the user
+/// (download, copy to clipboard, etc.). The backend deliberately does NOT
+/// write to disk — file I/O belongs in the platform-native dialog layer.
+#[tauri::command]
+pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, String> {
+    let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
+}

@@ -288,3 +288,60 @@ export const liftCostSuspension = async (): Promise<CostStatusDto> =>
 /** Zero all cumulative counters. */
 export const resetCostTracker = async (): Promise<CostStatusDto> =>
   adaptCostStatus(await invoke<RawCostStatus>("reset_cost_tracker"));
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 7.5 — GDPR right-to-deletion + right-to-export
+// ──────────────────────────────────────────────────────────────────────────────
+
+export interface DeleteAccountReport {
+  supabaseDeleted: boolean;
+  supabaseError: string | null;
+  keychainCleared: boolean;
+  keychainError: string | null;
+  vectorStoreCleared: boolean;
+  vectorStoreError: string | null;
+  sqliteCleared: boolean;
+  sqliteError: string | null;
+  sessionsCleared: number;
+}
+
+interface RawDeleteAccountReport {
+  supabase_deleted: boolean;
+  supabase_error: string | null;
+  keychain_cleared: boolean;
+  keychain_error: string | null;
+  vector_store_cleared: boolean;
+  vector_store_error: string | null;
+  sqlite_cleared: boolean;
+  sqlite_error: string | null;
+  sessions_cleared: number;
+}
+
+const adaptDeleteAccountReport = (raw: RawDeleteAccountReport): DeleteAccountReport => ({
+  supabaseDeleted: raw.supabase_deleted,
+  supabaseError: raw.supabase_error,
+  keychainCleared: raw.keychain_cleared,
+  keychainError: raw.keychain_error,
+  vectorStoreCleared: raw.vector_store_cleared,
+  vectorStoreError: raw.vector_store_error,
+  sqliteCleared: raw.sqlite_cleared,
+  sqliteError: raw.sqlite_error,
+  sessionsCleared: raw.sessions_cleared,
+});
+
+/**
+ * Run the GDPR right-to-deletion flow end-to-end.
+ *
+ * Wipes the Supabase auth user, the OS keychain, the local SQLite database,
+ * and the per-session vector store. Each step is independently best-effort —
+ * inspect the returned report to surface partial failures to the user.
+ */
+export const deleteAccount = async (): Promise<DeleteAccountReport> =>
+  adaptDeleteAccountReport(await invoke<RawDeleteAccountReport>("delete_account"));
+
+/**
+ * Return a JSON blob of every locally-stored session, transcript, and
+ * response. The caller is responsible for writing it to disk (or sharing it
+ * via the system share sheet).
+ */
+export const exportUserData = (): Promise<string> => invoke<string>("export_user_data");

@@ -179,6 +179,25 @@ impl SessionStateMachine {
         );
     }
 
+    /// Force the machine back to `IDLE` and drop any bound `session_id`.
+    ///
+    /// Reserved for `gdpr::delete_account` (Phase 7.5): after the user
+    /// confirms account deletion every backing store has been wiped, so the
+    /// only sane in-memory state is `IDLE` with no session bound. This skips
+    /// the transition allow-list deliberately — the allow-list assumes the
+    /// underlying session data still exists, which is no longer true here.
+    pub fn reset_to_idle(&mut self) {
+        let from = self.current;
+        let prior_id = self.session_id;
+        self.current = SessionState::Idle;
+        self.session_id = None;
+        tracing::info!(
+            from = %from,
+            prior_session_id = ?prior_id,
+            "state machine forced to IDLE (account deletion)"
+        );
+    }
+
     /// Drive the machine to `to`.
     ///
     /// Order of operations:
