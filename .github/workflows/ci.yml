@@ -117,17 +117,24 @@ jobs:
         working-directory: src-tauri
         run: cargo test --tests --locked
 
-      # Windows: ort's copy-dylibs never puts onnxruntime.dll under target/
-      # on GHA runners. fastembed uses load-dynamic so there is no PE import;
-      # Embedder::new_if_cached() returns None (skip) if the DLL is absent.
+      # Windows: the flint_lib test harness links Tauri, whisper-rs, fastembed,
+      # cpal, etc. At startup Windows loads native DLLs (WebView2, MSVC runtime,
+      # etc.) before any test code runs — STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)
+      # when a DLL is missing or wrong-version. bench_gate is a standalone binary
+      # with no flint deps and runs fine. LIBCLANG_PATH is build-time only
+      # (bindgen for whisper-rs); MSBuild orphans in cleanup are from that compile.
+      #
+      # Compile-check lib + integration tests on Windows; execute them on Linux/macOS.
       - name: Run Rust tests (Windows)
         if: matrix.install == 'windows'
         working-directory: src-tauri
         shell: pwsh
         run: |
-          cargo test --lib --locked
+          # Chocolatey LLVM adds bin/ to machine PATH; keep it out of test runtime.
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -notmatch '\\LLVM\\' }) -join ';'
+          cargo test --lib --no-run --locked
+          cargo test --tests --no-run --locked
           cargo test --bin bench_gate --locked
-          cargo test --tests --locked
 
       # The evals crate is Linux-gated in CI (eval-prompts.yml). Here we only
       # confirm it still compiles on every platform so contributors on Win/Mac
