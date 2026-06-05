@@ -11,11 +11,12 @@
 
 #![allow(dead_code)]
 
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use fastembed::{get_cache_dir, EmbeddingModel, InitOptions, TextEmbedding};
 use tracing::debug;
 
 /// Fixed output dimension for BAAI/bge-small-en-v1.5.
@@ -47,28 +48,28 @@ impl Embedder {
     }
 
     /// Load the model only if it is already cached on disk. Returns `None`
-    /// immediately (without any network activity) if the model is absent or
-    /// if loading takes more than 10 seconds.
+    /// immediately without any network I/O when the HuggingFace snapshot is
+    /// absent (typical on CI runners).
     ///
     /// Use this in test helpers instead of `Embedder::new().ok()` so that a
     /// HuggingFace 429 (or any other network stall) never hangs the test suite.
-    /// `OnceLock::get_or_init` holds a lock while its closure runs — one hung
-    /// `Embedder::new()` call blocks every other test in the process.
+    /// Do not spawn a background thread with a timeout — Rust keeps the process
+    /// alive until every thread exits, so a timed-out download would hang CI
+    /// even after all tests pass.
     pub fn new_if_cached() -> Option<Self> {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(Self::new());
-        });
-
-        // If the model is already on disk `new()` finishes in well under a
-        // second.  A hung download never completes — abort after 10 s.
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(Ok(e)) => Some(e),
-            _ => None,
+        if !Self::is_bge_model_cached() {
+            return None;
         }
+        Self::new().ok()
+    }
+
+    /// HuggingFace hub cache layout for `Xenova/bge-small-en-v1.5`.
+    fn is_bge_model_cached() -> bool {
+        let cache = std::env::var("HF_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(get_cache_dir()));
+
+        snapshot_has_embedding_artifacts(&cache.join("models--Xenova--bge-small-en-v1.5"))
     }
 
     /// Embed a batch of texts in one ONNX inference pass. Prefer this over
@@ -103,6 +104,20 @@ impl Embedder {
     pub fn dimensions(&self) -> usize {
         DIMENSIONS
     }
+}
+
+/// True when a HuggingFace hub snapshot contains the ONNX + tokenizer files
+/// fastembed needs for bge-small-en-v1.5 (no network call).
+fn snapshot_has_embedding_artifacts(model_hub_dir: &Path) -> bool {
+    let snapshots = model_hub_dir.join("snapshots");
+    let Ok(entries) = std::fs::read_dir(snapshots) else {
+        return false;
+    };
+
+    entries.flatten().any(|entry| {
+        let snap = entry.path();
+        snap.join("onnx/model.onnx").is_file() && snap.join("tokenizer.json").is_file()
+    })
 }
 
 #[cfg(test)]
