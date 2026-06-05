@@ -17,6 +17,20 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 $TargetDebug = Join-Path $RepoRoot "src-tauri\target\debug"
 $Deps = Join-Path $TargetDebug "deps"
 
+# Cargo-built cdylibs (e.g. flint_lib.dll) are already in deps/ and are locked
+# by the linker / test harness immediately after `cargo test --no-run`.
+$SkipNames = [System.Collections.Generic.HashSet[string]]::new(
+    [string[]]@('flint_lib.dll', 'flint.dll'),
+    [StringComparer]::OrdinalIgnoreCase
+)
+
+# Third-party runtime DLLs that ort/Tauri place under target/debug/ but not deps/.
+$RuntimePatterns = @(
+    'onnxruntime*.dll',
+    'DirectML.dll',
+    'WebView2Loader.dll'
+)
+
 if (-not (Test-Path $Deps)) {
     New-Item -ItemType Directory -Path $Deps -Force | Out-Null
 }
@@ -33,6 +47,10 @@ function Copy-DllToDeps {
     }
 
     $name = Split-Path -Leaf $SourcePath
+    if ($SkipNames.Contains($name)) {
+        return $false
+    }
+
     $dest = Join-Path $Deps $name
     $srcFull = [System.IO.Path]::GetFullPath((Resolve-Path -LiteralPath $SourcePath).Path)
     $destFull = [System.IO.Path]::GetFullPath($dest)
@@ -52,7 +70,9 @@ function Copy-DllToDeps {
         [System.IO.File]::Copy($srcFull, $destFull, $true)
         return $true
     } catch {
-        if ($_.Exception.Message -match 'with itself') {
+        $msg = $_.Exception.Message
+        if ($msg -match 'with itself|being used by another process') {
+            Write-Host "  skip $name (already present or locked)"
             return $false
         }
         throw
@@ -71,35 +91,38 @@ function Stage-Dll {
     }
 }
 
+function Stage-RuntimeDllsFrom {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+        [switch]$Recurse,
+        [switch]$ForceRefresh
+    )
+
+    foreach ($pattern in $RuntimePatterns) {
+        $items = if ($Recurse) {
+            Get-ChildItem -Path $Root -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue
+        } else {
+            Get-ChildItem -Path $Root -Filter $pattern -File -ErrorAction SilentlyContinue
+        }
+        foreach ($item in $items) {
+            Stage-Dll $item.FullName -ForceRefresh:$ForceRefresh
+        }
+    }
+}
+
 Write-Host "Staging runtime DLLs for cargo test (Windows)..."
 
-# 1. Root of target/debug — ort copy-dylibs landing zone on copy-fallback.
-Get-ChildItem -Path $TargetDebug -Filter "*.dll" -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.DirectoryName -ne $Deps } |
-    ForEach-Object {
-        Stage-Dll $_.FullName
-    }
+# 1. target/debug — ort copy-dylibs landing zone on copy-fallback.
+Stage-RuntimeDllsFrom -Root $TargetDebug -ForceRefresh
 
-# 2. Always refresh ort runtime DLLs — cached deps/ copies go stale across
-#    CI runs and Windows may fall back to System32\onnxruntime.dll (wrong version).
-foreach ($pattern in @('onnxruntime*.dll', 'DirectML.dll')) {
-    Get-ChildItem -Path $TargetDebug -Filter $pattern -File -ErrorAction SilentlyContinue |
-        ForEach-Object { Stage-Dll $_.FullName -ForceRefresh }
-}
-
-# 3. ort.pyke.io prebuilt bundle cache (DirectML + any bundled dylibs).
+# 2. ort.pyke.io prebuilt bundle cache (DirectML + any bundled dylibs).
 $OrtCacheRoot = Join-Path $env:LOCALAPPDATA "ort.pyke.io\dfbin\x86_64-pc-windows-msvc"
 if (Test-Path $OrtCacheRoot) {
-    Get-ChildItem -Path $OrtCacheRoot -Recurse -Filter "*.dll" -File | ForEach-Object {
-        Stage-Dll $_.FullName
-    }
-    foreach ($pattern in @('onnxruntime*.dll', 'DirectML.dll')) {
-        Get-ChildItem -Path $OrtCacheRoot -Recurse -Filter $pattern -File -ErrorAction SilentlyContinue |
-            ForEach-Object { Stage-Dll $_.FullName -ForceRefresh }
-    }
+    Stage-RuntimeDllsFrom -Root $OrtCacheRoot -Recurse -ForceRefresh
 }
 
-# 4. Build-script outputs (whisper-rs, other native deps) — best-effort.
+# 3. Build-script outputs (whisper-rs, other native deps) — best-effort.
 $BuildRoot = Join-Path $TargetDebug "build"
 if (Test-Path $BuildRoot) {
     Get-ChildItem -Path $BuildRoot -Recurse -Filter "*.dll" -File -ErrorAction SilentlyContinue | ForEach-Object {
