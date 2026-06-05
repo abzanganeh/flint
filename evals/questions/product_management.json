@@ -1,0 +1,186 @@
+{
+  "domain": "product_management",
+  "version": 1,
+  "questions": [
+    {
+      "id": "pm-t1-sense-001",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "How would you improve Google Maps for first-time visitors to a new city?"
+    },
+    {
+      "id": "pm-t1-sense-002",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "Design a product to help remote teams replace the value of unstructured hallway conversations."
+    },
+    {
+      "id": "pm-t1-sense-003",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "You are the PM for Instagram Stories. A competitor launches a feature that drives 30 percent more engagement. How do you respond?"
+    },
+    {
+      "id": "pm-t1-sense-004",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "Imagine you are the CPO of Zoom facing competition from Teams. What would you do in the next 90 days?"
+    },
+    {
+      "id": "pm-t1-sense-005",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "How would you redesign the YouTube subscription experience for power users?"
+    },
+    {
+      "id": "pm-t1-prio-001",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "You have three features competing for the next quarter and you can only ship one. Walk me through how you decide."
+    },
+    {
+      "id": "pm-t1-prio-002",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "Engineering says a feature you committed to will slip by six weeks. How do you handle the trade-off?"
+    },
+    {
+      "id": "pm-t1-prio-003",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "You have eight engineers and a roadmap that needs twelve. Where do you cut, and how do you communicate it?"
+    },
+    {
+      "id": "pm-t1-prio-004",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "Your top customer asks for a feature that 95 percent of users will never use. How do you respond?"
+    },
+    {
+      "id": "pm-t1-sense-006",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "Pick a product you use daily that you think is poorly designed. What would you change first, and why?"
+    },
+    {
+      "id": "pm-t1-sense-007",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "How would you measure the success of WhatsApp's voice messages feature?"
+    },
+    {
+      "id": "pm-t1-sense-008",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "How would you launch a new ride-sharing product in Mexico City?"
+    },
+    {
+      "id": "pm-t2-strat-001",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "Walk me through how you would define the north star metric for a B2B SaaS product."
+    },
+    {
+      "id": "pm-t2-strat-002",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "You inherit a product with declining engagement. What is your first 30 days?"
+    },
+    {
+      "id": "pm-t2-strat-003",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "A feature you shipped is performing below expectations. How do you decide whether to iterate or kill it?"
+    },
+    {
+      "id": "pm-t2-strat-004",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "How would you decide which customer feedback to act on and which to ignore?"
+    },
+    {
+      "id": "pm-t2-strat-005",
+      "domain": "product_management",
+      "category": "strategy",
+      "text": "How would you decide between building a feature in-house or buying a vendor solution?"
+    },
+    {
+      "id": "pm-t2-prio-001",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "Explain how you would apply RICE to a backlog of fifteen ideas."
+    },
+    {
+      "id": "pm-t2-prio-002",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "Walk me through how you balance bug fixes, technical debt, and new features in a quarterly plan."
+    },
+    {
+      "id": "pm-t2-prio-003",
+      "domain": "product_management",
+      "category": "prioritisation",
+      "text": "A senior leader pushes a pet feature into your roadmap with no data. How do you handle it?"
+    },
+    {
+      "id": "pm-t2-beh-001",
+      "domain": "product_management",
+      "category": "behavioural",
+      "text": "Tell me about a launch that failed. What did you take away from it?"
+    },
+    {
+      "id": "pm-t2-beh-002",
+      "domain": "product_management",
+      "category": "behavioural",
+      "text": "Tell me about a time you influenced a team without formal authority."
+    },
+    {
+      "id": "pm-t2-beh-003",
+      "domain": "product_management",
+      "category": "behavioural",
+      "text": "Describe a situation where you had to say no to an executive. How did you handle it?"
+    },
+    {
+      "id": "pm-t2-beh-004",
+      "domain": "product_management",
+      "category": "behavioural",
+      "text": "Tell me about a time you killed a feature because the data did not support it."
+    },
+    {
+      "id": "pm-t2-beh-005",
+      "domain": "product_management",
+      "category": "behavioural",
+      "text": "Describe a conflict between two engineering teams that you helped resolve."
+    },
+    {
+      "id": "pm-t3-tech-001",
+      "domain": "product_management",
+      "category": "technical",
+      "text": "What experiments would you run to test a new onboarding flow before committing engineering effort?"
+    },
+    {
+      "id": "pm-t3-tech-002",
+      "domain": "product_management",
+      "category": "technical",
+      "text": "How do you structure a written PRD so that engineering and design can build from it without scheduling another meeting?"
+    },
+    {
+      "id": "pm-t3-tech-003",
+      "domain": "product_management",
+      "category": "technical",
+      "text": "What is the difference between a leading and a lagging indicator? Give an example of each from a product you have shipped."
+    },
+    {
+      "id": "pm-t3-tech-004",
+      "domain": "product_management",
+      "category": "technical",
+      "text": "Walk me through how you would design an A/B test for a pricing change."
+    },
+    {
+      "id": "pm-t3-tech-005",
+      "domain": "product_management",
+      "category": "technical",
+      "text": "How do you keep your stakeholders informed without burying them in updates?"
+    }
+  ]
+}

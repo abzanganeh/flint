@@ -1,0 +1,246 @@
+{
+  "domain": "software_engineering",
+  "version": 1,
+  "questions": [
+    {
+      "id": "swe-t1-tech-001",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Explain the difference between processes and threads. When would you choose one over the other?"
+    },
+    {
+      "id": "swe-t1-tech-002",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Walk me through how a hash map works under the hood. What happens when there is a collision?"
+    },
+    {
+      "id": "swe-t1-tech-003",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "What is the difference between TCP and UDP? Give a real-world example where you would pick one over the other."
+    },
+    {
+      "id": "swe-t1-tech-004",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Compare optimistic and pessimistic concurrency control. When does each break down?"
+    },
+    {
+      "id": "swe-t1-tech-005",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Walk me through what happens, end to end, when a user types a URL into a browser and hits enter."
+    },
+    {
+      "id": "swe-t1-sd-001",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a URL shortener. Walk me through the data model, the read path, and how you would scale it to a billion URLs."
+    },
+    {
+      "id": "swe-t1-sd-002",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a real-time chat application. How would you handle message ordering, delivery guarantees, and offline users?"
+    },
+    {
+      "id": "swe-t1-sd-003",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a rate limiter for an API gateway. Compare token bucket, leaky bucket, and sliding window approaches."
+    },
+    {
+      "id": "swe-t1-sd-004",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design Twitter's home timeline. How do you handle fan-out for a celebrity with 100 million followers?"
+    },
+    {
+      "id": "swe-t1-sd-005",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a distributed key-value store with strong consistency. How does your design handle network partitions?"
+    },
+    {
+      "id": "swe-t1-sd-006",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a global content delivery network. How do you decide which edge node serves a given user?"
+    },
+    {
+      "id": "swe-t1-sd-007",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a notification service that can deliver push, email, and SMS at a rate of one million per minute."
+    },
+    {
+      "id": "swe-t1-sd-008",
+      "domain": "software_engineering",
+      "category": "system_design",
+      "text": "Design a payment system. What are the consistency and idempotency requirements, and how do you enforce them?"
+    },
+    {
+      "id": "swe-t1-tech-006",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Explain CAP theorem. Walk through a real system you have worked on and the trade-off it made."
+    },
+    {
+      "id": "swe-t1-tech-007",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Describe how an L1 cache, L2 cache, and main memory differ, and how that affects how you write performance-sensitive code."
+    },
+    {
+      "id": "swe-t2-tech-001",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Describe what happens when you call an async function in your language of choice. Where does the work actually run?"
+    },
+    {
+      "id": "swe-t2-tech-002",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Walk me through how you would design a retry policy for an HTTP client that talks to an external API."
+    },
+    {
+      "id": "swe-t2-tech-003",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "How do you decide between a microservice and a modular monolith for a new product team of five engineers?"
+    },
+    {
+      "id": "swe-t2-tech-004",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "What is the difference between unit, integration, and end-to-end tests? How do you decide what to cover at each level?"
+    },
+    {
+      "id": "swe-t2-tech-005",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "How would you debug a memory leak in a long-running service that you only see in production?"
+    },
+    {
+      "id": "swe-t2-tech-006",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Explain the difference between SQL transaction isolation levels. When would read committed cause a real bug?"
+    },
+    {
+      "id": "swe-t2-tech-007",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "How does HTTPS work under the hood? What does the TLS handshake actually do?"
+    },
+    {
+      "id": "swe-t2-tech-008",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Walk me through how you would migrate a 500-million-row table from one schema to another with zero downtime."
+    },
+    {
+      "id": "swe-t2-tech-009",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "What is the difference between idempotent and safe HTTP methods? When does it actually matter?"
+    },
+    {
+      "id": "swe-t2-tech-010",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Describe your approach to writing a code review that strengthens both the code and the author."
+    },
+    {
+      "id": "swe-t1-beh-001",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time you disagreed with a senior engineer on a technical decision. How did you handle it?"
+    },
+    {
+      "id": "swe-t1-beh-002",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a project where you had to ship under significant ambiguity. How did you decide what was good enough?"
+    },
+    {
+      "id": "swe-t1-beh-003",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time you made a technical decision that turned out to be wrong. What did you do about it?"
+    },
+    {
+      "id": "swe-t1-beh-004",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time you had to push back on a product manager's scope. What was the outcome?"
+    },
+    {
+      "id": "swe-t1-beh-005",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time you drove a project independently without being asked to. What was the impact?"
+    },
+    {
+      "id": "swe-t1-beh-006",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time you received critical feedback that was hard to hear. How did you respond?"
+    },
+    {
+      "id": "swe-t1-beh-007",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time a project missed its deadline. What did you change for the next one?"
+    },
+    {
+      "id": "swe-t1-beh-008",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a production incident you led the response to. What did you learn?"
+    },
+    {
+      "id": "swe-t2-beh-001",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Describe a situation where you had to work with a difficult teammate. How did you keep the project on track?"
+    },
+    {
+      "id": "swe-t2-beh-002",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "How do you prioritise when you have multiple urgent tasks from different stakeholders?"
+    },
+    {
+      "id": "swe-t2-beh-003",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Describe a time you mentored a junior engineer through a difficult problem. What approach did you take?"
+    },
+    {
+      "id": "swe-t2-beh-004",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Tell me about a time you had to learn a new technology on a tight deadline. How did you approach it?"
+    },
+    {
+      "id": "swe-t2-beh-005",
+      "domain": "software_engineering",
+      "category": "behavioural",
+      "text": "Describe how you have advocated for paying down technical debt when product wanted only features."
+    },
+    {
+      "id": "swe-t3-tech-001",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "What language do you reach for first for a new side project, and why?"
+    },
+    {
+      "id": "swe-t3-tech-002",
+      "domain": "software_engineering",
+      "category": "technical",
+      "text": "Walk me through your process for building a simple CRUD API from scratch."
+    }
+  ]
+}

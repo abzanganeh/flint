@@ -1,0 +1,156 @@
+{
+  "domain": "finance",
+  "version": 1,
+  "questions": [
+    {
+      "id": "fin-t1-tech-001",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Walk me through a DCF, including how you arrive at terminal value and what discount rate you use."
+    },
+    {
+      "id": "fin-t1-tech-002",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Walk me through the three financial statements and how they connect to one another."
+    },
+    {
+      "id": "fin-t1-tech-003",
+      "domain": "finance",
+      "category": "technical",
+      "text": "What is the difference between enterprise value and equity value? Show me the bridge between them."
+    },
+    {
+      "id": "fin-t1-tech-004",
+      "domain": "finance",
+      "category": "technical",
+      "text": "If depreciation increases by ten dollars and the tax rate is 30 percent, walk me through the impact on each of the three statements."
+    },
+    {
+      "id": "fin-t1-tech-005",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Which valuation methodology typically yields the highest value, and why?"
+    },
+    {
+      "id": "fin-t1-tech-006",
+      "domain": "finance",
+      "category": "technical",
+      "text": "When would you not use a DCF, and what would you use instead?"
+    },
+    {
+      "id": "fin-t1-tech-007",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Walk me through how a leveraged buyout works and what makes a good LBO candidate."
+    },
+    {
+      "id": "fin-t1-tech-008",
+      "domain": "finance",
+      "category": "technical",
+      "text": "A company issues 50 million dollars in debt to buy back stock. What happens to enterprise value and equity value?"
+    },
+    {
+      "id": "fin-t1-tech-009",
+      "domain": "finance",
+      "category": "technical",
+      "text": "How would you value a company that has no current revenue but a strong product?"
+    },
+    {
+      "id": "fin-t1-tech-010",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Explain WACC and walk me through how you would calculate it for a public company."
+    },
+    {
+      "id": "fin-t1-case-001",
+      "domain": "finance",
+      "category": "case",
+      "text": "A client is considering acquiring a competitor for 500 million dollars. How would you assess whether the price is fair?"
+    },
+    {
+      "id": "fin-t1-case-002",
+      "domain": "finance",
+      "category": "case",
+      "text": "A retail company wants to go public in 12 months. Walk me through the steps you would advise them to take."
+    },
+    {
+      "id": "fin-t1-case-003",
+      "domain": "finance",
+      "category": "case",
+      "text": "Two SaaS companies have identical revenue but different growth rates. How would the valuation multiples differ and why?"
+    },
+    {
+      "id": "fin-t1-beh-001",
+      "domain": "finance",
+      "category": "behavioural",
+      "text": "Why investment banking, and why this firm specifically?"
+    },
+    {
+      "id": "fin-t1-beh-002",
+      "domain": "finance",
+      "category": "behavioural",
+      "text": "Tell me about a time you had to deliver under extreme deadline pressure. What was your approach?"
+    },
+    {
+      "id": "fin-t1-beh-003",
+      "domain": "finance",
+      "category": "behavioural",
+      "text": "Walk me through your resume in two minutes."
+    },
+    {
+      "id": "fin-t2-tech-001",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Explain working capital and walk through how changes in receivables, payables, and inventory affect cash flow."
+    },
+    {
+      "id": "fin-t2-tech-002",
+      "domain": "finance",
+      "category": "technical",
+      "text": "What is the difference between accretive and dilutive M&A? How do you tell quickly in an interview setting?"
+    },
+    {
+      "id": "fin-t2-tech-003",
+      "domain": "finance",
+      "category": "technical",
+      "text": "Walk me through a comparable companies analysis. How do you decide which companies belong in the set?"
+    },
+    {
+      "id": "fin-t2-tech-004",
+      "domain": "finance",
+      "category": "technical",
+      "text": "What is the difference between LIFO and FIFO inventory accounting, and which one signals a more conservative balance sheet?"
+    },
+    {
+      "id": "fin-t2-case-001",
+      "domain": "finance",
+      "category": "case",
+      "text": "A private equity client is considering an investment in a regional grocery chain. What questions would you want answered before you advise?"
+    },
+    {
+      "id": "fin-t2-case-002",
+      "domain": "finance",
+      "category": "case",
+      "text": "Walk me through how you would structure a sell-side process for a profitable family-owned business."
+    },
+    {
+      "id": "fin-t2-beh-001",
+      "domain": "finance",
+      "category": "behavioural",
+      "text": "Describe a time you had to deliver bad news to a senior stakeholder."
+    },
+    {
+      "id": "fin-t2-beh-002",
+      "domain": "finance",
+      "category": "behavioural",
+      "text": "Tell me about a deal or transaction you followed closely. What made it interesting?"
+    },
+    {
+      "id": "fin-t3-tech-001",
+      "domain": "finance",
+      "category": "technical",
+      "text": "What does it mean when a company has negative working capital? Is that always bad?"
+    }
+  ]
+}

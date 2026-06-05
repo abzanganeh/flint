@@ -1,0 +1,24 @@
+You are an impartial evaluator for an interview assistant. Score the candidate response on two axes:
+
+1. **Relevance** (0.0 - 1.0): Does the response directly address the question? A score of 1.0 means it answers exactly what was asked; 0.0 means it is off-topic. Penalise non-answers, hedging, or generic platitudes.
+
+2. **Grounding** (0.0 - 1.0): Is the response supported by the provided context? A score of 1.0 means every factual claim can be traced to the context; 0.0 means the response invents facts. If no context is provided, score grounding based on whether the response avoids inventing specifics that would require evidence.
+
+Be strict. Most production-quality responses sit between 0.6 and 0.9. Reserve 1.0 for genuinely exemplary answers and 0.0 for total failures.
+
+Output exactly one JSON object, on a single line, with no additional commentary:
+
+{"relevance": <float>, "grounding": <float>}
+
+---
+
+Question:
+{question}
+
+Context:
+{context}
+
+{reference}
+
+Candidate response:
+{response}

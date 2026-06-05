@@ -1,0 +1,126 @@
+{
+  "domain": "operations",
+  "version": 1,
+  "questions": [
+    {
+      "id": "ops-t1-process-001",
+      "domain": "operations",
+      "category": "process",
+      "text": "Walk me through your first 30 days as an ops manager joining a company with a 12-point drop in on-time delivery."
+    },
+    {
+      "id": "ops-t1-process-002",
+      "domain": "operations",
+      "category": "process",
+      "text": "Tell me about a time you identified an operational bottleneck and resolved it. What metrics moved as a result?"
+    },
+    {
+      "id": "ops-t1-process-003",
+      "domain": "operations",
+      "category": "process",
+      "text": "How would you handle a major supply chain disruption that hits with no warning?"
+    },
+    {
+      "id": "ops-t1-process-004",
+      "domain": "operations",
+      "category": "process",
+      "text": "Walk me through your triage process when three urgent incidents land in your queue at the same time."
+    },
+    {
+      "id": "ops-t1-process-005",
+      "domain": "operations",
+      "category": "process",
+      "text": "How do you set the operating metrics that your team is measured against, and how often do you change them?"
+    },
+    {
+      "id": "ops-t1-process-006",
+      "domain": "operations",
+      "category": "process",
+      "text": "How would you approach reducing operating cost by 15 percent without harming customer experience?"
+    },
+    {
+      "id": "ops-t1-prob-001",
+      "domain": "operations",
+      "category": "problem_solving",
+      "text": "Walk me through how you apply root cause analysis. Use the 5 Whys or fishbone in real time."
+    },
+    {
+      "id": "ops-t1-prob-002",
+      "domain": "operations",
+      "category": "problem_solving",
+      "text": "A critical KPI is trending the wrong direction for three weeks. Walk me through how you would investigate."
+    },
+    {
+      "id": "ops-t1-prob-003",
+      "domain": "operations",
+      "category": "problem_solving",
+      "text": "Demand spikes 40 percent overnight. How do you manage the operational response?"
+    },
+    {
+      "id": "ops-t2-process-001",
+      "domain": "operations",
+      "category": "process",
+      "text": "Describe an SOP you wrote and rolled out. How did you make sure people actually followed it?"
+    },
+    {
+      "id": "ops-t2-process-002",
+      "domain": "operations",
+      "category": "process",
+      "text": "Walk me through how you would set up a daily standup for a 30-person operations team."
+    },
+    {
+      "id": "ops-t2-process-003",
+      "domain": "operations",
+      "category": "process",
+      "text": "How do you handle an underperformer on a critical shift?"
+    },
+    {
+      "id": "ops-t2-beh-001",
+      "domain": "operations",
+      "category": "behavioural",
+      "text": "Tell me about a time you resolved a conflict between two departments."
+    },
+    {
+      "id": "ops-t2-beh-002",
+      "domain": "operations",
+      "category": "behavioural",
+      "text": "Tell me about a process improvement you led. What was the before-after impact?"
+    },
+    {
+      "id": "ops-t2-beh-003",
+      "domain": "operations",
+      "category": "behavioural",
+      "text": "Describe a time you had to deliver bad operational news to a customer."
+    },
+    {
+      "id": "ops-t2-beh-004",
+      "domain": "operations",
+      "category": "behavioural",
+      "text": "Tell me about a time you cut costs without sacrificing quality."
+    },
+    {
+      "id": "ops-t2-beh-005",
+      "domain": "operations",
+      "category": "behavioural",
+      "text": "Describe a time you had to lead change through a team that resisted it."
+    },
+    {
+      "id": "ops-t3-tech-001",
+      "domain": "operations",
+      "category": "technical",
+      "text": "Explain inventory turnover and OTIF. What are healthy benchmarks in your industry?"
+    },
+    {
+      "id": "ops-t3-tech-002",
+      "domain": "operations",
+      "category": "technical",
+      "text": "Walk me through your approach to a Six Sigma DMAIC project on a real problem."
+    },
+    {
+      "id": "ops-t3-tech-003",
+      "domain": "operations",
+      "category": "technical",
+      "text": "What tools do you use to monitor operational health day to day, and what would you reach for first if a number looks wrong?"
+    }
+  ]
+}

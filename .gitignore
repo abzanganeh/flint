@@ -24,6 +24,12 @@ docs/
 # Rust
 src-tauri/target/
 src-tauri/.fastembed_cache/
+evals/target/
+
+# Eval transient outputs — baseline.json is committed, everything else is per-run noise.
+evals/results/*.json
+evals/results/*.md
+!evals/results/baseline.json
 
 # Whisper / other local model weights (downloaded at runtime)
 *.ggml
