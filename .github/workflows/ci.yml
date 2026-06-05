@@ -117,30 +117,16 @@ jobs:
         working-directory: src-tauri
         run: cargo test --tests --locked
 
-      # Windows: ort copy-dylibs skips deps/ when symlinks fail on GHA.
-      # Build all test binaries first, stage DLLs into deps/, then execute.
+      # Windows: ort's copy-dylibs never puts onnxruntime.dll under target/
+      # on GHA (no Developer Mode for symlinks, and download cache is external).
+      # We use ort's load-dynamic feature instead so the test binary has no PE
+      # import on onnxruntime.dll at startup; Embedder::new() returns Err when
+      # the DLL is absent/wrong-versioned, and all call-sites skip gracefully.
       - name: Run Rust tests (Windows)
         if: matrix.install == 'windows'
         working-directory: src-tauri
         shell: pwsh
         run: |
-          cargo test --lib --no-run --locked
-          cargo test --bin bench_gate --no-run --locked
-          cargo test --tests --no-run --locked
-
-          # ── Diagnose DLL layout before staging ─────────────────────────────
-          Write-Host "=== target\debug *.dll ==="
-          Get-ChildItem target\debug -Filter "*.dll" -File -ErrorAction SilentlyContinue |
-            Select-Object Name | Sort-Object Name | Format-Table -HideTableHeaders
-          Write-Host "=== target\debug\deps *.dll ==="
-          Get-ChildItem target\debug\deps -Filter "*.dll" -File -ErrorAction SilentlyContinue |
-            Select-Object Name | Sort-Object Name | Format-Table -HideTableHeaders
-          Write-Host "=== onnxruntime anywhere under target ==="
-          Get-ChildItem target -Recurse -Filter "onnxruntime*.dll" -File -ErrorAction SilentlyContinue |
-            Select-Object FullName | Format-Table -HideTableHeaders
-          # ────────────────────────────────────────────────────────────────────
-
-          . "$env:GITHUB_WORKSPACE/scripts/windows-prepare-tests.ps1"
           cargo test --lib --locked
           cargo test --bin bench_gate --locked
           cargo test --tests --locked
