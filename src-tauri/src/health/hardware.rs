@@ -303,6 +303,7 @@ fn read_vram_bytes(device: &std::path::Path) -> Option<u64> {
     None
 }
 
+#[cfg(target_os = "linux")]
 fn classify_pci_vendor(vendor: Option<u32>) -> (bool, bool) {
     match vendor {
         Some(0x10de) => (true, true),                                 // NVIDIA

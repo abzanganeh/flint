@@ -97,6 +97,13 @@ jobs:
         working-directory: src-tauri
         run: cargo build --all-targets --locked
 
+      # ort copy-dylibs skips deps/ when symlinks fail on Windows CI; stage
+      # DirectML + ONNX Runtime DLLs next to test executables before running.
+      - name: Stage runtime DLLs for tests (Windows)
+        if: matrix.install == 'windows'
+        shell: pwsh
+        run: ./scripts/windows-prepare-tests.ps1
+
       - name: cargo test --lib
         working-directory: src-tauri
         run: cargo test --lib --locked

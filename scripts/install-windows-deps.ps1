@@ -47,8 +47,10 @@ $env:LIBCLANG_PATH = "$llvmRoot\bin"
 Write-Host "LIBCLANG_PATH=$env:LIBCLANG_PATH"
 
 if ($env:GITHUB_ENV) {
+    # LIBCLANG_PATH is enough for bindgen at build time. Do NOT add LLVM\bin to
+    # GITHUB_PATH — at test runtime Windows may load the wrong libclang.dll from
+    # PATH and crash with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139).
     Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$env:LIBCLANG_PATH"
-    Add-Content -Path $env:GITHUB_PATH -Value "$llvmRoot\bin"
 }
 
 Write-Host "Windows dependencies installed. Verify with: cd src-tauri; cargo build"

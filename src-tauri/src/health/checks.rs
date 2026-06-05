@@ -539,6 +539,7 @@ fn blackhole_installed() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn command_succeeds(program: &str, args: &[&str]) -> bool {
     std::process::Command::new(program)
         .args(args)
