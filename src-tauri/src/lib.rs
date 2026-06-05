@@ -6,6 +6,7 @@ pub mod cost;
 pub mod digest;
 mod dto;
 mod events;
+pub mod flags;
 pub mod gdpr;
 mod health;
 mod hotkeys;
@@ -41,6 +42,22 @@ pub fn run() {
                 );
             }
             app.manage(app_state);
+
+            // Phase 7.6 — kick off a non-blocking flag refresh in the
+            // background. The compiled-in defaults are already loaded so
+            // the UI works immediately; this just upgrades to the latest
+            // remote values when Supabase responds.
+            let app_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(state) = app_handle.try_state::<state::AppState>() {
+                    if let Some(source) = flags::supabase_source_from_plugins(&state.plugins) {
+                        if let Err(e) = state.feature_flags.refresh_from(&source).await {
+                            tracing::warn!(error = %e, "initial feature flag refresh failed");
+                        }
+                    }
+                }
+            });
+
             hotkeys::register_hotkeys(app.handle());
             stealth::apply_capture_exclusion(app.handle());
             #[cfg(debug_assertions)]
@@ -95,6 +112,10 @@ pub fn run() {
             // Phase 7.5 — GDPR right-to-deletion + right-to-export
             commands::delete_account,
             commands::export_user_data,
+            // Phase 7.6 — feature flags
+            commands::is_feature_enabled,
+            commands::refresh_feature_flags,
+            commands::get_feature_flags_snapshot,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

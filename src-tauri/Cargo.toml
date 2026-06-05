@@ -87,6 +87,10 @@ path = "tests/integration/crash_recovery.rs"
 name = "gdpr"
 path = "tests/integration/gdpr.rs"
 
+[[test]]
+name = "feature_flags"
+path = "tests/integration/feature_flags.rs"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 7.3 benchmarks — measured against NFR targets in flint-performance.mdc.
 # Run with: cargo bench --bench <name>

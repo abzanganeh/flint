@@ -1492,3 +1492,62 @@ pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, Stri
     let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// 7.6 — Feature flag commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the evaluation context for the current request. Falls back to
+/// an anonymous user (nil UUID + Free plan) when no auth token is loaded
+/// so the UI can still gate features pre-login.
+async fn evaluation_context(state: &AppState) -> crate::flags::EvaluationContext {
+    if let Some(token) = state.auth_token().await {
+        if let Ok(user) = state.auth.get_current_user(&token).await {
+            return crate::flags::EvaluationContext {
+                user_id: user.id,
+                plan: user.plan,
+            };
+        }
+    }
+    crate::flags::EvaluationContext {
+        user_id: Uuid::nil(),
+        plan: crate::interfaces::auth::Plan::Free,
+    }
+}
+
+/// Evaluate a single feature flag for the currently authenticated user.
+///
+/// Reads from the in-memory cache that was either pulled from Supabase or
+/// loaded from disk on startup — no network call here, even on first hit.
+#[tauri::command]
+pub async fn is_feature_enabled(flag: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let ctx = evaluation_context(&state).await;
+    Ok(state.feature_flags.is_enabled(&flag, &ctx))
+}
+
+/// Trigger a refresh from the Supabase Edge Function. On failure the
+/// existing cache (or compiled defaults) stays authoritative — the error
+/// is returned to the caller for logging but is not fatal.
+#[tauri::command]
+pub async fn refresh_feature_flags(state: State<'_, AppState>) -> Result<(), String> {
+    let source = match crate::flags::supabase_source_from_plugins(&state.plugins) {
+        Some(s) => s,
+        None => return Err("Supabase plugin config is missing or malformed".to_string()),
+    };
+    state
+        .feature_flags
+        .refresh_from(&source)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Dev/debug helper: dump the currently active flag set and its provenance
+/// (remote / cache / defaults). Useful when a tester reports "I don't see
+/// the new panel" — `source = Defaults` tells you the device never reached
+/// Supabase.
+#[tauri::command]
+pub async fn get_feature_flags_snapshot(
+    state: State<'_, AppState>,
+) -> Result<crate::flags::ClientSnapshot, String> {
+    Ok(state.feature_flags.snapshot())
+}

@@ -14,7 +14,8 @@ pub struct User {
 }
 
 /// Subscription tier for feature gating.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Plan {
     Free,
     Premium,

@@ -345,3 +345,59 @@ export const deleteAccount = async (): Promise<DeleteAccountReport> =>
  * via the system share sheet).
  */
 export const exportUserData = (): Promise<string> => invoke<string>("export_user_data");
+
+// ── Phase 7.6 — Feature flags ────────────────────────────────────────────────
+
+export type FlagsOrigin = "remote" | "cache" | "defaults";
+
+export interface FeatureFlag {
+  name: string;
+  enabled: boolean;
+  allowed_plans: UserPlan[];
+  rollout_percentage: number;
+  ga: boolean;
+}
+
+export interface FeatureFlagsSnapshot {
+  origin: FlagsOrigin;
+  fetchedAt: string;
+  flagCount: number;
+  flags: FeatureFlag[];
+}
+
+interface RawFeatureFlagsSnapshot {
+  origin: FlagsOrigin;
+  fetched_at: string;
+  flag_count: number;
+  flags: FeatureFlag[];
+}
+
+const adaptSnapshot = (raw: RawFeatureFlagsSnapshot): FeatureFlagsSnapshot => ({
+  origin: raw.origin,
+  fetchedAt: raw.fetched_at,
+  flagCount: raw.flag_count,
+  flags: raw.flags,
+});
+
+/**
+ * Resolve a flag against the currently authenticated user's plan + a
+ * stable hash of their UUID. Pure read — never hits the network.
+ */
+export const isFeatureEnabled = (flag: string): Promise<boolean> =>
+  invoke<boolean>("is_feature_enabled", { flag });
+
+/**
+ * Pull the latest flag set from the Supabase `/flags` Edge Function and
+ * write it through to the local cache. Failures leave the previous flag
+ * set authoritative — caller can ignore the rejection.
+ */
+export const refreshFeatureFlags = (): Promise<void> =>
+  invoke<void>("refresh_feature_flags");
+
+/**
+ * Diagnostics: which source is currently authoritative (remote / cache /
+ * compiled defaults), when it was last fetched, and the full flag list.
+ * Useful for the dev dashboard and for "why is this flag off?" reports.
+ */
+export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =>
+  adaptSnapshot(await invoke<RawFeatureFlagsSnapshot>("get_feature_flags_snapshot"));
