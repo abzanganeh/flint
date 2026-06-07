@@ -114,6 +114,48 @@ pub struct SessionConfigDto {
     pub domain: String,
 }
 
+/// Company intelligence extracted from a job description by Smart Resume.
+///
+/// Optional — only present when Smart Resume successfully extracted signals
+/// (mission, values, culture) from the JD text before minting the handoff
+/// token.  Flint appends this as structured text to the session context so
+/// the digest LLM can surface employer values in `{interviewer_priorities}`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanyIntelBlock {
+    pub mission: String,
+    pub values: Vec<String>,
+    pub culture_notes: String,
+}
+
+impl CompanyIntelBlock {
+    /// True when none of the signal fields contain useful content.
+    pub fn is_empty(&self) -> bool {
+        self.mission.is_empty() && self.values.is_empty() && self.culture_notes.is_empty()
+    }
+
+    /// Format as a compact block for appending to the session context text.
+    ///
+    /// The block is structured so the digest LLM naturally picks up the
+    /// employer's values as candidate `key_skills` / `{interviewer_priorities}`.
+    pub fn render_for_context(&self) -> String {
+        let mut lines: Vec<String> = vec![
+            "--- COMPANY CONTEXT (from Smart Resume) ---".to_string(),
+        ];
+        if !self.mission.is_empty() {
+            lines.push(format!("Company Mission: {}", self.mission));
+        }
+        if !self.values.is_empty() {
+            lines.push(format!("Core Values: {}", self.values.join(", ")));
+        }
+        if !self.culture_notes.is_empty() {
+            lines.push(format!("Culture: {}", self.culture_notes));
+        }
+        lines.push("---".to_string());
+        lines.join("\n")
+    }
+}
+
 /// Payload redeemed from a Smart Resume handoff token (Strategy B Phase 1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +167,9 @@ pub struct SmartResumeImportDto {
     pub resume_summary: String,
     pub smart_resume_session_id: String,
     pub export_version: u32,
+    /// Company intelligence from Smart Resume — None when unavailable or empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub company_intel: Option<CompanyIntelBlock>,
 }
 
 /// Serialisable view of a [`Digest`] for React. All fields are editable on the
@@ -201,4 +246,50 @@ pub struct SessionSummaryDto {
     pub session_type: String,
     /// e.g. "software engineering" | "product management"
     pub domain: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn company_intel_block_is_empty_when_all_fields_blank() {
+        let block = CompanyIntelBlock::default();
+        assert!(block.is_empty());
+    }
+
+    #[test]
+    fn company_intel_block_not_empty_when_mission_set() {
+        let block = CompanyIntelBlock {
+            mission: "Build great products".to_string(),
+            ..Default::default()
+        };
+        assert!(!block.is_empty());
+    }
+
+    #[test]
+    fn render_for_context_includes_all_fields() {
+        let block = CompanyIntelBlock {
+            mission: "Empower teams".to_string(),
+            values: vec!["Bias for Action".to_string(), "Customer Obsession".to_string()],
+            culture_notes: "Fast-paced".to_string(),
+        };
+        let rendered = block.render_for_context();
+        assert!(rendered.contains("Company Mission: Empower teams"));
+        assert!(rendered.contains("Core Values: Bias for Action, Customer Obsession"));
+        assert!(rendered.contains("Culture: Fast-paced"));
+    }
+
+    #[test]
+    fn render_for_context_skips_empty_fields() {
+        let block = CompanyIntelBlock {
+            mission: String::new(),
+            values: vec!["Ownership".to_string()],
+            culture_notes: String::new(),
+        };
+        let rendered = block.render_for_context();
+        assert!(!rendered.contains("Company Mission:"));
+        assert!(rendered.contains("Core Values: Ownership"));
+        assert!(!rendered.contains("Culture:"));
+    }
 }
