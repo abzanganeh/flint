@@ -7,6 +7,7 @@ import {
   getLegalConsentAccepted,
   importFromSmartResume,
   setSessionState,
+  type CompanyIntelDto,
   type RecoveryOffer,
 } from "./commands";
 import { onSmartResumeImportToken } from "./events";
@@ -60,6 +61,19 @@ function Shell({ children, nav }: ShellProps) {
   );
 }
 
+function buildContextText(jdText: string, companyIntel?: CompanyIntelDto): string {
+  const parts = [jdText.trim()];
+  if (companyIntel) {
+    const block: string[] = ["--- COMPANY CONTEXT (from Smart Resume) ---"];
+    if (companyIntel.mission) block.push(`Company Mission: ${companyIntel.mission}`);
+    if (companyIntel.values.length > 0) block.push(`Core Values: ${companyIntel.values.join(", ")}`);
+    if (companyIntel.cultureNotes) block.push(`Culture: ${companyIntel.cultureNotes}`);
+    block.push("---");
+    parts.push(block.join("\n"));
+  }
+  return parts.filter(Boolean).join("\n\n");
+}
+
 function App() {
   const [screen, setScreen] = useState<AppScreen>("loading");
   const [onboardingStep, setOnboardingStep] = useState<"legal" | "auth">("legal");
@@ -83,7 +97,7 @@ function App() {
         name: result.sessionName,
         sessionType: result.sessionType,
         domain: result.domain,
-        contextText: result.jdText,
+        contextText: buildContextText(result.jdText, result.companyIntel),
         profileText: result.resumeSummary,
         smartResumeSessionId: result.smartResumeSessionId,
       });

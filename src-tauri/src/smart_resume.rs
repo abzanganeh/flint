@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dto::SmartResumeImportDto;
+use crate::dto::{CompanyIntelBlock, SmartResumeImportDto};
 
 const REDEEM_PATH: &str = "/api/flint/context";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -12,6 +12,16 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Debug, Serialize)]
 struct RedeemRequest {
     token: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct CompanyIntelResponse {
+    #[serde(default)]
+    mission: String,
+    #[serde(default)]
+    values: Vec<String>,
+    #[serde(default)]
+    culture_notes: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +33,9 @@ struct RedeemResponse {
     resume_summary: String,
     smart_resume_session_id: String,
     export_version: u32,
+    /// Present when Smart Resume extracted company signals from the JD.
+    #[serde(default)]
+    company_intel: Option<CompanyIntelResponse>,
 }
 
 fn base_url() -> Result<String, String> {
@@ -102,6 +115,19 @@ pub async fn redeem_handoff_token(token: &str) -> Result<SmartResumeImportDto, S
     let parsed: RedeemResponse = serde_json::from_str(&body)
         .map_err(|_| "Smart Resume returned an invalid response.".to_string())?;
 
+    let company_intel = parsed.company_intel.and_then(|ci| {
+        let block = CompanyIntelBlock {
+            mission: ci.mission,
+            values: ci.values,
+            culture_notes: ci.culture_notes,
+        };
+        if block.is_empty() {
+            None
+        } else {
+            Some(block)
+        }
+    });
+
     Ok(SmartResumeImportDto {
         session_name: parsed.session_name,
         session_type: parsed.session_type,
@@ -110,5 +136,6 @@ pub async fn redeem_handoff_token(token: &str) -> Result<SmartResumeImportDto, S
         resume_summary: parsed.resume_summary,
         smart_resume_session_id: parsed.smart_resume_session_id,
         export_version: parsed.export_version,
+        company_intel,
     })
 }

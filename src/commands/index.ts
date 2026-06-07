@@ -129,6 +129,12 @@ export interface SessionConfigDto {
   domain: string;
 }
 
+export interface CompanyIntelDto {
+  mission: string;
+  values: string[];
+  cultureNotes: string;
+}
+
 export interface SmartResumeImportDto {
   sessionName: string;
   sessionType: string;
@@ -137,6 +143,8 @@ export interface SmartResumeImportDto {
   resumeSummary: string;
   smartResumeSessionId: string;
   exportVersion: number;
+  /** Present when Smart Resume extracted company signals from the JD. */
+  companyIntel?: CompanyIntelDto;
 }
 
 export const importFromSmartResume = (
