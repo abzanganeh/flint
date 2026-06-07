@@ -138,6 +138,11 @@ impl CompanyIntelBlock {
     ///
     /// The block is structured so the digest LLM naturally picks up the
     /// employer's values as candidate `key_skills` / `{interviewer_priorities}`.
+    ///
+    /// NOTE: The equivalent formatting is duplicated in `buildContextText` in
+    /// `src/App.tsx`. Both must stay in sync if the block format changes.
+    /// Used directly by unit tests and available for any future Rust-side
+    /// context assembly path.
     pub fn render_for_context(&self) -> String {
         let mut lines: Vec<String> = vec![
             "--- COMPANY CONTEXT (from Smart Resume) ---".to_string(),
