@@ -121,7 +121,11 @@ pub async fn redeem_handoff_token(token: &str) -> Result<SmartResumeImportDto, S
             values: ci.values,
             culture_notes: ci.culture_notes,
         };
-        if block.is_empty() { None } else { Some(block) }
+        if block.is_empty() {
+            None
+        } else {
+            Some(block)
+        }
     });
 
     Ok(SmartResumeImportDto {

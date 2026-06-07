@@ -144,9 +144,8 @@ impl CompanyIntelBlock {
     /// Used directly by unit tests and available for any future Rust-side
     /// context assembly path.
     pub fn render_for_context(&self) -> String {
-        let mut lines: Vec<String> = vec![
-            "--- COMPANY CONTEXT (from Smart Resume) ---".to_string(),
-        ];
+        let mut lines: Vec<String> =
+            vec!["--- COMPANY CONTEXT (from Smart Resume) ---".to_string()];
         if !self.mission.is_empty() {
             lines.push(format!("Company Mission: {}", self.mission));
         }
@@ -276,7 +275,10 @@ mod tests {
     fn render_for_context_includes_all_fields() {
         let block = CompanyIntelBlock {
             mission: "Empower teams".to_string(),
-            values: vec!["Bias for Action".to_string(), "Customer Obsession".to_string()],
+            values: vec![
+                "Bias for Action".to_string(),
+                "Customer Obsession".to_string(),
+            ],
             culture_notes: "Fast-paced".to_string(),
         };
         let rendered = block.render_for_context();
