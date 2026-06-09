@@ -48,16 +48,21 @@ const DirectionalPanel = ({ sessionId }: DirectionalPanelProps) => {
   const confidenceLabel =
     confidenceLevel != null ? CONFIDENCE_LABEL[confidenceLevel] : null;
 
-  const handleTrigger = () => {
-    if (!lastManualQuestion.trim()) return;
-    clearBuffersForNewTurn();
-    void triggerResponse(lastManualQuestion, sessionId);
-  };
+  const pushNotification = useUIStore((s) => s.pushNotification);
 
-  const handleRephrase = () => {
+  const handleManualTurn = (rephrase: boolean) => {
     if (!lastManualQuestion.trim()) return;
     clearBuffersForNewTurn();
-    void rephraseResponse(lastManualQuestion, sessionId);
+    const action = rephrase
+      ? rephraseResponse(lastManualQuestion, sessionId)
+      : triggerResponse(lastManualQuestion, sessionId);
+    void action.catch((err: unknown) => {
+      pushNotification({
+        id: crypto.randomUUID(),
+        message: String(err),
+        level: "error",
+      });
+    });
   };
 
   return (
@@ -140,10 +145,13 @@ const DirectionalPanel = ({ sessionId }: DirectionalPanelProps) => {
             flexShrink: 0,
           }}
         >
-          <ActionButton label="Answer This" onClick={handleTrigger} />
+          <ActionButton
+            label="Answer This"
+            onClick={() => handleManualTurn(false)}
+          />
           <ActionButton
             label="Rephrase"
-            onClick={handleRephrase}
+            onClick={() => handleManualTurn(true)}
             secondary
           />
         </div>

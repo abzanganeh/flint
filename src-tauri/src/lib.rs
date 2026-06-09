@@ -56,6 +56,9 @@ fn init_tracing() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
+    // Load project-root `.env` for local dev (FLINT_SMART_RESUME_URL, Supabase, etc.).
+    let env_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.env");
+    let _ = dotenvy::from_path(env_path);
     let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -63,12 +66,15 @@ pub fn run() {
 
     #[cfg(desktop)]
     {
-        use tauri::Emitter;
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let mut got_import = false;
             for arg in args {
-                if let Some(token) = deep_link::parse_import_token(&arg) {
-                    let _ = app.emit("smart_resume_import_token", token);
+                if deep_link::emit_import_token_if_present(app, &arg) {
+                    got_import = true;
                 }
+            }
+            if got_import {
+                deep_link::present_main_window(app);
             }
         }));
     }
@@ -77,14 +83,38 @@ pub fn run() {
         .setup(|app| {
             #[cfg(any(windows, target_os = "linux"))]
             {
-                use tauri_plugin_deep_link::DeepLinkExt;
-                if let Err(e) = app.deep_link().register_all() {
-                    tracing::warn!(error = %e, "deep link scheme registration failed");
+                // Linux dev: `register_all()` overwrites xdg-mime to the raw binary, which
+                // loads http://localhost:1420 and breaks cold-start deep links when Vite is
+                // down. Use `npm run deeplink:register` (flint-deeplink-handler.sh) instead.
+                #[cfg(all(debug_assertions, target_os = "linux"))]
+                {
+                    tracing::info!(
+                        "skipping deep_link.register_all on Linux dev; use npm run deeplink:register"
+                    );
+                }
+                #[cfg(not(all(debug_assertions, target_os = "linux")))]
+                {
+                    use tauri_plugin_deep_link::DeepLinkExt;
+                    if let Err(e) = app.deep_link().register_all() {
+                        tracing::warn!(error = %e, "deep link scheme registration failed");
+                    }
                 }
             }
 
+            // Cold-start import tokens are now stored in AppState.pending_import_token
+            // (set during AppState::new from argv / FLINT_IMPORT_URL env var) so React
+            // can poll them after the WebView mounts. Nothing to emit here.
+
+            // Show a visible, centred window immediately — do not block on embedder init.
+            #[cfg(debug_assertions)]
+            stealth::configure_dev_window(app.handle());
+            #[cfg(not(debug_assertions))]
+            stealth::place_on_non_primary_monitor(app.handle());
+            deep_link::present_main_window(app.handle());
+
             health::hardware::assess_hardware();
             let app_state = state::AppState::new(app)?;
+            app_state.spawn_embedder_init();
             let restored = tauri::async_runtime::block_on(app_state.restore_auth_from_keychain());
             if restored {
                 emit_session_state_change(
@@ -113,10 +143,6 @@ pub fn run() {
 
             hotkeys::register_hotkeys(app.handle());
             stealth::apply_capture_exclusion(app.handle());
-            #[cfg(debug_assertions)]
-            stealth::configure_dev_window(app.handle());
-            #[cfg(not(debug_assertions))]
-            stealth::place_on_non_primary_monitor(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -133,14 +159,18 @@ pub fn run() {
             // Session design (Phase 2)
             commands::create_session,
             commands::ingest_context,
+            commands::abandon_session_draft,
             commands::confirm_digest,
             commands::get_digest,
             commands::import_from_smart_resume,
+            commands::get_pending_import_token,
             commands::get_session_context,
             commands::get_session_snapshot,
+            commands::restore_draft_session,
             commands::get_rehearsal_completed,
             commands::run_rehearsal_turn,
             commands::complete_rehearsal,
+            commands::return_to_session_design,
             // Live session (Phase 3+)
             commands::start_session,
             commands::stop_session,

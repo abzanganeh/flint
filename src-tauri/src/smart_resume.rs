@@ -39,11 +39,20 @@ struct RedeemResponse {
 }
 
 fn base_url() -> Result<String, String> {
-    std::env::var("FLINT_SMART_RESUME_URL")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "Smart Resume is not configured. Set FLINT_SMART_RESUME_URL.".to_string())
+    if let Ok(raw) = std::env::var("FLINT_SMART_RESUME_URL") {
+        let trimmed = raw.trim().trim_end_matches('/').to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        return Ok("http://localhost:8000".to_string());
+    }
+
+    #[cfg(not(debug_assertions))]
+    Err("Smart Resume is not configured. Set FLINT_SMART_RESUME_URL.".to_string())
 }
 
 fn validate_token(token: &str) -> Result<(), String> {

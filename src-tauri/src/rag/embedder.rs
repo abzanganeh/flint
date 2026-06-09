@@ -36,9 +36,27 @@ pub struct Embedder {
 impl Embedder {
     /// Load the `bge-small-en-v1.5` model. Blocks until the model is ready
     /// (download + ONNX load). Download is skipped when the cache is warm.
+    ///
+    /// Prefer [`Self::new_in_cache`] from app startup — fastembed defaults to a
+    /// cwd-relative `.fastembed_cache`, which breaks when the process cwd differs
+    /// from where tests or prior runs cached the model.
     pub fn new() -> Result<Self> {
+        Self::new_in_cache(Path::new(&get_cache_dir()))
+    }
+
+    /// Load (or download) the model into a stable cache directory.
+    pub fn new_in_cache(cache_dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(cache_dir).with_context(|| {
+            format!(
+                "failed to create embedding model cache at {}",
+                cache_dir.display()
+            )
+        })?;
+
         let model = TextEmbedding::try_new(
-            InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false),
+            InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_cache_dir(cache_dir.to_path_buf())
+                .with_show_download_progress(cfg!(debug_assertions)),
         )
         .context("failed to load bge-small-en-v1.5 embedding model")?;
 
@@ -57,19 +75,16 @@ impl Embedder {
     /// alive until every thread exits, so a timed-out download would hang CI
     /// even after all tests pass.
     pub fn new_if_cached() -> Option<Self> {
-        if !Self::is_bge_model_cached() {
+        let cache_dir = PathBuf::from(get_cache_dir());
+        if !Self::is_bge_model_cached_in(&cache_dir) {
             return None;
         }
-        Self::new().ok()
+        Self::new_in_cache(&cache_dir).ok()
     }
 
     /// HuggingFace hub cache layout for `Xenova/bge-small-en-v1.5`.
-    fn is_bge_model_cached() -> bool {
-        let cache = std::env::var("HF_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(get_cache_dir()));
-
-        snapshot_has_embedding_artifacts(&cache.join("models--Xenova--bge-small-en-v1.5"))
+    fn is_bge_model_cached_in(cache_dir: &Path) -> bool {
+        snapshot_has_embedding_artifacts(&cache_dir.join("models--Xenova--bge-small-en-v1.5"))
     }
 
     /// Embed a batch of texts in one ONNX inference pass. Prefer this over
@@ -157,6 +172,21 @@ mod tests {
     /// Downloads bge-small-en-v1.5 (~24 MB) on first run; subsequent runs
     /// use the local fastembed cache. Requires internet access on the first
     /// run only.
+    #[test]
+    fn test_new_in_cache_app_data_path() {
+        let cache = std::path::PathBuf::from(std::env::var("HOME").expect("HOME"))
+            .join(".local/share/com.flint.app/fastembed_cache");
+        if !snapshot_has_embedding_artifacts(&cache.join("models--Xenova--bge-small-en-v1.5")) {
+            eprintln!("SKIP: app-data embedder cache not present");
+            return;
+        }
+        let start = std::time::Instant::now();
+        let embedder = Embedder::new_in_cache(&cache).expect("new_in_cache from app data");
+        let embedding = embedder.embed_one("hello").expect("embed_one");
+        assert_eq!(embedding.len(), 384);
+        eprintln!("app-data cache load ms={}", start.elapsed().as_millis());
+    }
+
     #[test]
     fn test_embedding_dimensions() {
         let embedder = require_embedder!();

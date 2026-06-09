@@ -13,8 +13,11 @@ use tracing::{info, warn};
 
 use crate::events::{emit_hotkey_trigger, HotkeyTriggerPayload};
 
-const SHORTCUT_TRIGGER: &str = "Control+Alt";
-const SHORTCUT_PANIC: &str = "Control+Alt+Shift";
+// tauri-plugin-global-shortcut requires at least one non-modifier key.
+// Space is used as a neutral key that is unlikely to conflict with normal
+// typing, and the chord is short enough to press with one hand.
+const SHORTCUT_TRIGGER: &str = "Control+Alt+Space";
+const SHORTCUT_PANIC: &str = "Control+Alt+Shift+Space";
 
 /// Register all Flint global shortcuts.
 pub fn register_hotkeys<R: Runtime>(app: &AppHandle<R>) {

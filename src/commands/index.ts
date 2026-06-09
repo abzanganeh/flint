@@ -80,12 +80,22 @@ export const startSession = (sessionId: string): Promise<void> =>
 
 export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 
-export const triggerResponse = (
+/** Manual turn: rehearsal uses `run_rehearsal_turn`; live uses `trigger_response`. */
+export const triggerResponse = async (
   question: string,
   sessionId: string,
   rephrase?: boolean,
-): Promise<void> =>
-  invoke<void>("trigger_response", { question, sessionId, rephrase: rephrase ?? null });
+): Promise<void> => {
+  const snapshot = await getSessionSnapshot();
+  if (snapshot.state === "REHEARSING") {
+    return runRehearsalTurn(sessionId, question, rephrase);
+  }
+  return invoke<void>("trigger_response", {
+    question,
+    sessionId,
+    rephrase: rephrase ?? null,
+  });
+};
 
 export const cancelInference = (): Promise<void> =>
   invoke<void>("cancel_inference");
@@ -109,6 +119,12 @@ export const runRehearsalTurn = (
 
 export const completeRehearsal = (sessionId: string): Promise<void> =>
   invoke<void>("complete_rehearsal", { sessionId });
+
+/** Return to Session Design to edit pasted context (incl. company intel). */
+export const returnToSessionDesign = (
+  sessionId: string,
+): Promise<SessionSnapshotDto> =>
+  invoke<SessionSnapshotDto>("return_to_session_design", { sessionId });
 
 export const rephraseResponse = (
   question: string,
@@ -152,6 +168,14 @@ export const importFromSmartResume = (
 ): Promise<SmartResumeImportDto> =>
   invoke<SmartResumeImportDto>("import_from_smart_resume", { token });
 
+/**
+ * Return and clear the cold-start import token stored by Rust before the
+ * WebView mounted. Returns null if Flint was opened without a deep link, or
+ * after the first call. Used in bootstrap; warm-path uses the event listener.
+ */
+export const getPendingImportToken = (): Promise<string | null> =>
+  invoke<string | null>("get_pending_import_token");
+
 export interface DigestDto {
   role: string;
   company: string;
@@ -166,6 +190,10 @@ export interface SessionSnapshotDto {
   sessionId: string | null;
   state: string;
   digest: DigestDto | null;
+  name?: string;
+  sessionType?: string;
+  domain?: string;
+  contextText?: string;
 }
 
 /** Create a new session. Returns the session UUID string. */
@@ -175,6 +203,10 @@ export const createSession = (config: SessionConfigDto): Promise<string> =>
 /** Chunk, embed, and ingest context text; extract the digest. */
 export const ingestContext = (sessionId: string, text: string): Promise<void> =>
   invoke<void>("ingest_context", { sessionId, text });
+
+/** Discard in-progress session setup and return the state machine to IDLE. */
+export const abandonSessionDraft = (): Promise<void> =>
+  invoke<void>("abandon_session_draft");
 
 /** Accept the (possibly edited) digest and trigger pre-warming. */
 export const confirmDigest = (sessionId: string, digest: DigestDto): Promise<void> =>
@@ -191,6 +223,10 @@ export const getSessionContext = (sessionId: string): Promise<string> =>
 /** Return the full session state snapshot for React resync. */
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");
+
+/** Restore the most recent pre-live draft from SQLite (startup). */
+export const restoreDraftSession = (): Promise<boolean> =>
+  invoke<boolean>("restore_draft_session");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Phase 6 — crash recovery + post-session

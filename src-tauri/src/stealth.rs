@@ -217,8 +217,23 @@ pub fn configure_dev_window<R: Runtime>(app: &AppHandle<R>) {
         warn!(error = %e, "configure_dev_window: set_skip_taskbar failed");
     }
 
+    // Opaque backing store — a fully transparent window is invisible on many
+    // Wayland + NVIDIA setups (libEGL dri2 failures during dev).
+    if let Err(e) = window.set_background_color(Some(tauri::window::Color(0x12, 0x12, 0x16, 0xFF)))
+    {
+        warn!(error = %e, "configure_dev_window: set_background_color failed");
+    }
+
     place_on_primary_monitor_centred(&window);
-    info!("dev window: decorations on, centred on primary monitor");
+
+    if let Err(e) = window.show() {
+        warn!(error = %e, "configure_dev_window: show failed");
+    }
+    if let Err(e) = window.set_focus() {
+        warn!(error = %e, "configure_dev_window: set_focus failed");
+    }
+
+    info!("dev window: opaque shell, centred on primary monitor");
 }
 
 #[cfg(debug_assertions)]
