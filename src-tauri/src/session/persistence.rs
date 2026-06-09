@@ -27,6 +27,7 @@ use rusqlite::{params, OptionalExtension};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::digest::Digest;
 use crate::session::state::{SessionState, StatePersister};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -107,13 +108,24 @@ pub struct SessionRecoverySummary {
     pub last_chunk_timestamp_ms: Option<i64>,
 }
 
+/// Metadata for an in-progress session setup draft (pre-live).
+#[derive(Debug, Clone)]
+pub struct DraftSessionMetadata {
+    pub session_id: Uuid,
+    pub state: SessionState,
+    pub name: String,
+    pub session_type: String,
+    pub domain: String,
+    pub context_text: String,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Schema
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -206,6 +218,18 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v4")?;
         info!("sqlite schema migrated to version 4");
+    }
+
+    if current < 5 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN digest_json TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 5;
+            ",
+        )
+        .context("schema migration v5")?;
+        info!("sqlite schema migrated to version 5");
     }
 
     Ok(())
@@ -862,6 +886,88 @@ impl SessionPersistence {
             )
             .context("get session context")?;
         Ok(text)
+    }
+
+    /// Most recent pre-live draft session, if any.
+    pub fn find_draft_session(&self) -> Result<Option<Uuid>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let row: Option<String> = conn
+            .query_row(
+                "SELECT id FROM sessions
+                 WHERE state IN (
+                     'CONFIGURING', 'INGESTING', 'DIGEST_REVIEW',
+                     'PRE_WARMING', 'REHEARSING', 'READY'
+                 )
+                 ORDER BY updated_at DESC, rowid DESC
+                 LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("find draft session")?;
+
+        row.map(|s| Uuid::parse_str(&s).context("parse draft session uuid"))
+            .transpose()
+    }
+
+    /// Load session row metadata for draft resume / snapshot enrichment.
+    pub fn get_session_metadata(&self, session_id: Uuid) -> Result<DraftSessionMetadata> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let (state_str, name, session_type, domain, context_text): (
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT state, name, session_type, domain, context_text
+                 FROM sessions WHERE id = ?1",
+                params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .context("get session metadata")?;
+        Ok(DraftSessionMetadata {
+            session_id,
+            state: parse_session_state(&state_str)?,
+            name,
+            session_type,
+            domain,
+            context_text,
+        })
+    }
+
+    /// Persist extracted or user-edited digest JSON on the session row.
+    pub fn store_session_digest(&self, session_id: Uuid, digest: &Digest) -> Result<()> {
+        let json = serde_json::to_string(digest).context("serialize session digest")?;
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET digest_json = ?1 WHERE id = ?2",
+            params![json, sid],
+        )
+        .context("store session digest")?;
+        debug!(session_id = %session_id, "session digest stored");
+        Ok(())
+    }
+
+    /// Load persisted digest JSON, if any.
+    pub fn load_session_digest(&self, session_id: Uuid) -> Result<Option<Digest>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let json: String = conn
+            .query_row(
+                "SELECT digest_json FROM sessions WHERE id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .context("load session digest column")?;
+        if json.is_empty() {
+            return Ok(None);
+        }
+        let digest: Digest = serde_json::from_str(&json).context("deserialize session digest")?;
+        Ok(Some(digest))
     }
 
     /// Delete all persisted data for `session_id`.

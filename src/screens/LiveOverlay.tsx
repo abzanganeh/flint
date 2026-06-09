@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 import OverlayLayout from "../components/OverlayLayout";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
-import { startSession, stopSession } from "../commands";
+import { getSessionSnapshot, startSession, stopSession } from "../commands";
 import { onSessionStateChange } from "../events";
 import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
@@ -19,11 +19,15 @@ import { SessionState } from "../types";
 export interface LiveOverlayProps {
   sessionId: string;
   onEnded: () => void;
+  onReturnToSetup: () => void;
 }
 
-const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
+const START_TIMEOUT_MS = 45_000;
+
+const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) => {
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(true);
+  const [exiting, setExiting] = useState(false);
   const lastManualQuestion = useUIStore((s) => s.lastManualQuestion);
 
   useTokenUsage();
@@ -32,6 +36,13 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
 
   useEffect(() => {
     let active = true;
+    const timeoutId = window.setTimeout(() => {
+      if (!active) return;
+      setError(
+        "Live session is taking too long to start. Check audio/stealth health, then go back to setup.",
+      );
+      setStarting(false);
+    }, START_TIMEOUT_MS);
 
     void startSession(sessionId)
       .then(() => {
@@ -42,10 +53,14 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
           setError(String(e));
           setStarting(false);
         }
+      })
+      .finally(() => {
+        window.clearTimeout(timeoutId);
       });
 
     return () => {
       active = false;
+      window.clearTimeout(timeoutId);
     };
   }, [sessionId]);
 
@@ -65,14 +80,49 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
     };
   }, [onEnded]);
 
+  const handleReturnToSetup = async () => {
+    if (exiting) return;
+    setExiting(true);
+    setError(null);
+    try {
+      const snapshot = await getSessionSnapshot().catch(() => null);
+      if (snapshot?.state === SessionState.LIVE) {
+        await stopSession().catch(() => undefined);
+      }
+    } finally {
+      setExiting(false);
+    }
+    onReturnToSetup();
+  };
+
   const handleStop = () => {
     void stopSession().catch((e: unknown) => setError(String(e)));
   };
+
+  const toolbarButtonStyle = {
+    padding: "4px 12px",
+    fontSize: "11px",
+    fontWeight: 600,
+    borderRadius: 4,
+    border: "1px solid #374151",
+    backgroundColor: "transparent",
+    color: "#9ca3af",
+    cursor: "pointer",
+  } as const;
 
   if (starting) {
     return (
       <main className="app-loading" data-testid="live-overlay-loading">
         <p>Starting live session…</p>
+        <button
+          type="button"
+          data-testid="live-cancel-start-button"
+          disabled={exiting}
+          onClick={() => void handleReturnToSetup()}
+          style={{ ...toolbarButtonStyle, marginTop: 16 }}
+        >
+          {exiting ? "Leaving…" : "Cancel — back to setup"}
+        </button>
       </main>
     );
   }
@@ -95,6 +145,7 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
           padding: "6px 12px",
           borderBottom: "1px solid #1e2028",
           flexShrink: 0,
+          gap: 8,
         }}
       >
         <span
@@ -108,22 +159,24 @@ const LiveOverlay = ({ sessionId, onEnded }: LiveOverlayProps) => {
         >
           Live
         </span>
-        <button
-          data-testid="stop-session-button"
-          onClick={handleStop}
-          style={{
-            padding: "4px 12px",
-            fontSize: "11px",
-            fontWeight: 600,
-            borderRadius: 4,
-            border: "1px solid #374151",
-            backgroundColor: "transparent",
-            color: "#9ca3af",
-            cursor: "pointer",
-          }}
-        >
-          End Session
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            type="button"
+            data-testid="live-back-to-setup-button"
+            disabled={exiting}
+            onClick={() => void handleReturnToSetup()}
+            style={toolbarButtonStyle}
+          >
+            {exiting ? "Leaving…" : "Back to setup"}
+          </button>
+          <button
+            data-testid="stop-session-button"
+            onClick={handleStop}
+            style={toolbarButtonStyle}
+          >
+            End Session
+          </button>
+        </div>
       </div>
 
       {error && (

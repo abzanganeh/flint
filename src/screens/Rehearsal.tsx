@@ -19,9 +19,10 @@ import { useUIStore } from "../store/ui";
 export interface RehearsalProps {
   sessionId: string;
   onComplete: () => void;
+  onReturnToSetup?: () => void;
 }
 
-const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
+const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -109,6 +110,26 @@ const Rehearsal = ({ sessionId, onComplete }: RehearsalProps) => {
         <span style={{ color: "#6b7280", fontSize: "11px" }}>
           — practice before going live. Ctrl+Enter to ask; Enter for a new line.
         </span>
+        {onReturnToSetup && (
+          <button
+            type="button"
+            data-testid="rehearsal-back-to-setup-button"
+            onClick={onReturnToSetup}
+            style={{
+              marginLeft: "auto",
+              padding: "4px 10px",
+              fontSize: "11px",
+              fontWeight: 600,
+              borderRadius: 4,
+              border: "1px solid #374151",
+              backgroundColor: "transparent",
+              color: "#9ca3af",
+              cursor: "pointer",
+            }}
+          >
+            Edit session setup
+          </button>
+        )}
       </div>
 
       <div

@@ -2,11 +2,14 @@ import { useEffect, useRef, useState } from "react";
 
 import {
   createSession,
+  getSessionSnapshot,
   ingestContext,
   type SessionConfigDto,
 } from "../commands";
 import { onSessionStateChange } from "../events";
-import { SMART_RESUME_SESSION_ID_KEY } from "../lib/smartResumeImport";
+import SmartResumeLinkImport from "../components/SmartResumeLinkImport";
+import { buildContextText, hasCompanyIntel, loadPendingCompanyIntel, SMART_RESUME_SESSION_ID_KEY } from "../lib/smartResumeImport";
+import type { CompanyIntelDto } from "../commands";
 import { SessionState } from "../types";
 import "./SessionDesign.css";
 
@@ -52,6 +55,8 @@ export interface SessionPreFill {
   profileText?: string;
   /** Source Smart Resume session id (Phase 3 digest sync). */
   smartResumeSessionId?: string;
+  /** Company culture block from Smart Resume (shown separately from JD). */
+  companyIntel?: CompanyIntelDto;
 }
 
 export interface SessionDesignProps {
@@ -61,13 +66,25 @@ export interface SessionDesignProps {
   onViewSessions?: () => void;
   /** Pre-populate form fields (e.g. when cloning a past session). */
   preFill?: SessionPreFill;
+  /** Paste-import handoff when deep links do not launch Flint (common in dev). */
+  onImportFromSmartResume?: (token: string) => void;
+  importLoading?: boolean;
 }
 
-export default function SessionDesign({ onComplete, onViewSessions, preFill }: SessionDesignProps) {
+export default function SessionDesign({
+  onComplete,
+  onViewSessions,
+  preFill,
+  onImportFromSmartResume,
+  importLoading = false,
+}: SessionDesignProps) {
   const [name, setName] = useState(preFill?.name ?? "");
   const [sessionType, setSessionType] = useState(preFill?.sessionType ?? "interview");
   const [domain, setDomain] = useState(preFill?.domain ?? "software engineering");
   const [contextText, setContextText] = useState(preFill?.contextText ?? "");
+  const [companyIntel, setCompanyIntel] = useState<CompanyIntelDto | undefined>(
+    () => preFill?.companyIntel ?? loadPendingCompanyIntel(),
+  );
   const [profileText, setProfileText] = useState<string>(
     () => preFill?.profileText ?? localStorage.getItem(PROFILE_STORAGE_KEY) ?? "",
   );
@@ -78,9 +95,44 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
   const sessionIdRef = useRef<string | null>(null);
   // Stable ref to onComplete so we don't need it in the listener effect deps.
   const onCompleteRef = useRef(onComplete);
+  const preFillRef = useRef(preFill);
+  useEffect(() => {
+    preFillRef.current = preFill;
+  }, [preFill]);
   useEffect(() => {
     onCompleteRef.current = onComplete;
   }, [onComplete]);
+
+  // Smart Resume import owns the form — do not let SQLite draft restore overwrite it.
+  useEffect(() => {
+    if (!preFill) return;
+    if (preFill.smartResumeSessionId) {
+      sessionIdRef.current = null;
+    }
+    if (preFill.name) setName(preFill.name);
+    if (preFill.sessionType) setSessionType(preFill.sessionType);
+    if (preFill.domain) setDomain(preFill.domain);
+    if (preFill.contextText !== undefined) setContextText(preFill.contextText);
+    if (preFill.profileText !== undefined) setProfileText(preFill.profileText);
+    const intel = preFill.companyIntel ?? loadPendingCompanyIntel();
+    if (intel) setCompanyIntel(intel);
+  }, [preFill]);
+
+  // Re-anchor session id and form fields when resuming a draft from SQLite.
+  useEffect(() => {
+    void (async () => {
+      const snapshot = await getSessionSnapshot();
+      if (preFillRef.current?.smartResumeSessionId) return;
+      if (!snapshot.sessionId) return;
+      sessionIdRef.current = snapshot.sessionId;
+      if (snapshot.state === SessionState.CONFIGURING) {
+        if (snapshot.name) setName(snapshot.name);
+        if (snapshot.sessionType) setSessionType(snapshot.sessionType);
+        if (snapshot.domain) setDomain(snapshot.domain);
+        if (snapshot.contextText) setContextText(snapshot.contextText);
+      }
+    })();
+  }, []);
 
   // ── Listen to state-change events (state changes NEVER come from cmd results)
   useEffect(() => {
@@ -117,6 +169,7 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
   const handleExtract = async () => {
     const trimmedContext = contextText.trim();
     const trimmedProfile = profileText.trim();
+    const contextWithIntel = buildContextText(trimmedContext, companyIntel);
 
     if (!name.trim()) {
       setError("Please enter a session name.");
@@ -130,10 +183,11 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
     }
 
     setError(null);
+    setIsLoading(true);
 
     // Combine session context and user profile into a single text block that
     // the Rust digest extractor and RAG pipeline will embed together.
-    const parts: string[] = [`[SESSION CONTEXT]\n${trimmedContext}`];
+    const parts: string[] = [`[SESSION CONTEXT]\n${contextWithIntel}`];
     if (trimmedProfile.length > 0) {
       parts.push(`[YOUR PROFILE]\n${trimmedProfile}`);
     }
@@ -146,16 +200,22 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
         domain: domain.trim() || "general",
       };
 
-      // create_session transitions Idle → Configuring and returns the UUID.
-      const sid = await createSession(config);
-      sessionIdRef.current = sid;
+      let sid = sessionIdRef.current;
+      if (sid) {
+        const snapshot = await getSessionSnapshot();
+        if (
+          snapshot.state === SessionState.CONFIGURING &&
+          snapshot.sessionId === sid
+        ) {
+          await ingestContext(sid, combinedText);
+          return;
+        }
+      }
 
-      // Fire ingest_context — do not await for navigation; the DIGEST_REVIEW
-      // event drives that (task rule: all state changes come from events).
-      ingestContext(sid, combinedText).catch((err: unknown) => {
-        setIsLoading(false);
-        setError(String(err));
-      });
+      // create_session transitions Idle → Configuring and returns the UUID.
+      sid = await createSession(config);
+      sessionIdRef.current = sid;
+      await ingestContext(sid, combinedText);
     } catch (err: unknown) {
       setError(String(err));
       setIsLoading(false);
@@ -185,6 +245,13 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
           <h1>New Session</h1>
           <p>Paste your context and Flint will extract a digest to prepare for your session.</p>
         </div>
+
+        {onImportFromSmartResume && (
+          <SmartResumeLinkImport
+            disabled={importLoading || isLoading}
+            onImport={onImportFromSmartResume}
+          />
+        )}
 
         {/* Config row */}
         <div className="sd-field-row">
@@ -247,6 +314,24 @@ export default function SessionDesign({ onComplete, onViewSessions, preFill }: S
         </div>
 
         {/* Session context (JD / brief) */}
+        {companyIntel && hasCompanyIntel(companyIntel) && (
+          <div className="sd-company-intel" aria-label="Company culture from Smart Resume">
+            <div className="sd-context-label">
+              <label>Company culture</label>
+              <span className="sd-char-count sd-hint">From Smart Resume</span>
+            </div>
+            {companyIntel.mission && (
+              <p><strong>Mission:</strong> {companyIntel.mission}</p>
+            )}
+            {companyIntel.values.length > 0 && (
+              <p><strong>Values:</strong> {companyIntel.values.join(", ")}</p>
+            )}
+            {companyIntel.cultureNotes && (
+              <p><strong>Culture:</strong> {companyIntel.cultureNotes}</p>
+            )}
+          </div>
+        )}
+
         <div className="sd-field">
           <div className="sd-context-label">
             <label htmlFor="sd-context">Session context</label>

@@ -1,9 +1,13 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tauri::{App, Manager};
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+
+use crate::deep_link;
 use tokio::task::JoinHandle;
 
 use crate::audio::pipeline::DetectedQuestion;
@@ -78,8 +82,9 @@ pub struct AppState {
     /// Write-through SQLite persistence for state transitions, transcript
     /// chunks, and responses. WAL mode enforced at open time.
     pub persistence: Arc<SessionPersistence>,
-    /// bge-small-en-v1.5 embedder — initialised once at startup.
-    pub embedder: Arc<Embedder>,
+    /// bge-small-en-v1.5 embedder — loaded in the background so the UI can appear
+    /// before the ONNX model finishes downloading / initialising.
+    embedder: Arc<StdRwLock<Option<Arc<Embedder>>>>,
     /// sqlite-vec vector store. Isolated per session (separate virtual table
     /// per session UUID).
     pub vector_store: Arc<dyn VectorInterface>,
@@ -107,6 +112,15 @@ pub struct AppState {
     /// `commands::refresh_feature_flags`. Reads are lock-free-ish via
     /// `RwLock` so UI panels can call `is_feature_enabled` on every render.
     pub feature_flags: Arc<FeatureFlagClient>,
+
+    /// Stable ONNX embedding model cache (`<app_data>/fastembed_cache`).
+    embedder_cache_dir: PathBuf,
+
+    /// Pending Smart Resume import token captured at cold start before the
+    /// React WebView mounted. React polls this once via `get_pending_import_token`
+    /// and clears it. The warm path (second click, Flint already running) still
+    /// uses the `smart_resume_import_token` event emitted by `single_instance`.
+    pub pending_import_token: Mutex<Option<String>>,
 }
 
 impl AppState {
@@ -127,6 +141,28 @@ impl AppState {
         let persistence_path = data_dir.join("flint.db");
         let vec_db_path = data_dir.join("flint_vec.db");
         let flags_cache_path = cache_path_in(&data_dir);
+        let embedder_cache_dir = prepare_embedder_cache_dir(&data_dir);
+
+        // Capture a cold-start deep-link token before the React WebView mounts.
+        // React polls `get_pending_import_token` during bootstrap to pick this up.
+        let pending_import_token = {
+            let mut token: Option<String> = None;
+            for arg in std::env::args().skip(1) {
+                if let Some(t) = deep_link::parse_import_token(&arg) {
+                    token = Some(t);
+                    break;
+                }
+            }
+            if token.is_none() {
+                if let Ok(url) = std::env::var("FLINT_IMPORT_URL") {
+                    let trimmed = url.trim();
+                    if !trimmed.is_empty() {
+                        token = deep_link::parse_import_token(trimmed);
+                    }
+                }
+            }
+            Mutex::new(token)
+        };
 
         // ── Session persistence ──────────────────────────────────────────────
         let persistence = Arc::new(
@@ -148,15 +184,6 @@ impl AppState {
             .context("Failed to open vector store DB")?,
         );
 
-        // ── Embedder ─────────────────────────────────────────────────────────
-        // Embedder::new() downloads/loads the bge-small-en-v1.5 ONNX model.
-        // The model is cached locally after the first run; subsequent startups
-        // take < 1 s.
-        let embedder = Arc::new(
-            Embedder::new()
-                .context("Failed to initialise embedder — check network on first run")?,
-        );
-
         // ── State machine wired to persistence ───────────────────────────────
         let persister = Arc::clone(&persistence) as Arc<dyn crate::session::state::StatePersister>;
         let state_machine = Arc::new(Mutex::new(SessionStateMachine::with_persister(persister)));
@@ -170,7 +197,7 @@ impl AppState {
             session_digest: Arc::new(RwLock::new(None)),
             prewarm_cache: Arc::new(Mutex::new(PreWarmCache::new())),
             persistence,
-            embedder,
+            embedder: Arc::new(StdRwLock::new(None)),
             vector_store,
             llm: Arc::new(StubLLMProvider),
             live_tasks: Mutex::new(None),
@@ -178,7 +205,63 @@ impl AppState {
             rehearsal_turn: Mutex::new(0),
             cost_tracker: Arc::new(CostTracker::new()),
             feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
+            embedder_cache_dir,
+            pending_import_token,
         })
+    }
+
+    /// Shared embedder handle for commands and the orchestrator.
+    pub fn require_embedder(&self) -> Result<Arc<Embedder>, String> {
+        self.embedder
+            .read()
+            .map_err(|_| "Embedding model lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| {
+                "Embedding model is still loading — wait a few seconds and try again.".to_string()
+            })
+    }
+
+    /// Poll until the background embedder init finishes or `timeout` elapses.
+    pub async fn wait_for_embedder(&self, timeout: Duration) -> Result<Arc<Embedder>, String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(guard) = self.embedder.read() {
+                if let Some(model) = guard.clone() {
+                    return Ok(model);
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "Embedding model is still loading — wait a few seconds and try again."
+                        .to_string(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    /// Load the embedder on a background thread (first run may download the model).
+    pub fn spawn_embedder_init(&self) {
+        let slot = Arc::clone(&self.embedder);
+        let cache_dir = self.embedder_cache_dir.clone();
+        std::thread::Builder::new()
+            .name("embedder-init".into())
+            .spawn(move || {
+                tracing::info!(
+                    cache_dir = %cache_dir.display(),
+                    "embedder init started"
+                );
+                match Embedder::new_in_cache(&cache_dir) {
+                    Ok(model) => {
+                        *slot.write().expect("embedder lock poisoned") = Some(Arc::new(model));
+                        tracing::info!("embedder init complete");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "embedder init failed");
+                    }
+                }
+            })
+            .expect("spawn embedder-init thread");
     }
 
     // ── Auth helpers ─────────────────────────────────────────────────────────
@@ -198,4 +281,43 @@ impl AppState {
         self.set_auth_token(restored).await;
         logged_in
     }
+}
+
+/// Ensure `<app_data>/fastembed_cache` exists and migrate a dev-build cache
+/// from `src-tauri/.fastembed_cache` when present.
+fn prepare_embedder_cache_dir(data_dir: &Path) -> PathBuf {
+    let cache_dir = data_dir.join("fastembed_cache");
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let target_model = cache_dir.join("models--Xenova--bge-small-en-v1.5");
+    if !target_model.exists() {
+        let legacy_model = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".fastembed_cache/models--Xenova--bge-small-en-v1.5");
+        if legacy_model.exists() {
+            tracing::info!(
+                from = %legacy_model.display(),
+                to = %target_model.display(),
+                "migrating embedder model cache into app data directory"
+            );
+            if std::fs::rename(&legacy_model, &target_model).is_err() {
+                let _ = copy_dir_recursive(&legacy_model, &target_model);
+            }
+        }
+    }
+
+    cache_dir
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }

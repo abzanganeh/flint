@@ -1,17 +1,22 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
+  abandonSessionDraft,
   checkCrashRecovery,
   getCurrentUser,
   getLegalConsentAccepted,
+  getPendingImportToken,
+  getSessionSnapshot,
   importFromSmartResume,
-  setSessionState,
-  type CompanyIntelDto,
+  restoreDraftSession,
+  returnToSessionDesign,
+  stopSession,
   type RecoveryOffer,
+  type SessionSnapshotDto,
 } from "./commands";
 import { onSmartResumeImportToken } from "./events";
-import { parseFlintImportToken } from "./lib/smartResumeImport";
+import { parseFlintImportToken, buildContextText, persistCompanyIntel } from "./lib/smartResumeImport";
 import { SessionState } from "./types";
 import "./App.css";
 import DigestReview from "./screens/DigestReview";
@@ -61,17 +66,48 @@ function Shell({ children, nav }: ShellProps) {
   );
 }
 
-function buildContextText(jdText: string, companyIntel?: CompanyIntelDto): string {
-  const parts = [jdText.trim()];
-  if (companyIntel) {
-    const block: string[] = ["--- COMPANY CONTEXT (from Smart Resume) ---"];
-    if (companyIntel.mission) block.push(`Company Mission: ${companyIntel.mission}`);
-    if (companyIntel.values.length > 0) block.push(`Core Values: ${companyIntel.values.join(", ")}`);
-    if (companyIntel.cultureNotes) block.push(`Culture: ${companyIntel.cultureNotes}`);
-    block.push("---");
-    parts.push(block.join("\n"));
+function preFillFromSnapshot(snapshot: SessionSnapshotDto): SessionPreFill | null {
+  if (!snapshot.sessionId) return null;
+  return {
+    name: snapshot.name ?? "",
+    sessionType: snapshot.sessionType ?? "interview",
+    domain: snapshot.domain ?? "software engineering",
+    contextText: snapshot.contextText,
+  };
+}
+
+function screenForDraftState(state: string): AppScreen {
+  switch (state) {
+    case SessionState.CONFIGURING:
+    case SessionState.INGESTING:
+      return "session-design";
+    case SessionState.DIGEST_REVIEW:
+    case SessionState.PRE_WARMING:
+      return "digest-review";
+    case SessionState.REHEARSING:
+    case SessionState.READY:
+      return "rehearsal";
+    default:
+      return "session-design";
   }
-  return parts.filter(Boolean).join("\n\n");
+}
+
+function applyDraftSnapshot(
+  snapshot: SessionSnapshotDto,
+  setSessionId: (id: string | null) => void,
+  setSessionPreFill: (preFill: SessionPreFill | null) => void,
+  setScreen: (screen: AppScreen) => void,
+) {
+  if (!snapshot.sessionId || snapshot.state === SessionState.IDLE) {
+    setSessionId(null);
+    setSessionPreFill(null);
+    setScreen("session-design");
+    return;
+  }
+
+  setSessionId(snapshot.sessionId);
+  setSessionPreFill(preFillFromSnapshot(snapshot));
+  setScreen(screenForDraftState(snapshot.state));
 }
 
 function App() {
@@ -83,16 +119,37 @@ function App() {
   const [pendingImportToken, setPendingImportToken] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const importInFlightRef = useRef<string | null>(null);
+  const queuedTokenRef = useRef<string | null>(null);
 
   const queueImportToken = (token: string | null) => {
-    if (token) setPendingImportToken(token);
+    if (!token) return;
+    if (queuedTokenRef.current === token) return;
+    queuedTokenRef.current = token;
+    setPendingImportToken(token);
+    void (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        await win.unminimize();
+        await win.show();
+        await win.setFocus();
+      } catch {
+        // Not running inside the Tauri shell (e.g. vitest).
+      }
+    })();
   };
 
   const processSmartResumeImport = async (token: string) => {
+    if (importInFlightRef.current === token) return;
+    importInFlightRef.current = token;
     setImportLoading(true);
     setImportError(null);
     try {
+      await abandonSessionDraft().catch(() => undefined);
       const result = await importFromSmartResume(token);
+      persistCompanyIntel(result.companyIntel);
+      setSessionId(null);
       setSessionPreFill({
         name: result.sessionName,
         sessionType: result.sessionType,
@@ -100,13 +157,18 @@ function App() {
         contextText: buildContextText(result.jdText, result.companyIntel),
         profileText: result.resumeSummary,
         smartResumeSessionId: result.smartResumeSessionId,
+        companyIntel: result.companyIntel,
       });
       setScreen("session-design");
     } catch (err) {
       setImportError(String(err));
+      queuedTokenRef.current = null;
     } finally {
       setImportLoading(false);
       setPendingImportToken(null);
+      if (importInFlightRef.current === token) {
+        importInFlightRef.current = null;
+      }
     }
   };
 
@@ -175,11 +237,28 @@ function App() {
           return;
         }
 
+        let pendingImport = queuedTokenRef.current;
+        if (!pendingImport) {
+          // Poll the token Rust stored before the WebView mounted (cold start).
+          // getCurrent() from the deep-link plugin is unreliable on Linux with
+          // a custom handler script, so we use the stored AppState value.
+          const stored = await getPendingImportToken().catch(() => null);
+          if (stored) {
+            pendingImport = stored;
+            queueImportToken(stored);
+          }
+        }
+
+        if (pendingImport) {
+          await abandonSessionDraft().catch(() => undefined);
+        } else {
+          await restoreDraftSession().catch(() => false);
+        }
+
         const user = await getCurrentUser().catch(() => null);
         if (cancelled) return;
 
         if (user) {
-          await setSessionState(SessionState.IDLE);
           setScreen("health");
           return;
         }
@@ -200,11 +279,46 @@ function App() {
     };
   }, []);
 
+  const handleReturnToSessionDesign = async () => {
+    if (!sessionId) {
+      setScreen("session-design");
+      return;
+    }
+    try {
+      const snapshot = await getSessionSnapshot().catch(() => null);
+      if (snapshot?.state === SessionState.LIVE) {
+        await stopSession().catch(() => undefined);
+      }
+      const updated = await returnToSessionDesign(sessionId);
+      setSessionId(updated.sessionId);
+      setSessionPreFill(preFillFromSnapshot(updated));
+      setScreen("session-design");
+    } catch (err) {
+      const fallback = await getSessionSnapshot().catch(() => null);
+      if (fallback?.sessionId) {
+        setSessionId(fallback.sessionId);
+        setSessionPreFill(preFillFromSnapshot(fallback));
+      }
+      setImportError(String(err));
+      setScreen("session-design");
+    }
+  };
+
   // Nav items shown on setup/design screens.
   const designNav: NavItem[] = [
     {
       label: "New Session",
-      onClick: () => setScreen("session-design"),
+      onClick: () => {
+        void (async () => {
+          const snapshot = await getSessionSnapshot().catch(() => null);
+          if (snapshot && snapshot.state !== SessionState.IDLE) {
+            await abandonSessionDraft().catch(() => undefined);
+          }
+          setSessionId(null);
+          setSessionPreFill(null);
+          setScreen("session-design");
+        })();
+      },
       active: screen === "session-design",
     },
     {
@@ -232,6 +346,7 @@ function App() {
           setSessionId(null);
           setScreen("session-design");
         }}
+        onReturnToSetup={() => void handleReturnToSessionDesign()}
       />
     );
   }
@@ -255,9 +370,11 @@ function App() {
         <Recovery
           offer={recoveryOffer}
           onResume={() => {
-            setSessionId(recoveryOffer.sessionId);
-            setRecoveryOffer(null);
-            setScreen("live");
+            void (async () => {
+              const snapshot = await getSessionSnapshot();
+              applyDraftSnapshot(snapshot, setSessionId, setSessionPreFill, setScreen);
+              setRecoveryOffer(null);
+            })();
           }}
           onDiscard={() => {
             setRecoveryOffer(null);
@@ -271,7 +388,14 @@ function App() {
   if (screen === "health") {
     return (
       <Shell>
-        <HealthCheck onComplete={() => setScreen("session-design")} />
+        <HealthCheck
+          onComplete={() => {
+            void (async () => {
+              const snapshot = await getSessionSnapshot();
+              applyDraftSnapshot(snapshot, setSessionId, setSessionPreFill, setScreen);
+            })();
+          }}
+        />
       </Shell>
     );
   }
@@ -308,6 +432,8 @@ function App() {
           // initial values pick up the new data.
           key={sessionPreFill ? `${sessionPreFill.name}|${sessionPreFill.sessionType}` : "new"}
           preFill={sessionPreFill ?? undefined}
+          importLoading={importLoading}
+          onImportFromSmartResume={(token) => void processSmartResumeImport(token)}
           onComplete={(sid) => {
             setSessionPreFill(null);
             setSessionId(sid);
@@ -326,8 +452,12 @@ function App() {
           sessionId={sessionId}
           onComplete={() => setScreen("rehearsal")}
           onStartOver={() => {
-            setSessionId(null);
-            setScreen("session-design");
+            void abandonSessionDraft()
+              .catch(() => undefined)
+              .finally(() => {
+                setSessionId(null);
+                setScreen("session-design");
+              });
           }}
         />
       </Shell>
@@ -340,6 +470,7 @@ function App() {
         <Rehearsal
           sessionId={sessionId}
           onComplete={() => setScreen("live")}
+          onReturnToSetup={() => void handleReturnToSessionDesign()}
         />
       </Shell>
     );

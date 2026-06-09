@@ -1,0 +1,72 @@
+.sr-link-import {
+  margin-bottom: 0.25rem;
+  border: 1px solid rgba(99, 102, 241, 0.35);
+  border-radius: 10px;
+  background: rgba(99, 102, 241, 0.08);
+  overflow: hidden;
+}
+
+.sr-link-import-summary {
+  cursor: pointer;
+  padding: 0.75rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #c7d2fe;
+  list-style: none;
+}
+
+.sr-link-import-summary::-webkit-details-marker {
+  display: none;
+}
+
+.sr-link-import-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0 1rem 1rem;
+}
+
+.sr-link-import-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #a1a1aa;
+  line-height: 1.45;
+}
+
+.sr-link-import-input {
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.3);
+  color: #f4f4f5;
+  font-size: 0.85rem;
+  font-family: inherit;
+}
+
+.sr-link-import-input:focus {
+  outline: 2px solid rgba(99, 102, 241, 0.5);
+  outline-offset: 1px;
+}
+
+.sr-link-import-btn {
+  align-self: flex-start;
+  padding: 0.45rem 0.9rem;
+  border-radius: 8px;
+  border: none;
+  background: #4f46e5;
+  color: #fff;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sr-link-import-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sr-link-import-error {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #fca5a5;
+}

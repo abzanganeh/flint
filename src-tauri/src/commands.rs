@@ -27,6 +27,7 @@ use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
+use crate::session::draft;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
@@ -208,6 +209,66 @@ pub async fn run_health_check(
 // Session design commands (Phase 2)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// LLM for digest extraction: Groq when a key is in the keychain, else stub.
+fn llm_for_digest(state: &AppState) -> Arc<dyn LLMProvider> {
+    match keychain::get_api_key("groq") {
+        Ok(api_key) => match GroqProvider::new(api_key) {
+            Ok(provider) => Arc::new(provider),
+            Err(e) => {
+                warn!(error = %e, "Groq provider init failed for digest — using stub");
+                Arc::clone(&state.llm)
+            }
+        },
+        Err(_) => Arc::clone(&state.llm),
+    }
+}
+
+/// Discard an in-progress session setup and return to IDLE (Start Over).
+#[tauri::command]
+pub async fn abandon_session_draft(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let allowed = {
+        let machine = state.state_machine.lock().await;
+        matches!(
+            *machine.current(),
+            SessionState::Configuring
+                | SessionState::Ingesting
+                | SessionState::DigestReview
+                | SessionState::PreWarming
+                | SessionState::Rehearsing
+                | SessionState::Ready
+        )
+    };
+    if !allowed {
+        return Err(format!(
+            "Cannot abandon session draft from state {}",
+            state.state_machine.lock().await.current()
+        ));
+    }
+
+    let sid = {
+        let machine = state.state_machine.lock().await;
+        machine.session_id()
+    };
+
+    *state.session_digest.write().await = None;
+    *state.prewarm_cache.lock().await = PreWarmCache::new();
+    *state.rehearsal_turn.lock().await = 0;
+    if let Some(session_id) = sid {
+        if let Err(e) = state.persistence.clear_session(session_id) {
+            warn!(session_id = %session_id, error = %e, "failed to clear abandoned draft session");
+        }
+    }
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine.reset_to_idle();
+    }
+    emit_state(&app, SessionState::Idle);
+    Ok(())
+}
+
 /// Create a new session and transition the state machine to CONFIGURING.
 ///
 /// Returns the new `session_id` (UUID string) that the frontend must pass to
@@ -268,6 +329,17 @@ pub async fn create_session(
     Ok(session_id.to_string())
 }
 
+/// Roll back a failed ingest so Session Design can retry without creating a new session.
+async fn rollback_ingest_to_configuring(state: &AppState, app: &AppHandle) {
+    let mut machine = state.state_machine.lock().await;
+    if *machine.current() == SessionState::Ingesting {
+        match machine.transition(SessionState::Configuring) {
+            Ok(()) => emit_state(app, SessionState::Configuring),
+            Err(e) => warn!(error = %e, "failed to rollback INGESTING to CONFIGURING"),
+        }
+    }
+}
+
 /// Chunk, embed, and store context text; then extract the digest.
 ///
 /// Valid from: `CONFIGURING`.  
@@ -304,10 +376,7 @@ pub async fn ingest_context(
     // ── 1. Chunk ─────────────────────────────────────────────────────────────
     let raw_chunks = chunk_text(&text, 200, 50);
     if raw_chunks.is_empty() {
-        // Transition back to Configuring so the user can try again.
-        let mut machine = state.state_machine.lock().await;
-        let _ = machine.transition(SessionState::Configuring);
-        emit_state(&app, SessionState::Configuring);
+        rollback_ingest_to_configuring(&state, &app).await;
         return Err(
             "Context text is empty — please paste your job description or notes.".to_string(),
         );
@@ -318,60 +387,71 @@ pub async fn ingest_context(
         warn!(session_id = %sid, error = %e, "failed to store context text");
     }
 
-    // ── 2. Embed ─────────────────────────────────────────────────────────────
-    let refs: Vec<&str> = raw_chunks.iter().map(|s| s.as_str()).collect();
-    let embeddings = tokio::task::spawn_blocking({
-        let embedder = Arc::clone(&state.embedder);
-        let refs_owned: Vec<String> = raw_chunks.clone();
-        move || {
-            let refs: Vec<&str> = refs_owned.iter().map(|s| s.as_str()).collect();
+    let ingest_result: Result<(), String> = async {
+        // ── 2. Embed ─────────────────────────────────────────────────────────
+        let embedder = state
+            .wait_for_embedder(Duration::from_secs(120))
+            .await
+            .map_err(|e| format!("Embedding failed: {e}"))?;
+        let raw_chunks_owned = raw_chunks.clone();
+        let embeddings = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = raw_chunks_owned.iter().map(|s| s.as_str()).collect();
             embedder.embed_batch(&refs)
-        }
-    })
-    .await
-    .map_err(|e| format!("Embedder task panicked: {e}"))?
-    .map_err(|e| format!("Embedding failed: {e}"))?;
-
-    // ── 3. Build Chunk structs ────────────────────────────────────────────────
-    let chunks: Vec<Chunk> = refs
-        .iter()
-        .zip(embeddings)
-        .map(|(text, embedding)| Chunk {
-            id: Uuid::new_v4(),
-            text: text.to_string(),
-            embedding,
-            session_id: sid,
         })
-        .collect();
-
-    // ── 4. Ingest into vector store ───────────────────────────────────────────
-    state
-        .vector_store
-        .ingest(sid, chunks)
         .await
-        .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
+        .map_err(|e| format!("Embedder task panicked: {e}"))?
+        .map_err(|e| format!("Embedding failed: {e}"))?;
 
-    // ── 5. Extract digest via LLM ─────────────────────────────────────────────
-    let digest = extract_digest(&text, state.llm.as_ref())
-        .await
-        .map_err(|e| {
+        // ── 3. Build Chunk structs ───────────────────────────────────────────
+        let refs: Vec<&str> = raw_chunks.iter().map(|s| s.as_str()).collect();
+        let chunks: Vec<Chunk> = refs
+            .iter()
+            .zip(embeddings)
+            .map(|(text, embedding)| Chunk {
+                id: Uuid::new_v4(),
+                text: text.to_string(),
+                embedding,
+                session_id: sid,
+            })
+            .collect();
+
+        // ── 4. Ingest into vector store ──────────────────────────────────────
+        state
+            .vector_store
+            .ingest(sid, chunks)
+            .await
+            .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
+
+        // ── 5. Extract digest via LLM ────────────────────────────────────────
+        let llm = llm_for_digest(&state);
+        let digest = extract_digest(&text, llm.as_ref()).await.map_err(|e| {
             warn!(error = %e, "digest extraction failed");
             format!("Digest extraction failed — try rephrasing your context. ({e})")
         })?;
 
-    *state.session_digest.write().await = Some(digest);
+        *state.session_digest.write().await = Some(digest.clone());
+        if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
+            warn!(session_id = %sid, error = %e, "failed to persist session digest");
+        }
 
-    // ── 6. Transition → DIGEST_REVIEW ─────────────────────────────────────────
-    {
-        let mut machine = state.state_machine.lock().await;
-        machine
-            .transition(SessionState::DigestReview)
-            .map_err(session_error)?;
+        // ── 6. Transition → DIGEST_REVIEW ────────────────────────────────────
+        {
+            let mut machine = state.state_machine.lock().await;
+            machine
+                .transition(SessionState::DigestReview)
+                .map_err(session_error)?;
+        }
+        emit_state(&app, SessionState::DigestReview);
+
+        info!(session_id = %sid, chunks = raw_chunks.len(), "context ingested");
+        Ok(())
     }
-    emit_state(&app, SessionState::DigestReview);
+    .await;
 
-    info!(session_id = %sid, chunks = raw_chunks.len(), "context ingested");
-    Ok(())
+    if ingest_result.is_err() {
+        rollback_ingest_to_configuring(&state, &app).await;
+    }
+    ingest_result
 }
 
 /// Accept the (possibly edited) digest and trigger pre-warming.
@@ -400,6 +480,9 @@ pub async fn confirm_digest(
     // Store the user-edited digest.
     let digest_rust = crate::digest::Digest::from(digest);
     *state.session_digest.write().await = Some(digest_rust.clone());
+    if let Err(e) = state.persistence.store_session_digest(sid, &digest_rust) {
+        warn!(session_id = %sid, error = %e, "failed to persist confirmed digest");
+    }
 
     // Transition → PRE_WARMING.
     {
@@ -414,7 +497,7 @@ pub async fn confirm_digest(
     // `run_prewarm` via `tokio::spawn`; the blocking `embed_batch` is
     // dispatched via `spawn_blocking` internally — no extra wrapping needed.
     let llm = Arc::clone(&state.llm);
-    let embedder = Arc::clone(&state.embedder);
+    let embedder = state.require_embedder()?;
     let cache = Arc::clone(&state.prewarm_cache);
 
     if let Err(e) = run_prewarm(&digest_rust, llm, embedder, cache).await {
@@ -493,6 +576,17 @@ pub async fn import_from_smart_resume(token: String) -> Result<SmartResumeImport
     }
 }
 
+/// Return and clear the import token stored at cold start.
+///
+/// Called once by React during bootstrap. Returns `None` after the first call
+/// or when no token was present (cold start without a deep link).
+#[tauri::command]
+pub async fn get_pending_import_token(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    Ok(state.pending_import_token.lock().await.take())
+}
+
 /// Return the full current state snapshot for React resync.
 ///
 /// Called after window focus is regained, app resume, or any missed event.
@@ -505,18 +599,49 @@ pub async fn get_session_snapshot(
     let current_state = machine.current().as_str().to_string();
     drop(machine);
 
-    let digest = state
-        .session_digest
-        .read()
-        .await
-        .as_ref()
-        .map(|d| DigestDto::from(d.clone()));
+    let digest = {
+        let mem = state.session_digest.read().await.clone();
+        if mem.is_some() {
+            mem.map(DigestDto::from)
+        } else if let Some(sid) = session_id {
+            state
+                .persistence
+                .load_session_digest(sid)
+                .map_err(|e| e.to_string())?
+                .map(DigestDto::from)
+        } else {
+            None
+        }
+    };
+
+    let resume_meta = session_id.and_then(|sid| state.persistence.get_session_metadata(sid).ok());
 
     Ok(SessionSnapshotDto {
         session_id,
         state: current_state,
         digest,
+        name: resume_meta.as_ref().map(|m| m.name.clone()),
+        session_type: resume_meta.as_ref().map(|m| m.session_type.clone()),
+        domain: resume_meta.as_ref().map(|m| m.domain.clone()),
+        context_text: resume_meta
+            .as_ref()
+            .filter(|m| !m.context_text.is_empty())
+            .map(|m| m.context_text.clone()),
     })
+}
+
+/// Re-anchor the state machine to the most recent pre-live draft in SQLite.
+///
+/// Called once at startup (after crash recovery check). Returns `true` when a
+/// draft was restored.
+#[tauri::command]
+pub async fn restore_draft_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    draft::restore_draft_session(&app, &state)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -678,7 +803,7 @@ pub async fn run_rehearsal_turn(
         Arc::new(digest),
         prompts_base_dir(),
         failover,
-        Arc::clone(&state.embedder),
+        state.require_embedder()?,
         Arc::clone(&state.vector_store),
         Arc::clone(&state.prewarm_cache),
         memory,
@@ -726,6 +851,52 @@ pub async fn complete_rehearsal(
 
     info!(session_id = %session_id, "rehearsal completed");
     Ok(())
+}
+
+/// Leave live/rehearsal and return to Session Design to edit pasted context.
+///
+/// Valid from: `REHEARSING`, `READY`, `CONFIGURING`, or `ENDED` (after stop).
+/// Call `stop_session` first when the machine is in `LIVE`.
+#[tauri::command]
+pub async fn return_to_session_design(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionSnapshotDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    let current = {
+        let machine = state.state_machine.lock().await;
+        *machine.current()
+    };
+
+    match current {
+        SessionState::Rehearsing | SessionState::Ready | SessionState::Ended => {
+            let mut machine = state.state_machine.lock().await;
+            machine
+                .transition(SessionState::Configuring)
+                .map_err(session_error)?;
+            emit_state(&app, SessionState::Configuring);
+        }
+        SessionState::Configuring => {}
+        SessionState::Live => {
+            return Err(
+                "Session is still live — end the session first, then return to setup.".to_string(),
+            );
+        }
+        other => {
+            return Err(format!(
+                "Cannot return to session design from {} (current session {})",
+                other, session_id
+            ));
+        }
+    }
+
+    if let Ok(Some(digest)) = state.persistence.load_session_digest(sid) {
+        *state.session_digest.write().await = Some(digest);
+    }
+
+    get_session_snapshot(state).await
 }
 
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
@@ -844,7 +1015,7 @@ pub async fn start_session(
         digest: Arc::new(digest),
         prompts_dir: prompts_base_dir(),
         failover: Arc::clone(&failover),
-        embedder: Arc::clone(&state.embedder),
+        embedder: state.require_embedder()?,
         vector_store: Arc::clone(&state.vector_store),
         prewarm_cache: Arc::clone(&state.prewarm_cache),
         memory,

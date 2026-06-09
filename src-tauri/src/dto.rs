@@ -227,6 +227,14 @@ pub struct SessionSnapshotDto {
     /// Canonical SCREAMING_SNAKE_CASE state name (matches `session_state_change` event).
     pub state: String,
     pub digest: Option<DigestDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_text: Option<String>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

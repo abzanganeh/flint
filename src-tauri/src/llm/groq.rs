@@ -70,6 +70,21 @@ struct StreamChunk {
     choices: Vec<StreamChoice>,
 }
 
+#[derive(Debug, Deserialize)]
+struct NonStreamMessage {
+    content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NonStreamChoice {
+    message: NonStreamMessage,
+}
+
+#[derive(Debug, Deserialize)]
+struct NonStreamCompletion {
+    choices: Vec<NonStreamChoice>,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Provider
 // ──────────────────────────────────────────────────────────────────────────────
@@ -202,6 +217,23 @@ impl LLMProvider for GroqProvider {
             );
         }
 
+        // Digest extraction and other one-shot callers use stream=false, which
+        // returns a plain JSON body — not SSE `data:` lines.
+        if !config.stream {
+            let completion: NonStreamCompletion = response
+                .json()
+                .await
+                .context("Groq non-streaming response decode failed")?;
+            let content = completion
+                .choices
+                .into_iter()
+                .next()
+                .and_then(|c| c.message.content)
+                .unwrap_or_default();
+            let stream = futures::stream::once(async move { Ok(content) });
+            return Ok(Box::pin(stream));
+        }
+
         // Wrap the byte stream as an SSE line stream.
         let byte_stream = response.bytes_stream();
         let line_stream = byte_stream
@@ -259,6 +291,20 @@ impl LLMProvider for GroqProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_non_stream_completion_json() {
+        let body =
+            r#"{"choices":[{"message":{"role":"assistant","content":"{\"role\":\"Engineer\"}"}}]}"#;
+        let completion: NonStreamCompletion = serde_json::from_str(body).unwrap();
+        let content = completion
+            .choices
+            .into_iter()
+            .next()
+            .and_then(|c| c.message.content)
+            .unwrap_or_default();
+        assert!(content.contains("Engineer"));
+    }
 
     #[test]
     fn parse_sse_line_extracts_token() {

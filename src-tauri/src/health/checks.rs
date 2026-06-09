@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::health::hardware::{self, WhisperModel};
 use crate::keychain;
+use crate::supabase::resolve_supabase_config;
 
 const OLLAMA_HEALTH_URL: &str = "http://localhost:11434/api/tags";
 const OLLAMA_TIMEOUT_SECS: u64 = 2;
@@ -59,7 +60,7 @@ pub async fn run_health_check(
     plugins: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<HealthCheckResult> {
     let profile = hardware::assess_hardware();
-    let supabase_url = supabase_url_from_plugins(plugins);
+    let supabase_url = resolve_supabase_config(plugins).map(|cfg| cfg.url);
 
     vec![
         check_microphone_access(),
@@ -110,17 +111,6 @@ fn fail(
         message: message.into(),
         fix_instruction: Some(fix.into()),
     }
-}
-
-fn supabase_url_from_plugins(
-    plugins: &std::collections::HashMap<String, serde_json::Value>,
-) -> Option<String> {
-    plugins
-        .get("supabase")?
-        .get("url")?
-        .as_str()
-        .map(|url| url.trim_end_matches('/').to_string())
-        .filter(|url| !url.is_empty())
 }
 
 fn check_microphone_access() -> HealthCheckResult {
@@ -364,10 +354,12 @@ fn check_os_keychain() -> HealthCheckResult {
     let provider = KEYCHAIN_PROBE_PROVIDER;
 
     if keychain::store_api_key(provider, probe.clone()).is_err() {
-        return fail(
-            HealthCheck::OsKeychain,
-            "Could not write to the OS keychain.",
-            "Grant Flint access to the system credential store, then retry. On Linux, unlock your login keyring.",
+        return keychain_probe_failure_or_warn(
+            fail(
+                HealthCheck::OsKeychain,
+                "Could not write to the OS keychain.",
+                "Grant Flint access to the system credential store, then retry. On Linux, unlock your login keyring.",
+            ),
         );
     }
 
@@ -375,28 +367,47 @@ fn check_os_keychain() -> HealthCheckResult {
         Ok(value) => value,
         Err(_) => {
             let _ = keychain::delete_api_key(provider);
-            return fail(
+            return keychain_probe_failure_or_warn(fail(
                 HealthCheck::OsKeychain,
                 "Could not read from the OS keychain.",
                 "Unlock your system keyring and retry. On Linux, ensure Secret Service (GNOME Keyring) is running.",
-            );
+            ));
         }
     };
 
     let _ = keychain::delete_api_key(provider);
 
     if read_back.expose_secret() != "flint-health-probe" {
-        return fail(
+        return keychain_probe_failure_or_warn(fail(
             HealthCheck::OsKeychain,
             "OS keychain round-trip returned unexpected data.",
             "Retry the health check. If this persists, restart the system credential service.",
-        );
+        ));
     }
 
     pass(
         HealthCheck::OsKeychain,
         "OS keychain read/write test passed.",
     )
+}
+
+/// When the round-trip probe fails but existing Flint credentials are readable
+/// (common on Linux when the login keyring is locked for writes), downgrade to
+/// a warning so dev sessions are not blocked.
+fn keychain_probe_failure_or_warn(result: HealthCheckResult) -> HealthCheckResult {
+    if result.status != CheckStatus::Fail {
+        return result;
+    }
+    if keychain::get_auth_token().is_ok() {
+        return warn(
+            HealthCheck::OsKeychain,
+            "Keychain probe failed, but existing Flint credentials are readable.",
+            result.fix_instruction.unwrap_or_else(|| {
+                "Unlock your login keyring if you need to store new API keys.".into()
+            }),
+        );
+    }
+    result
 }
 
 fn check_local_sqlite() -> HealthCheckResult {
@@ -437,7 +448,7 @@ async fn check_supabase_connection(supabase_url: Option<&str>) -> HealthCheckRes
         return fail(
             HealthCheck::SupabaseConnection,
             "Supabase URL is not configured.",
-            "Set plugins.supabase.url in tauri.conf.json (or your deployment config) to your Supabase project URL.",
+            "Export FLINT_SUPABASE_URL and FLINT_SUPABASE_ANON_KEY before `npm run tauri dev`, or set plugins.supabase in tauri.conf.json.",
         );
     };
 
