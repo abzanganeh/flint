@@ -27,8 +27,8 @@ use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
-use crate::session::memory::ConversationMemory;
 use crate::session::draft;
+use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
@@ -225,7 +225,10 @@ fn llm_for_digest(state: &AppState) -> Arc<dyn LLMProvider> {
 
 /// Discard an in-progress session setup and return to IDLE (Start Over).
 #[tauri::command]
-pub async fn abandon_session_draft(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn abandon_session_draft(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     let allowed = {
         let machine = state.state_machine.lock().await;
         matches!(
@@ -421,12 +424,10 @@ pub async fn ingest_context(
 
         // ── 5. Extract digest via LLM ────────────────────────────────────────
         let llm = llm_for_digest(&state);
-        let digest = extract_digest(&text, llm.as_ref())
-            .await
-            .map_err(|e| {
-                warn!(error = %e, "digest extraction failed");
-                format!("Digest extraction failed — try rephrasing your context. ({e})")
-            })?;
+        let digest = extract_digest(&text, llm.as_ref()).await.map_err(|e| {
+            warn!(error = %e, "digest extraction failed");
+            format!("Digest extraction failed — try rephrasing your context. ({e})")
+        })?;
 
         *state.session_digest.write().await = Some(digest.clone());
         if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
@@ -613,8 +614,7 @@ pub async fn get_session_snapshot(
         }
     };
 
-    let resume_meta = session_id
-        .and_then(|sid| state.persistence.get_session_metadata(sid).ok());
+    let resume_meta = session_id.and_then(|sid| state.persistence.get_session_metadata(sid).ok());
 
     Ok(SessionSnapshotDto {
         session_id,

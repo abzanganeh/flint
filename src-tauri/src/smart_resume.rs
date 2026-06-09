@@ -48,7 +48,7 @@ fn base_url() -> Result<String, String> {
 
     #[cfg(debug_assertions)]
     {
-        return Ok("http://localhost:8000".to_string());
+        Ok("http://localhost:8000".to_string())
     }
 
     #[cfg(not(debug_assertions))]

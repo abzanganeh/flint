@@ -925,15 +925,7 @@ impl SessionPersistence {
                 "SELECT state, name, session_type, domain, context_text
                  FROM sessions WHERE id = ?1",
                 params![sid],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                    ))
-                },
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .context("get session metadata")?;
         Ok(DraftSessionMetadata {
@@ -974,8 +966,7 @@ impl SessionPersistence {
         if json.is_empty() {
             return Ok(None);
         }
-        let digest: Digest =
-            serde_json::from_str(&json).context("deserialize session digest")?;
+        let digest: Digest = serde_json::from_str(&json).context("deserialize session digest")?;
         Ok(Some(digest))
     }
 

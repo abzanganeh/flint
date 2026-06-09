@@ -113,8 +113,10 @@ mod tests {
     fn find_draft_session_ignores_ended_sessions() {
         let db = test_persistence();
         let sid = uuid::Uuid::new_v4();
-        db.create_session_row(sid, "Done", "interview", "swe").unwrap();
-        db.write_state_transition(sid, &SessionState::Ended).unwrap();
+        db.create_session_row(sid, "Done", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(sid, &SessionState::Ended)
+            .unwrap();
 
         assert!(db.find_draft_session().unwrap().is_none());
     }

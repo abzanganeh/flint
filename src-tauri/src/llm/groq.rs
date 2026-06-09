@@ -294,7 +294,8 @@ mod tests {
 
     #[test]
     fn parse_non_stream_completion_json() {
-        let body = r#"{"choices":[{"message":{"role":"assistant","content":"{\"role\":\"Engineer\"}"}}]}"#;
+        let body =
+            r#"{"choices":[{"message":{"role":"assistant","content":"{\"role\":\"Engineer\"}"}}]}"#;
         let completion: NonStreamCompletion = serde_json::from_str(body).unwrap();
         let content = completion
             .choices
