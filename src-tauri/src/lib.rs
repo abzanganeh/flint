@@ -156,9 +156,11 @@ pub fn run() {
             commands::get_current_user,
             commands::get_hardware_profile,
             commands::run_health_check,
-            // Session design (Phase 2)
+            // Session design (Phase 2 / Phase 5.5.1)
             commands::create_session,
             commands::ingest_context,
+            commands::ingest_structured_context,
+            commands::get_session_context_fields,
             commands::abandon_session_draft,
             commands::confirm_digest,
             commands::get_digest,

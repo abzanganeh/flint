@@ -5,6 +5,7 @@ use crate::digest::Digest;
 use crate::health::checks::{CheckStatus, HealthCheck, HealthCheckResult};
 use crate::health::hardware::{HardwareProfile, LLMConfig};
 use crate::interfaces::auth::{Plan, User};
+use crate::session::persistence::SessionContextFields;
 
 /// Serializable user for the frontend (no secrets).
 #[derive(Debug, Clone, Serialize)]
@@ -100,8 +101,58 @@ impl From<HardwareProfile> for HardwareProfileDto {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Session design DTOs (Phase 2)
+// Session design DTOs (Phase 2 / Phase 5.5.1)
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Structured context fields for Session Design (Phase 5.5.1).
+///
+/// `job_description` and `profile` are required; the rest are recommended.
+/// The ingest pipeline assembles a RAG blob from these fields with section
+/// headers before embedding — callers never hand-craft the blob themselves.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionContextFieldsDto {
+    pub job_description: String,
+    pub profile: String,
+    #[serde(default)]
+    pub company_overview: String,
+    #[serde(default)]
+    pub leadership_principles: String,
+    #[serde(default)]
+    pub role_expectations: String,
+    #[serde(default)]
+    pub technical_prep: String,
+    #[serde(default)]
+    pub strategy_notes: String,
+}
+
+impl From<SessionContextFields> for SessionContextFieldsDto {
+    fn from(f: SessionContextFields) -> Self {
+        Self {
+            job_description: f.job_description,
+            profile: f.profile,
+            company_overview: f.company_overview,
+            leadership_principles: f.leadership_principles,
+            role_expectations: f.role_expectations,
+            technical_prep: f.technical_prep,
+            strategy_notes: f.strategy_notes,
+        }
+    }
+}
+
+impl From<SessionContextFieldsDto> for SessionContextFields {
+    fn from(d: SessionContextFieldsDto) -> Self {
+        Self {
+            job_description: d.job_description,
+            profile: d.profile,
+            company_overview: d.company_overview,
+            leadership_principles: d.leadership_principles,
+            role_expectations: d.role_expectations,
+            technical_prep: d.technical_prep,
+            strategy_notes: d.strategy_notes,
+        }
+    }
+}
 
 /// Parameters for creating a new session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -235,6 +286,10 @@ pub struct SessionSnapshotDto {
     pub domain: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_text: Option<String>,
+    /// Structured Session Design fields (Phase 5.5.1).
+    /// Present for every session; all fields default to empty string for legacy rows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_fields: Option<SessionContextFieldsDto>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

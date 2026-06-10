@@ -3,12 +3,17 @@ import { useEffect, useRef, useState } from "react";
 import {
   createSession,
   getSessionSnapshot,
-  ingestContext,
+  ingestStructuredContext,
   type SessionConfigDto,
+  type SessionContextFields,
 } from "../commands";
 import { onSessionStateChange } from "../events";
 import SmartResumeLinkImport from "../components/SmartResumeLinkImport";
-import { buildContextText, hasCompanyIntel, loadPendingCompanyIntel, SMART_RESUME_SESSION_ID_KEY } from "../lib/smartResumeImport";
+import {
+  buildCompanyOverviewText,
+  loadPendingCompanyIntel,
+  SMART_RESUME_SESSION_ID_KEY,
+} from "../lib/smartResumeImport";
 import type { CompanyIntelDto } from "../commands";
 import { SessionState } from "../types";
 import "./SessionDesign.css";
@@ -25,51 +30,166 @@ const SESSION_TYPES = [
   { value: "other", label: "Other" },
 ];
 
-const CONTEXT_PLACEHOLDER = `Paste your job description, meeting brief, or notes here…
-
-Example — interview:
-  Role: Senior Software Engineer
-  Company: Acme Corp
-  Requirements: 5+ years in distributed systems, Rust or Go, ownership mindset…
-  About the team: …`;
-
-const PROFILE_PLACEHOLDER = `Paste your resume, LinkedIn summary, or a quick bio here…
-
-This is stored locally and re-used across sessions. Smart Resume integration will auto-fill this field.`;
-
-const MIN_CONTEXT_CHARS = 50;
+const MIN_REQUIRED_CHARS = 50;
 const CHAR_WARN_THRESHOLD = 3_000;
 const PROFILE_STORAGE_KEY = "flint.userProfile";
 
+const PLACEHOLDERS: Record<keyof SessionContextFields, string> = {
+  jobDescription: `Paste the full job posting here…
+
+Example:
+  Role: Senior Software Engineer
+  Company: Acme Corp
+  Requirements: 5+ years in distributed systems, Rust or Go, ownership mindset…`,
+  profile: `Paste your resume, LinkedIn summary, or a quick bio here…
+
+Saved locally and reused across sessions. Smart Resume integration auto-fills this field.`,
+  companyOverview: `Mission, values, culture, recent news…
+
+Example:
+  Mission: Empower every person and organisation…
+  Core Values: Bias for Action, Customer Obsession`,
+  leadershipPrinciples: `Key leadership traits the company prizes…
+
+Example: Think Big, Dive Deep, Deliver Results`,
+  roleExpectations: `Deliverables or success criteria for this role…
+
+Example: Own the backend platform; drive 0→1 on the new API gateway`,
+  technicalPrep: `Topics or systems to brush up on…
+
+Example: Distributed consensus, consistent hashing, Rust lifetimes`,
+  strategyNotes: `Talking points, questions to ask, angles to emphasise…
+
+Example: Lead with the Rust migration I owned at my last company`,
+};
+
 // ──────────────────────────────────────────────────────────────────────────────
-// Component
+// Types
 // ──────────────────────────────────────────────────────────────────────────────
 
 export interface SessionPreFill {
   name: string;
   sessionType: string;
   domain: string;
-  /** Reconstructed from the session's digest — pre-fills the context textarea. */
+  /** Legacy blob — used only as fallback into jobDescription. */
   contextText?: string;
-  /** Tailored resume summary from Smart Resume handoff. */
-  profileText?: string;
-  /** Source Smart Resume session id (Phase 3 digest sync). */
+  /** Source Smart Resume session id. */
   smartResumeSessionId?: string;
-  /** Company culture block from Smart Resume (shown separately from JD). */
+  /** Company intel for backward compat display. */
   companyIntel?: CompanyIntelDto;
+  /** Structured fields take priority over contextText. */
+  contextFields?: Partial<SessionContextFields>;
 }
 
 export interface SessionDesignProps {
-  /** Called with the new session UUID once the digest is ready. */
   onComplete: (sessionId: string) => void;
-  /** Navigate to the past sessions list. */
   onViewSessions?: () => void;
-  /** Pre-populate form fields (e.g. when cloning a past session). */
   preFill?: SessionPreFill;
-  /** Paste-import handoff when deep links do not launch Flint (common in dev). */
   onImportFromSmartResume?: (token: string) => void;
   importLoading?: boolean;
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+function emptyFields(): SessionContextFields {
+  return {
+    jobDescription: "",
+    profile: "",
+    companyOverview: "",
+    leadershipPrinciples: "",
+    roleExpectations: "",
+    technicalPrep: "",
+    strategyNotes: "",
+  };
+}
+
+function fieldsFromPreFill(
+  preFill: SessionPreFill | undefined,
+  pendingIntel: CompanyIntelDto | undefined,
+): SessionContextFields {
+  const base = emptyFields();
+  if (!preFill) return base;
+
+  if (preFill.contextFields) {
+    Object.assign(base, preFill.contextFields);
+  }
+
+  // Legacy blob fallback: put it in jobDescription only when no structured JD present.
+  if (!base.jobDescription && preFill.contextText) {
+    base.jobDescription = preFill.contextText;
+  }
+
+  // Company intel → companyOverview if the field is still empty.
+  const intel = preFill.companyIntel ?? pendingIntel;
+  if (intel && !base.companyOverview) {
+    base.companyOverview = buildCompanyOverviewText(intel);
+  }
+
+  return base;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// FieldBlock — labelled textarea
+// ──────────────────────────────────────────────────────────────────────────────
+
+interface FieldBlockProps {
+  id: keyof SessionContextFields;
+  label: string;
+  badge?: string;
+  hint?: string;
+  value: string;
+  onChange: (v: string) => void;
+  disabled: boolean;
+  rows?: number;
+  required?: boolean;
+}
+
+function FieldBlock({
+  id,
+  label,
+  badge,
+  hint,
+  value,
+  onChange,
+  disabled,
+  rows = 4,
+  required = false,
+}: FieldBlockProps) {
+  const overThreshold = value.length > CHAR_WARN_THRESHOLD;
+
+  return (
+    <div className="sd-field">
+      <div className="sd-context-label">
+        <label htmlFor={`sd-${id}`}>
+          {label}
+          {required && <span className="sd-required" aria-label="required"> *</span>}
+        </label>
+        <span className="sd-field-meta">
+          {badge && <span className="sd-badge">{badge}</span>}
+          {hint && <span className="sd-hint">{hint}</span>}
+          <span className={`sd-char-count${overThreshold ? " warning" : ""}`}>
+            {value.length.toLocaleString()} chars
+          </span>
+        </span>
+      </div>
+      <textarea
+        id={`sd-${id}`}
+        className={`sd-textarea${required ? " sd-textarea--required" : ""}`}
+        placeholder={PLACEHOLDERS[id]}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        rows={rows}
+      />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SessionDesign
+// ──────────────────────────────────────────────────────────────────────────────
 
 export default function SessionDesign({
   onComplete,
@@ -78,120 +198,137 @@ export default function SessionDesign({
   onImportFromSmartResume,
   importLoading = false,
 }: SessionDesignProps) {
+  const pendingIntel = loadPendingCompanyIntel();
+
   const [name, setName] = useState(preFill?.name ?? "");
   const [sessionType, setSessionType] = useState(preFill?.sessionType ?? "interview");
   const [domain, setDomain] = useState(preFill?.domain ?? "software engineering");
-  const [contextText, setContextText] = useState(preFill?.contextText ?? "");
-  const [companyIntel, setCompanyIntel] = useState<CompanyIntelDto | undefined>(
-    () => preFill?.companyIntel ?? loadPendingCompanyIntel(),
+  const [fields, setFields] = useState<SessionContextFields>(() =>
+    fieldsFromPreFill(preFill, pendingIntel),
   );
-  const [profileText, setProfileText] = useState<string>(
-    () => preFill?.profileText ?? localStorage.getItem(PROFILE_STORAGE_KEY) ?? "",
-  );
+  const [showRecommended, setShowRecommended] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Keep sessionId in a ref so the event callback always sees the latest value.
+  // Profile also persists locally so it survives new-session flows.
+  useEffect(() => {
+    setFields((prev) => {
+      if (prev.profile) return prev;
+      const stored = localStorage.getItem(PROFILE_STORAGE_KEY) ?? "";
+      return stored ? { ...prev, profile: stored } : prev;
+    });
+  }, []);
+
   const sessionIdRef = useRef<string | null>(null);
-  // Stable ref to onComplete so we don't need it in the listener effect deps.
   const onCompleteRef = useRef(onComplete);
   const preFillRef = useRef(preFill);
-  useEffect(() => {
-    preFillRef.current = preFill;
-  }, [preFill]);
-  useEffect(() => {
-    onCompleteRef.current = onComplete;
-  }, [onComplete]);
+  useEffect(() => { preFillRef.current = preFill; }, [preFill]);
+  useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
 
-  // Smart Resume import owns the form — do not let SQLite draft restore overwrite it.
+  // Apply preFill updates (Smart Resume import resolves asynchronously).
   useEffect(() => {
     if (!preFill) return;
-    if (preFill.smartResumeSessionId) {
-      sessionIdRef.current = null;
-    }
+    if (preFill.smartResumeSessionId) sessionIdRef.current = null;
     if (preFill.name) setName(preFill.name);
     if (preFill.sessionType) setSessionType(preFill.sessionType);
     if (preFill.domain) setDomain(preFill.domain);
-    if (preFill.contextText !== undefined) setContextText(preFill.contextText);
-    if (preFill.profileText !== undefined) setProfileText(preFill.profileText);
-    const intel = preFill.companyIntel ?? loadPendingCompanyIntel();
-    if (intel) setCompanyIntel(intel);
-  }, [preFill]);
+    setFields(fieldsFromPreFill(preFill, pendingIntel));
+    // Expand recommended section when import provides company overview.
+    if (preFill.contextFields?.companyOverview || buildCompanyOverviewText(preFill.companyIntel)) {
+      setShowRecommended(true);
+    }
+  }, [preFill]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Re-anchor session id and form fields when resuming a draft from SQLite.
+  // Draft restore from SQLite (on mount).
   useEffect(() => {
     void (async () => {
       const snapshot = await getSessionSnapshot();
       if (preFillRef.current?.smartResumeSessionId) return;
       if (!snapshot.sessionId) return;
+
       sessionIdRef.current = snapshot.sessionId;
+
       if (snapshot.state === SessionState.CONFIGURING) {
         if (snapshot.name) setName(snapshot.name);
         if (snapshot.sessionType) setSessionType(snapshot.sessionType);
         if (snapshot.domain) setDomain(snapshot.domain);
-        if (snapshot.contextText) setContextText(snapshot.contextText);
+
+        if (snapshot.contextFields) {
+          // v6 session — restore all structured fields.
+          setFields((prev) => ({ ...prev, ...snapshot.contextFields }));
+          const hasRecommended =
+            snapshot.contextFields.companyOverview ||
+            snapshot.contextFields.leadershipPrinciples ||
+            snapshot.contextFields.roleExpectations ||
+            snapshot.contextFields.technicalPrep ||
+            snapshot.contextFields.strategyNotes;
+          if (hasRecommended) setShowRecommended(true);
+        } else if (snapshot.contextText) {
+          // Legacy session — put assembled blob in jobDescription.
+          setFields((prev) => ({ ...prev, jobDescription: snapshot.contextText! }));
+        }
       }
     })();
   }, []);
 
-  // ── Listen to state-change events (state changes NEVER come from cmd results)
+  // State-change events — transitions always come from Rust.
   useEffect(() => {
     let active = true;
-
     const unlistenPromise = onSessionStateChange(({ state }) => {
       if (!active) return;
-
       if (state === SessionState.INGESTING) {
         setIsLoading(true);
         setError(null);
       }
-
       if (state === SessionState.DIGEST_REVIEW) {
         setIsLoading(false);
-        if (sessionIdRef.current) {
-          onCompleteRef.current(sessionIdRef.current);
-        }
+        if (sessionIdRef.current) onCompleteRef.current(sessionIdRef.current);
       }
-
-      // Reverted to CONFIGURING (e.g. empty context)
       if (state === SessionState.CONFIGURING) {
         setIsLoading(false);
       }
     });
-
     return () => {
       active = false;
       void unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
 
-  // ── Extract digest handler ────────────────────────────────────────────────
-  const handleExtract = async () => {
-    const trimmedContext = contextText.trim();
-    const trimmedProfile = profileText.trim();
-    const contextWithIntel = buildContextText(trimmedContext, companyIntel);
+  // ── Field helpers ─────────────────────────────────────────────────────────
 
+  const setField = (key: keyof SessionContextFields) => (value: string) => {
+    setFields((prev) => ({ ...prev, [key]: value }));
+    if (key === "profile") {
+      localStorage.setItem(PROFILE_STORAGE_KEY, value);
+    }
+  };
+
+  // ── Smart Resume session id persistence ───────────────────────────────────
+
+  useEffect(() => {
+    if (preFill?.smartResumeSessionId) {
+      localStorage.setItem(SMART_RESUME_SESSION_ID_KEY, preFill.smartResumeSessionId);
+    }
+  }, [preFill?.smartResumeSessionId]);
+
+  // ── Submit ────────────────────────────────────────────────────────────────
+
+  const handleExtract = async () => {
     if (!name.trim()) {
       setError("Please enter a session name.");
       return;
     }
-    if (trimmedContext.length < MIN_CONTEXT_CHARS) {
-      setError(
-        `Please paste at least ${MIN_CONTEXT_CHARS} characters of context.`,
-      );
+    if (fields.jobDescription.trim().length < MIN_REQUIRED_CHARS) {
+      setError(`Job description must be at least ${MIN_REQUIRED_CHARS} characters.`);
+      return;
+    }
+    if (fields.profile.trim().length < MIN_REQUIRED_CHARS) {
+      setError(`Profile must be at least ${MIN_REQUIRED_CHARS} characters.`);
       return;
     }
 
     setError(null);
     setIsLoading(true);
-
-    // Combine session context and user profile into a single text block that
-    // the Rust digest extractor and RAG pipeline will embed together.
-    const parts: string[] = [`[SESSION CONTEXT]\n${contextWithIntel}`];
-    if (trimmedProfile.length > 0) {
-      parts.push(`[YOUR PROFILE]\n${trimmedProfile}`);
-    }
-    const combinedText = parts.join("\n\n");
 
     try {
       const config: SessionConfigDto = {
@@ -207,35 +344,25 @@ export default function SessionDesign({
           snapshot.state === SessionState.CONFIGURING &&
           snapshot.sessionId === sid
         ) {
-          await ingestContext(sid, combinedText);
+          await ingestStructuredContext(sid, fields);
           return;
         }
       }
 
-      // create_session transitions Idle → Configuring and returns the UUID.
       sid = await createSession(config);
       sessionIdRef.current = sid;
-      await ingestContext(sid, combinedText);
+      await ingestStructuredContext(sid, fields);
     } catch (err: unknown) {
       setError(String(err));
       setIsLoading(false);
     }
   };
 
-  const handleProfileChange = (value: string) => {
-    setProfileText(value);
-    localStorage.setItem(PROFILE_STORAGE_KEY, value);
-  };
-
-  useEffect(() => {
-    if (preFill?.smartResumeSessionId) {
-      localStorage.setItem(SMART_RESUME_SESSION_ID_KEY, preFill.smartResumeSessionId);
-    }
-  }, [preFill?.smartResumeSessionId]);
-
-  const charCount = contextText.length;
   const canExtract =
-    !isLoading && name.trim().length > 0 && contextText.trim().length >= MIN_CONTEXT_CHARS;
+    !isLoading &&
+    name.trim().length > 0 &&
+    fields.jobDescription.trim().length >= MIN_REQUIRED_CHARS &&
+    fields.profile.trim().length >= MIN_REQUIRED_CHARS;
 
   return (
     <div className="session-design">
@@ -243,7 +370,7 @@ export default function SessionDesign({
         {/* Header */}
         <div className="sd-header">
           <h1>New Session</h1>
-          <p>Paste your context and Flint will extract a digest to prepare for your session.</p>
+          <p>Fill in your context — Flint will build a digest to prepare your session.</p>
         </div>
 
         {onImportFromSmartResume && (
@@ -253,10 +380,12 @@ export default function SessionDesign({
           />
         )}
 
-        {/* Config row */}
+        {/* Session metadata */}
         <div className="sd-field-row">
           <div className="sd-field">
-            <label htmlFor="sd-name">Session name</label>
+            <label htmlFor="sd-name">
+              Session name <span className="sd-required" aria-label="required">*</span>
+            </label>
             <input
               id="sd-name"
               type="text"
@@ -276,9 +405,7 @@ export default function SessionDesign({
               disabled={isLoading}
             >
               {SESSION_TYPES.map((t) => (
-                <option key={t.value} value={t.value}>
-                  {t.label}
-                </option>
+                <option key={t.value} value={t.value}>{t.label}</option>
               ))}
             </select>
           </div>
@@ -296,61 +423,100 @@ export default function SessionDesign({
           />
         </div>
 
-        {/* User profile / resume */}
-        <div className="sd-field">
-          <div className="sd-context-label">
-            <label htmlFor="sd-profile">Your profile / resume</label>
-            <span className="sd-char-count sd-hint">Saved locally — reused across sessions</span>
-          </div>
-          <textarea
-            id="sd-profile"
-            className="sd-textarea sd-textarea--profile"
-            placeholder={PROFILE_PLACEHOLDER}
-            value={profileText}
-            onChange={(e) => handleProfileChange(e.target.value)}
-            disabled={isLoading}
-            rows={5}
-          />
-        </div>
+        {/* ── Required fields ── */}
+        <div className="sd-section-label">Required</div>
 
-        {/* Session context (JD / brief) */}
-        {companyIntel && hasCompanyIntel(companyIntel) && (
-          <div className="sd-company-intel" aria-label="Company culture from Smart Resume">
-            <div className="sd-context-label">
-              <label>Company culture</label>
-              <span className="sd-char-count sd-hint">From Smart Resume</span>
-            </div>
-            {companyIntel.mission && (
-              <p><strong>Mission:</strong> {companyIntel.mission}</p>
-            )}
-            {companyIntel.values.length > 0 && (
-              <p><strong>Values:</strong> {companyIntel.values.join(", ")}</p>
-            )}
-            {companyIntel.cultureNotes && (
-              <p><strong>Culture:</strong> {companyIntel.cultureNotes}</p>
-            )}
+        <FieldBlock
+          id="jobDescription"
+          label="Job description"
+          badge="Required"
+          value={fields.jobDescription}
+          onChange={setField("jobDescription")}
+          disabled={isLoading}
+          rows={9}
+          required
+        />
+
+        <FieldBlock
+          id="profile"
+          label="Your profile / resume"
+          badge="Required"
+          hint="Saved locally — reused across sessions"
+          value={fields.profile}
+          onChange={setField("profile")}
+          disabled={isLoading}
+          rows={5}
+          required
+        />
+
+        {/* ── Recommended fields (toggle) ── */}
+        <button
+          type="button"
+          className="sd-toggle-recommended"
+          onClick={() => setShowRecommended((v) => !v)}
+          disabled={isLoading}
+        >
+          {showRecommended ? "Hide" : "Add"} recommended context
+          <span className="sd-toggle-recommended__hint">
+            {" "}(company overview, leadership principles, role expectations, tech prep, strategy)
+          </span>
+        </button>
+
+        {showRecommended && (
+          <div className="sd-recommended-fields">
+            <div className="sd-section-label">Recommended</div>
+
+            <FieldBlock
+              id="companyOverview"
+              label="Company overview"
+              hint="Mission, values, culture"
+              value={fields.companyOverview}
+              onChange={setField("companyOverview")}
+              disabled={isLoading}
+              rows={4}
+            />
+
+            <FieldBlock
+              id="leadershipPrinciples"
+              label="Leadership principles"
+              hint="Values the company prizes"
+              value={fields.leadershipPrinciples}
+              onChange={setField("leadershipPrinciples")}
+              disabled={isLoading}
+              rows={3}
+            />
+
+            <FieldBlock
+              id="roleExpectations"
+              label="Role expectations"
+              hint="Deliverables and success criteria"
+              value={fields.roleExpectations}
+              onChange={setField("roleExpectations")}
+              disabled={isLoading}
+              rows={3}
+            />
+
+            <FieldBlock
+              id="technicalPrep"
+              label="Technical preparation"
+              hint="Topics to brush up on"
+              value={fields.technicalPrep}
+              onChange={setField("technicalPrep")}
+              disabled={isLoading}
+              rows={3}
+            />
+
+            <FieldBlock
+              id="strategyNotes"
+              label="Strategy notes"
+              hint="Talking points and angles"
+              value={fields.strategyNotes}
+              onChange={setField("strategyNotes")}
+              disabled={isLoading}
+              rows={3}
+            />
           </div>
         )}
-
-        <div className="sd-field">
-          <div className="sd-context-label">
-            <label htmlFor="sd-context">Session context</label>
-            <span
-              className={`sd-char-count${charCount > CHAR_WARN_THRESHOLD ? " warning" : ""}`}
-            >
-              {charCount.toLocaleString()} chars
-            </span>
-          </div>
-          <textarea
-            id="sd-context"
-            className="sd-textarea"
-            placeholder={CONTEXT_PLACEHOLDER}
-            value={contextText}
-            onChange={(e) => setContextText(e.target.value)}
-            disabled={isLoading}
-            rows={9}
-          />
-        </div>
 
         {/* Status */}
         {isLoading && (

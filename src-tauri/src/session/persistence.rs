@@ -108,6 +108,21 @@ pub struct SessionRecoverySummary {
     pub last_chunk_timestamp_ms: Option<i64>,
 }
 
+/// All structured context fields entered on the Session Design screen.
+///
+/// Each field maps 1-to-1 to a SQLite column so draft restore can repopulate
+/// the form without parsing the assembled RAG blob.
+#[derive(Debug, Clone, Default)]
+pub struct SessionContextFields {
+    pub job_description: String,
+    pub profile: String,
+    pub company_overview: String,
+    pub leadership_principles: String,
+    pub role_expectations: String,
+    pub technical_prep: String,
+    pub strategy_notes: String,
+}
+
 /// Metadata for an in-progress session setup draft (pre-live).
 #[derive(Debug, Clone)]
 pub struct DraftSessionMetadata {
@@ -116,7 +131,10 @@ pub struct DraftSessionMetadata {
     pub name: String,
     pub session_type: String,
     pub domain: String,
+    /// Assembled RAG blob (kept for backward compat / clone path).
     pub context_text: String,
+    /// Structured fields; all empty for sessions created before v6 migration.
+    pub context_fields: SessionContextFields,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -125,7 +143,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -230,6 +248,28 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v5")?;
         info!("sqlite schema migrated to version 5");
+    }
+
+    if current < 6 {
+        // Phase 5.5.1 — structured Session Design fields.
+        // Each field is stored as its own column so draft restore can repopulate
+        // the form precisely. The assembled RAG blob continues to live in
+        // `context_text` for the embedding pipeline and backward compat.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN job_description       TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN profile               TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN company_overview      TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN leadership_principles TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN role_expectations     TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN technical_prep        TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN strategy_notes        TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 6;
+            ",
+        )
+        .context("schema migration v6")?;
+        info!("sqlite schema migrated to version 6");
     }
 
     Ok(())
@@ -874,6 +914,86 @@ impl SessionPersistence {
         Ok(())
     }
 
+    /// Persist each structured Session Design field in its own SQLite column.
+    ///
+    /// Called by `ingest_structured_context` after the RAG blob is assembled so
+    /// draft restore can repopulate the form exactly as the user left it.
+    /// Also bumps `updated_at` so `find_draft_session` ordering stays accurate.
+    pub fn store_context_fields(
+        &self,
+        session_id: Uuid,
+        fields: &SessionContextFields,
+    ) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let rows = conn
+            .execute(
+                "UPDATE sessions SET
+                     job_description       = ?1,
+                     profile               = ?2,
+                     company_overview      = ?3,
+                     leadership_principles = ?4,
+                     role_expectations     = ?5,
+                     technical_prep        = ?6,
+                     strategy_notes        = ?7,
+                     updated_at            = strftime('%s','now')
+                 WHERE id = ?8",
+                rusqlite::params![
+                    fields.job_description,
+                    fields.profile,
+                    fields.company_overview,
+                    fields.leadership_principles,
+                    fields.role_expectations,
+                    fields.technical_prep,
+                    fields.strategy_notes,
+                    sid,
+                ],
+            )
+            .context("store context fields")?;
+        if rows == 0 {
+            anyhow::bail!("store_context_fields: session {session_id} not found in database");
+        }
+        debug!(session_id = %session_id, "structured context fields stored");
+        Ok(())
+    }
+
+    /// Load structured Session Design fields from SQLite.
+    ///
+    /// All fields default to empty string for sessions created before the v6
+    /// migration — callers should check `job_description.is_empty()` to detect
+    /// legacy sessions and fall back to `context_text` if needed.
+    pub fn load_context_fields(&self, session_id: Uuid) -> Result<SessionContextFields> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let (jd, profile, co, lp, re, tp, sn): (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT job_description, profile, company_overview,
+                        leadership_principles, role_expectations,
+                        technical_prep, strategy_notes
+                 FROM sessions WHERE id = ?1",
+                rusqlite::params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+            )
+            .context("load context fields")?;
+        Ok(SessionContextFields {
+            job_description: jd,
+            profile,
+            company_overview: co,
+            leadership_principles: lp,
+            role_expectations: re,
+            technical_prep: tp,
+            strategy_notes: sn,
+        })
+    }
+
     /// Return the raw context text for a session (empty string if not stored).
     pub fn get_session_context(&self, session_id: Uuid) -> Result<String> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
@@ -914,20 +1034,33 @@ impl SessionPersistence {
     pub fn get_session_metadata(&self, session_id: Uuid) -> Result<DraftSessionMetadata> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
-        let (state_str, name, session_type, domain, context_text): (
-            String,
-            String,
-            String,
-            String,
-            String,
-        ) = conn
+        let row: (String, String, String, String, String, String, String, String, String, String, String, String) = conn
             .query_row(
-                "SELECT state, name, session_type, domain, context_text
+                "SELECT state, name, session_type, domain, context_text,
+                        job_description, profile, company_overview,
+                        leadership_principles, role_expectations,
+                        technical_prep, strategy_notes
                  FROM sessions WHERE id = ?1",
                 params![sid],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                        r.get(9)?,
+                        r.get(10)?,
+                        r.get(11)?,
+                    ))
+                },
             )
             .context("get session metadata")?;
+        let (state_str, name, session_type, domain, context_text, jd, profile, co, lp, re, tp, sn) = row;
         Ok(DraftSessionMetadata {
             session_id,
             state: parse_session_state(&state_str)?,
@@ -935,6 +1068,15 @@ impl SessionPersistence {
             session_type,
             domain,
             context_text,
+            context_fields: SessionContextFields {
+                job_description: jd,
+                profile,
+                company_overview: co,
+                leadership_principles: lp,
+                role_expectations: re,
+                technical_prep: tp,
+                strategy_notes: sn,
+            },
         })
     }
 
@@ -1051,7 +1193,11 @@ impl SessionPersistence {
         let mut stmt = conn
             .prepare(
                 "SELECT id, state, created_at, expires_at, promoted, name,
-                        session_type, domain, COALESCE(context_text, '')
+                        session_type, domain, COALESCE(context_text, ''),
+                        COALESCE(job_description, ''), COALESCE(profile, ''),
+                        COALESCE(company_overview, ''), COALESCE(leadership_principles, ''),
+                        COALESCE(role_expectations, ''), COALESCE(technical_prep, ''),
+                        COALESCE(strategy_notes, '')
                  FROM sessions
                  ORDER BY created_at ASC",
             )
@@ -1069,6 +1215,13 @@ impl SessionPersistence {
                     r.get::<_, String>(6)?,
                     r.get::<_, String>(7)?,
                     r.get::<_, String>(8)?,
+                    r.get::<_, String>(9)?,
+                    r.get::<_, String>(10)?,
+                    r.get::<_, String>(11)?,
+                    r.get::<_, String>(12)?,
+                    r.get::<_, String>(13)?,
+                    r.get::<_, String>(14)?,
+                    r.get::<_, String>(15)?,
                 ))
             })
             .context("query sessions for export")?
@@ -1077,8 +1230,11 @@ impl SessionPersistence {
 
         let mut exports = Vec::with_capacity(session_rows.len());
         for row in session_rows {
-            let (id, state, created_at, expires_at, promoted, name, session_type, domain, ctx) =
-                row;
+            let (
+                id, state, created_at, expires_at, promoted, name,
+                session_type, domain, ctx,
+                jd, profile, co, lp, re, tp, sn,
+            ) = row;
             let sid = Uuid::parse_str(&id).context("parse session uuid for export")?;
 
             let transcripts = Self::select_transcripts_for_export(&conn, &id)?;
@@ -1095,6 +1251,13 @@ impl SessionPersistence {
                 session_type,
                 domain,
                 context_text: ctx,
+                job_description: jd,
+                profile,
+                company_overview: co,
+                leadership_principles: lp,
+                role_expectations: re,
+                technical_prep: tp,
+                strategy_notes: sn,
                 transcript_chunks: transcripts,
                 responses,
                 state_transitions: transitions,
@@ -1201,7 +1364,16 @@ pub struct SessionExport {
     pub name: String,
     pub session_type: String,
     pub domain: String,
+    /// Assembled RAG blob (legacy / backward compat).
     pub context_text: String,
+    /// Structured Session Design fields (v6+; empty strings for legacy rows).
+    pub job_description: String,
+    pub profile: String,
+    pub company_overview: String,
+    pub leadership_principles: String,
+    pub role_expectations: String,
+    pub technical_prep: String,
+    pub strategy_notes: String,
     pub transcript_chunks: Vec<TranscriptChunkExport>,
     pub responses: Vec<ResponseExport>,
     pub state_transitions: Vec<StateTransitionExport>,
@@ -1651,7 +1823,9 @@ mod tests {
 
     #[test]
     fn current_or_older_schema_version_opens_cleanly() {
+        // v0: empty DB — all migrations run from scratch.
         try_open_with_user_version(0).expect("legacy DB must migrate forward");
+        // Current version: no migration work needed.
         try_open_with_user_version(SCHEMA_VERSION).expect("current schema must open");
     }
 
@@ -1852,6 +2026,59 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert!(version > 0, "schema version dropped after wipe");
+    }
+
+    #[test]
+    fn store_and_load_context_fields_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Test", "interview", "swe")
+            .unwrap();
+        let fields = SessionContextFields {
+            job_description: "We are hiring a Rust engineer.".to_string(),
+            profile: "5 years of systems programming.".to_string(),
+            company_overview: "Fast-paced startup.".to_string(),
+            leadership_principles: "Bias for action.".to_string(),
+            role_expectations: "Own the backend.".to_string(),
+            technical_prep: "Review distributed systems.".to_string(),
+            strategy_notes: "Emphasise ownership.".to_string(),
+        };
+        db.store_context_fields(sid, &fields).unwrap();
+        let loaded = db.load_context_fields(sid).unwrap();
+        assert_eq!(loaded.job_description, fields.job_description);
+        assert_eq!(loaded.profile, fields.profile);
+        assert_eq!(loaded.company_overview, fields.company_overview);
+        assert_eq!(loaded.leadership_principles, fields.leadership_principles);
+        assert_eq!(loaded.role_expectations, fields.role_expectations);
+        assert_eq!(loaded.technical_prep, fields.technical_prep);
+        assert_eq!(loaded.strategy_notes, fields.strategy_notes);
+    }
+
+    #[test]
+    fn load_context_fields_defaults_to_empty_for_legacy_row() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Legacy", "interview", "swe")
+            .unwrap();
+        let fields = db.load_context_fields(sid).unwrap();
+        assert!(fields.job_description.is_empty());
+        assert!(fields.profile.is_empty());
+    }
+
+    #[test]
+    fn get_session_metadata_includes_context_fields() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Meta", "interview", "swe")
+            .unwrap();
+        let cf = SessionContextFields {
+            job_description: "Senior Rust engineer".to_string(),
+            ..Default::default()
+        };
+        db.store_context_fields(sid, &cf).unwrap();
+        let meta = db.get_session_metadata(sid).unwrap();
+        assert_eq!(meta.context_fields.job_description, "Senior Rust engineer");
+        assert!(meta.context_fields.profile.is_empty());
     }
 
     #[test]
