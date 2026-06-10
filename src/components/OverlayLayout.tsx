@@ -316,6 +316,8 @@ const OverlayLayout = ({
     >
       {/* Layout toggle */}
       <div
+        role="group"
+        aria-label="Panel layout"
         style={{
           position: "absolute",
           top: 4,
@@ -327,6 +329,8 @@ const OverlayLayout = ({
       >
         <button
           onClick={() => setLayoutMode("stack")}
+          aria-pressed={layoutMode === "stack"}
+          aria-label="Vertical stack layout"
           title="Vertical stack layout"
           style={{
             background: layoutMode === "stack" ? "#3b82f6" : "#1e2028",
@@ -342,6 +346,8 @@ const OverlayLayout = ({
         </button>
         <button
           onClick={() => setLayoutMode("grid")}
+          aria-pressed={layoutMode === "grid"}
+          aria-label="Side-by-side grid layout"
           title="Side-by-side grid layout"
           style={{
             background: layoutMode === "grid" ? "#3b82f6" : "#1e2028",

@@ -25,6 +25,7 @@ export default function QuestionBank({ sessionId, onAskQuestion, asking = false 
       setLoading(true);
       const bank = await getQuestionBank(sessionId);
       setQuestions(bank);
+      setError(null);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -43,6 +44,7 @@ export default function QuestionBank({ sessionId, onAskQuestion, asking = false 
       const updated = await addToQuestionBank(sessionId, trimmed);
       setQuestions(updated);
       setNewQuestion("");
+      setError(null);
       inputRef.current?.focus();
     } catch (e) {
       setError(String(e));
@@ -53,6 +55,7 @@ export default function QuestionBank({ sessionId, onAskQuestion, asking = false 
     try {
       const updated = await removeFromQuestionBank(sessionId, question);
       setQuestions(updated);
+      setError(null);
     } catch (e) {
       setError(String(e));
     }

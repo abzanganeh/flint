@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import type { SessionContextFields } from "../commands";
 
@@ -19,18 +19,21 @@ const EMPTY_FIELD_LABELS: Record<keyof SessionContextFields, string> = {
 
 const STORAGE_KEY = "flint_first_run_modal_dismissed";
 
+/** Read once: did the user already dismiss the modal with "don't show again"? */
+export function isFirstRunModalDismissed(): boolean {
+  try {
+    return typeof localStorage !== "undefined"
+      && localStorage.getItem(STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
 export default function FirstRunRehearsalModal({
   fields,
   onDismiss,
 }: FirstRunRehearsalModalProps) {
   const [dontShowAgain, setDontShowAgain] = useState(false);
-
-  useEffect(() => {
-    const dismissed = localStorage.getItem(STORAGE_KEY) === "true";
-    if (dismissed) {
-      onDismiss();
-    }
-  }, [onDismiss]);
 
   const emptyFields = (Object.keys(fields) as Array<keyof SessionContextFields>).filter(
     (k) => !fields[k]?.trim(),
@@ -38,7 +41,11 @@ export default function FirstRunRehearsalModal({
 
   const handleDismiss = () => {
     if (dontShowAgain) {
-      localStorage.setItem(STORAGE_KEY, "true");
+      try {
+        localStorage.setItem(STORAGE_KEY, "true");
+      } catch {
+        // Best-effort persistence.
+      }
     }
     onDismiss();
   };

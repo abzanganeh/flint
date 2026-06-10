@@ -14,7 +14,10 @@ use crate::dto::{
     DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionContextFieldsDto,
     SessionSnapshotDto, SmartResumeImportDto, UserDto,
 };
-use crate::events::{emit_session_state_change, SessionStateChangePayload};
+use crate::events::{
+    emit_session_state_change, emit_token_usage_update, SessionStateChangePayload,
+    TokenUsageUpdatePayload,
+};
 use crate::health::{checks, hardware};
 use crate::interfaces::auth::AuthToken;
 use crate::interfaces::vector::Chunk;
@@ -1180,9 +1183,14 @@ pub async fn remove_from_question_bank(
 /// Run a single research chat turn grounded in session RAG context only.
 ///
 /// Retrieves the top-8 most relevant chunks for `message`, builds a context
-/// block, sends one non-streaming completion, then emits `research_token`
-/// events per sentence fragment and a final `research_citation` event with
-/// the source chunk texts. No memory across turns — each call is independent.
+/// block, sends one non-streaming completion, then emits a `research_token`
+/// event with the answer text and a `research_citation` event with the
+/// source chunk texts. No memory across turns — each call is independent.
+///
+/// Phase 5.5.7 — emits a `token_usage_update` with
+/// `usage_category: "research_chat"` so the per-session widget can show the
+/// breakdown, and records against the Phase 7.4 cost tracker. Suspended
+/// trackers reject the call before any LLM spend.
 ///
 /// Valid from: `REHEARSING` only.
 #[tauri::command]
@@ -1202,6 +1210,13 @@ pub async fn run_research_chat(
                 machine.current()
             ));
         }
+    }
+
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
     }
 
     let message = message.trim().to_string();
@@ -1234,11 +1249,26 @@ pub async fn run_research_chat(
 
     if chunks.is_empty() {
         // Emit an honest "not in context" response rather than hallucinating.
-        let _ = app.emit(
-            "research_token",
-            serde_json::json!({ "token": "I don't have information about that in the pasted context." }),
-        );
+        let canned = "I don't have information about that in the pasted context.";
+        let _ = app.emit("research_token", serde_json::json!({ "token": canned }));
         let _ = app.emit("research_citation", serde_json::json!({ "chunks": [] }));
+        // Cheap path — record only the embedding spend so the widget shows movement.
+        let input_tokens = (message.len() as u64 + 50) / 4;
+        let output_tokens = (canned.len() as u64) / 4;
+        let cost = (input_tokens + output_tokens) as f64 * 0.0000002;
+        emit_token_usage_update(
+            &app,
+            TokenUsageUpdatePayload {
+                input: input_tokens,
+                output: output_tokens,
+                total: input_tokens + output_tokens,
+                cost_estimate: cost,
+                usage_category: "research_chat".to_string(),
+            },
+        );
+        let _ = state
+            .cost_tracker
+            .record_turn_with_transition(input_tokens, output_tokens, cost);
         return Ok(());
     }
 
@@ -1261,7 +1291,7 @@ pub async fn run_research_chat(
     let llm = llm_for_digest(&state);
     let response = llm
         .complete(
-            prompt,
+            prompt.clone(),
             CompletionConfig {
                 max_tokens: Some(400),
                 temperature: 0.1,
@@ -1280,6 +1310,27 @@ pub async fn run_research_chat(
         "research_citation",
         serde_json::json!({ "chunks": citation_texts }),
     );
+
+    // Phase 5.5.7 + 7.4 — record token spend and surface to the UI / cost cap.
+    // The 4 chars/token heuristic mirrors the orchestrator's accounting in
+    // `run_turn`; the +500 budget covers the system framing in the prompt.
+    let input_tokens = (prompt.len() as u64 + 500) / 4;
+    let output_tokens = (response.len() as u64 + 100) / 4;
+    let cost_estimate = (input_tokens + output_tokens) as f64 * 0.0000002;
+    emit_token_usage_update(
+        &app,
+        TokenUsageUpdatePayload {
+            input: input_tokens,
+            output: output_tokens,
+            total: input_tokens + output_tokens,
+            cost_estimate,
+            usage_category: "research_chat".to_string(),
+        },
+    );
+    let _ =
+        state
+            .cost_tracker
+            .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
 
     Ok(())
 }

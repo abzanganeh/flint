@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import FirstRunRehearsalModal from "../components/FirstRunRehearsalModal";
+import FirstRunRehearsalModal, {
+  isFirstRunModalDismissed,
+} from "../components/FirstRunRehearsalModal";
 import OverlayLayout from "../components/OverlayLayout";
 import PrepChecklist from "../components/PrepChecklist";
 import QuestionBank from "../components/QuestionBank";
@@ -46,7 +48,9 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contextFields, setContextFields] = useState<SessionContextFields>(emptyFields);
-  const [showFirstRunModal, setShowFirstRunModal] = useState(true);
+  const [showFirstRunModal, setShowFirstRunModal] = useState(
+    () => !isFirstRunModalDismissed(),
+  );
   const [sideTab, setSideTab] = useState<SideTab>("checklist");
   const [sideOpen, setSideOpen] = useState(true);
 

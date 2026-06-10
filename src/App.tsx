@@ -23,6 +23,7 @@ import {
 } from "./lib/smartResumeImport";
 import { SessionState } from "./types";
 import "./App.css";
+import "./components/rehearsal-enrichment.css";
 import DigestReview from "./screens/DigestReview";
 import HealthCheck from "./screens/HealthCheck";
 import LiveOverlay from "./screens/LiveOverlay";

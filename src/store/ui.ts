@@ -44,14 +44,29 @@ interface UIStore extends UIState {
   setAnswerNowMode: (answerNowMode: boolean) => void;
 }
 
+// Default panel sizes per layout mode.
+// Stack mode follows FR-4.6: Transcript 20%, Directional 30%, Depth 30%,
+// Clarifying 10%, Context 10% (weights sum to 5).
+const DEFAULT_STACK_SIZES: PanelLayout["sizes"] = {
+  transcript: 1.0,
+  directional: 1.5,
+  depth: 1.5,
+  clarifying: 0.5,
+  context: 0.5,
+};
+
+// Grid mode (horizontal): Directional dominant, Transcript and Depth equal,
+// Clarifying + Context narrower side panels.
+const DEFAULT_GRID_SIZES: PanelLayout["sizes"] = {
+  transcript: 1,
+  directional: 1.5,
+  depth: 1,
+  clarifying: 0.75,
+  context: 0.75,
+};
+
 const defaultPanelLayout: PanelLayout = {
-  sizes: {
-    transcript: 1,
-    directional: 1.5,
-    depth: 1,
-    clarifying: 0.75,
-    context: 0.75,
-  },
+  sizes: DEFAULT_STACK_SIZES,
   collapsed: {
     transcript: false,
     directional: false,
@@ -77,9 +92,31 @@ const defaultCostCap: CostCapState = {
   maxCostEstimateUsd: null,
 };
 
+// Safely resolve the persisted layout mode. Defaults to "stack" (FR-4.6) when
+// localStorage is missing (e.g. SSR) or contains an unknown value.
+function readPersistedLayoutMode(): "stack" | "grid" {
+  try {
+    const raw = typeof localStorage !== "undefined"
+      ? localStorage.getItem("flint_layout_mode")
+      : null;
+    if (raw === "stack" || raw === "grid") return raw;
+  } catch {
+    // localStorage may throw in privacy modes; fall through to default.
+  }
+  return "stack";
+}
+
+function persistLayoutMode(mode: "stack" | "grid"): void {
+  try {
+    localStorage.setItem("flint_layout_mode", mode);
+  } catch {
+    // Best-effort persistence; toggle still applies in-memory.
+  }
+}
+
 export const useUIStore = create<UIStore>((set) => ({
   panelLayout: defaultPanelLayout,
-  layoutMode: (localStorage.getItem("flint_layout_mode") as "stack" | "grid") ?? "stack",
+  layoutMode: readPersistedLayoutMode(),
   focusedPanel: null,
   streamingBuffers: { directional: "", depth: "" },
   confidenceLevel: null,
@@ -99,8 +136,16 @@ export const useUIStore = create<UIStore>((set) => ({
   setPanelLayout: (panelLayout) => set({ panelLayout }),
 
   setLayoutMode: (layoutMode) => {
-    localStorage.setItem("flint_layout_mode", layoutMode);
-    set({ layoutMode });
+    persistLayoutMode(layoutMode);
+    set((s) => ({
+      layoutMode,
+      // Reseed sizes to that mode's defaults so panel proportions match the
+      // spec. Collapsed state is preserved — it's per-panel intent, not layout.
+      panelLayout: {
+        ...s.panelLayout,
+        sizes: layoutMode === "stack" ? DEFAULT_STACK_SIZES : DEFAULT_GRID_SIZES,
+      },
+    }));
   },
 
   setPanelSize: (id, size) =>

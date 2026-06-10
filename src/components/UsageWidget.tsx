@@ -15,14 +15,25 @@ export default function UsageWidget() {
   const { total, costEstimate, breakdown } = tokenUsage;
 
   const categories = Object.entries(breakdown).filter(([, v]) => v > 0);
+  // Prefer the LLM-reported cost; only fall back to the per-token heuristic
+  // when the backend hasn't sent a cost yet but tokens have moved.
+  const displayCost = costEstimate > 0 ? costEstimate : total * COST_PER_TOKEN;
+
+  if (total === 0) {
+    return (
+      <div className="usage-widget" title="Token usage this session">
+        <div className="usage-widget__total">
+          <span className="usage-widget__tokens">0 tokens</span>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="usage-widget" title="Token usage this session">
       <div className="usage-widget__total">
         <span className="usage-widget__tokens">{total.toLocaleString()} tokens</span>
-        <span className="usage-widget__cost">
-          ${(costEstimate || total * COST_PER_TOKEN).toFixed(4)}
-        </span>
+        <span className="usage-widget__cost">${displayCost.toFixed(4)}</span>
       </div>
 
       {categories.length > 0 && (

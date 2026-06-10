@@ -54,10 +54,9 @@ const FIELD_SPECS: FieldSpec[] = [
 
 interface PrepChecklistProps {
   fields: SessionContextFields;
-  onFieldClick?: (fieldKey: keyof SessionContextFields) => void;
 }
 
-export default function PrepChecklist({ fields, onFieldClick }: PrepChecklistProps) {
+export default function PrepChecklist({ fields }: PrepChecklistProps) {
   const filled = FIELD_SPECS.filter((f) => fields[f.key]?.trim().length > 0);
   const total = FIELD_SPECS.length;
 
@@ -82,14 +81,10 @@ export default function PrepChecklist({ fields, onFieldClick }: PrepChecklistPro
                 {isFilled ? "●" : "○"}
               </span>
               <div className="prep-checklist__field">
-                <button
-                  className="prep-checklist__field-label"
-                  onClick={() => onFieldClick?.(spec.key)}
-                  disabled={!onFieldClick}
-                >
+                <span className="prep-checklist__field-label">
                   {spec.label}
                   {spec.required && <span className="prep-checklist__required"> *</span>}
-                </button>
+                </span>
                 {!isFilled && (
                   <p className="prep-checklist__guide">{spec.searchGuide}</p>
                 )}
