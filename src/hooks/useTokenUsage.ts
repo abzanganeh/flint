@@ -12,8 +12,8 @@ export function useTokenUsage(): void {
 
     const setup = async () => {
       const fn = await onTokenUsageUpdate(
-        ({ input, output, cost_estimate }) => {
-          accumulateTokenUsage(input, output, cost_estimate);
+        ({ input, output, cost_estimate, usage_category }) => {
+          accumulateTokenUsage(input, output, cost_estimate, usage_category);
         },
       );
       if (cancelled) {

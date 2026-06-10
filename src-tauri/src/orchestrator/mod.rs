@@ -320,6 +320,7 @@ pub async fn run_orchestrator<R: Runtime>(
             local_llm: Arc::clone(&config.local_llm),
             persistence: Arc::clone(&config.persistence),
             cost_tracker: Arc::clone(&config.cost_tracker),
+            usage_category: "live_turn".to_string(),
         };
 
         let span = info_span!(
@@ -375,6 +376,8 @@ struct OrchestratorTurnConfig {
     local_llm: Arc<dyn LLMProvider>,
     persistence: Arc<SessionPersistence>,
     cost_tracker: Arc<crate::cost::CostTracker>,
+    /// Phase 5.5.7 — activity category for the usage widget.
+    usage_category: String,
 }
 
 async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
@@ -624,6 +627,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
             output: turn_output,
             total,
             cost_estimate,
+            usage_category: cfg.usage_category.clone(),
         },
     );
 
@@ -703,6 +707,7 @@ pub async fn dispatch_turn<R: Runtime>(
             local_llm,
             persistence,
             cost_tracker,
+            usage_category: "rehearsal_turn".to_string(),
         },
         app,
     )

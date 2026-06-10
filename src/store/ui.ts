@@ -16,6 +16,7 @@ interface UIStore extends UIState {
   setPanelLayout: (panelLayout: PanelLayout) => void;
   setPanelSize: (id: PanelId, size: number) => void;
   togglePanelCollapsed: (id: PanelId) => void;
+  setLayoutMode: (mode: "stack" | "grid") => void;
   setFocusedPanel: (focusedPanel: PanelId | null) => void;
   appendDirectionalToken: (token: string) => void;
   appendDepthToken: (token: string) => void;
@@ -32,6 +33,7 @@ interface UIStore extends UIState {
     input: number,
     output: number,
     costDelta: number,
+    usageCategory?: string,
   ) => void;
   setCostCap: (cap: CostCapState) => void;
   setNotificationQueue: (notificationQueue: Notification[]) => void;
@@ -64,6 +66,7 @@ const defaultTokenUsage: TokenUsage = {
   output: 0,
   total: 0,
   costEstimate: 0,
+  breakdown: {},
 };
 
 const defaultCostCap: CostCapState = {
@@ -76,6 +79,7 @@ const defaultCostCap: CostCapState = {
 
 export const useUIStore = create<UIStore>((set) => ({
   panelLayout: defaultPanelLayout,
+  layoutMode: (localStorage.getItem("flint_layout_mode") as "stack" | "grid") ?? "stack",
   focusedPanel: null,
   streamingBuffers: { directional: "", depth: "" },
   confidenceLevel: null,
@@ -93,6 +97,11 @@ export const useUIStore = create<UIStore>((set) => ({
   answerNowMode: false,
 
   setPanelLayout: (panelLayout) => set({ panelLayout }),
+
+  setLayoutMode: (layoutMode) => {
+    localStorage.setItem("flint_layout_mode", layoutMode);
+    set({ layoutMode });
+  },
 
   setPanelSize: (id, size) =>
     set((s) => ({
@@ -158,15 +167,22 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setTokenUsage: (tokenUsage) => set({ tokenUsage }),
 
-  accumulateTokenUsage: (input, output, costDelta) =>
-    set((s) => ({
-      tokenUsage: {
-        input: s.tokenUsage.input + input,
-        output: s.tokenUsage.output + output,
-        total: s.tokenUsage.total + input + output,
-        costEstimate: s.tokenUsage.costEstimate + costDelta,
-      },
-    })),
+  accumulateTokenUsage: (input, output, costDelta, usageCategory) =>
+    set((s) => {
+      const breakdown = { ...s.tokenUsage.breakdown };
+      if (usageCategory) {
+        breakdown[usageCategory] = (breakdown[usageCategory] ?? 0) + input + output;
+      }
+      return {
+        tokenUsage: {
+          input: s.tokenUsage.input + input,
+          output: s.tokenUsage.output + output,
+          total: s.tokenUsage.total + input + output,
+          costEstimate: s.tokenUsage.costEstimate + costDelta,
+          breakdown,
+        },
+      };
+    }),
 
   setCostCap: (costCap) => set({ costCap }),
 

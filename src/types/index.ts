@@ -59,6 +59,7 @@ export interface TokenUsage {
   output: number;
   total: number;
   costEstimate: number;
+  breakdown: Record<string, number>;
 }
 
 export type CostCapStatus = "ok" | "warning_80" | "reached";
@@ -73,6 +74,7 @@ export interface CostCapState {
 
 export interface UIState {
   panelLayout: PanelLayout;
+  layoutMode: "stack" | "grid";
   focusedPanel: PanelId | null;
   streamingBuffers: {
     directional: string;

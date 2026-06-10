@@ -143,7 +143,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -270,6 +270,21 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v6")?;
         info!("sqlite schema migrated to version 6");
+    }
+
+    if current < 7 {
+        // Phase 5.5.3 — question bank persisted per session.
+        // Stored as a JSON array of strings so the Rehearsal UI can add/remove
+        // questions without a column-per-question schema.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN question_bank_json TEXT NOT NULL DEFAULT '[]';
+
+            PRAGMA user_version = 7;
+            ",
+        )
+        .context("schema migration v7")?;
+        info!("sqlite schema migrated to version 7");
     }
 
     Ok(())
@@ -1002,6 +1017,45 @@ impl SessionPersistence {
             technical_prep: tp,
             strategy_notes: sn,
         })
+    }
+
+    // ── Question bank (Phase 5.5.3) ──────────────────────────────────────────
+
+    /// Persist the question bank JSON for a session.
+    ///
+    /// `questions` is the full ordered list; the caller owns de-dup / ordering.
+    pub fn store_question_bank(
+        &self,
+        session_id: Uuid,
+        questions: &[String],
+    ) -> Result<()> {
+        let json = serde_json::to_string(questions).context("serialize question bank")?;
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET question_bank_json = ?1 WHERE id = ?2",
+            rusqlite::params![json, sid],
+        )
+        .context("store question bank")?;
+        debug!(session_id = %session_id, count = questions.len(), "question bank stored");
+        Ok(())
+    }
+
+    /// Load the persisted question bank for a session. Returns an empty vec
+    /// when no questions have been saved or the column defaulted to `'[]'`.
+    pub fn load_question_bank(&self, session_id: Uuid) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let json: String = conn
+            .query_row(
+                "SELECT question_bank_json FROM sessions WHERE id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .context("load question bank")?;
+        let questions: Vec<String> =
+            serde_json::from_str(&json).unwrap_or_default();
+        Ok(questions)
     }
 
     /// Return the raw context text for a session (empty string if not stored).

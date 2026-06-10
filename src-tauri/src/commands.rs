@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -1075,6 +1075,213 @@ pub async fn return_to_session_design(
     }
 
     get_session_snapshot(state).await
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.5.3 — Question bank
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Return the question bank for a session.
+///
+/// Returns digest `likely_questions` merged with any user-added questions,
+/// with duplicates removed. Order: digest Qs first (stable), then user-added.
+#[tauri::command]
+pub async fn get_question_bank(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    let persisted = state
+        .persistence
+        .load_question_bank(sid)
+        .map_err(|e| e.to_string())?;
+
+    if !persisted.is_empty() {
+        return Ok(persisted);
+    }
+
+    // First call: seed from digest likely_questions.
+    let seed: Vec<String> = state
+        .session_digest
+        .read()
+        .await
+        .as_ref()
+        .map(|d| d.likely_questions.clone())
+        .unwrap_or_default();
+
+    if !seed.is_empty() {
+        state
+            .persistence
+            .store_question_bank(sid, &seed)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(seed)
+}
+
+/// Add a question to the session question bank (dedup by lowercase trim).
+#[tauri::command]
+pub async fn add_to_question_bank(
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+) -> Result<Vec<String>, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    let trimmed = question.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Question must not be empty.".to_string());
+    }
+
+    let mut bank = state
+        .persistence
+        .load_question_bank(sid)
+        .map_err(|e| e.to_string())?;
+
+    let lower = trimmed.to_lowercase();
+    if !bank.iter().any(|q| q.to_lowercase() == lower) {
+        bank.push(trimmed);
+        state
+            .persistence
+            .store_question_bank(sid, &bank)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(bank)
+}
+
+/// Remove a question from the session question bank by exact match.
+#[tauri::command]
+pub async fn remove_from_question_bank(
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+) -> Result<Vec<String>, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    let mut bank = state
+        .persistence
+        .load_question_bank(sid)
+        .map_err(|e| e.to_string())?;
+
+    bank.retain(|q| q != &question);
+    state
+        .persistence
+        .store_question_bank(sid, &bank)
+        .map_err(|e| e.to_string())?;
+
+    Ok(bank)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.5.6 — Research chat
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Run a single research chat turn grounded in session RAG context only.
+///
+/// Retrieves the top-8 most relevant chunks for `message`, builds a context
+/// block, sends one non-streaming completion, then emits `research_token`
+/// events per sentence fragment and a final `research_citation` event with
+/// the source chunk texts. No memory across turns — each call is independent.
+///
+/// Valid from: `REHEARSING` only.
+#[tauri::command]
+pub async fn run_research_chat(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    message: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "run_research_chat is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        return Err("Research message must not be empty.".to_string());
+    }
+
+    // Embed the question to retrieve relevant chunks.
+    let embedder = state
+        .wait_for_embedder(std::time::Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("Embedding unavailable: {e}"))?;
+
+    let embedding = tokio::task::spawn_blocking({
+        let msg = message.clone();
+        move || embedder.embed_batch(&[msg.as_str()])
+    })
+    .await
+    .map_err(|e| format!("Embedder task panicked: {e}"))?
+    .map_err(|e| format!("Embedding failed: {e}"))?
+    .into_iter()
+    .next()
+    .ok_or_else(|| "Embedder returned no vectors.".to_string())?;
+
+    let chunks = state
+        .vector_store
+        .query(sid, &embedding, 8)
+        .await
+        .map_err(|e| format!("RAG retrieval failed: {e}"))?;
+
+    if chunks.is_empty() {
+        // Emit an honest "not in context" response rather than hallucinating.
+        let _ = app.emit(
+            "research_token",
+            serde_json::json!({ "token": "I don't have information about that in the pasted context." }),
+        );
+        let _ = app.emit("research_citation", serde_json::json!({ "chunks": [] }));
+        return Ok(());
+    }
+
+    let context_block: String = chunks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("[{}] {}", i + 1, c.chunk.text))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let prompt = format!(
+        "You are a research assistant for interview preparation. \
+        Answer the question using ONLY the pasted context below. \
+        If the answer is not in the context, say so explicitly.\n\n\
+        CONTEXT:\n{context_block}\n\n\
+        QUESTION: {message}\n\n\
+        ANSWER:"
+    );
+
+    let llm = llm_for_digest(&state);
+    let response = llm
+        .complete(
+            prompt,
+            CompletionConfig {
+                max_tokens: Some(400),
+                temperature: 0.1,
+                stream: false,
+            },
+        )
+        .await
+        .map_err(|e| format!("Research chat LLM call failed: {e}"))?;
+
+    // Emit response as a single token event (non-streaming for simplicity).
+    let _ = app.emit("research_token", serde_json::json!({ "token": response }));
+
+    // Emit citations so the UI can show which chunks grounded the answer.
+    let citation_texts: Vec<&str> = chunks.iter().map(|c| c.chunk.text.as_str()).collect();
+    let _ = app.emit(
+        "research_citation",
+        serde_json::json!({ "chunks": citation_texts }),
+    );
+
+    Ok(())
 }
 
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
