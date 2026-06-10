@@ -980,7 +980,17 @@ impl SessionPersistence {
                         technical_prep, strategy_notes
                  FROM sessions WHERE id = ?1",
                 rusqlite::params![sid],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
             )
             .context("load context fields")?;
         Ok(SessionContextFields {
@@ -1034,7 +1044,20 @@ impl SessionPersistence {
     pub fn get_session_metadata(&self, session_id: Uuid) -> Result<DraftSessionMetadata> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
-        let row: (String, String, String, String, String, String, String, String, String, String, String, String) = conn
+        let row: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = conn
             .query_row(
                 "SELECT state, name, session_type, domain, context_text,
                         job_description, profile, company_overview,
@@ -1060,7 +1083,8 @@ impl SessionPersistence {
                 },
             )
             .context("get session metadata")?;
-        let (state_str, name, session_type, domain, context_text, jd, profile, co, lp, re, tp, sn) = row;
+        let (state_str, name, session_type, domain, context_text, jd, profile, co, lp, re, tp, sn) =
+            row;
         Ok(DraftSessionMetadata {
             session_id,
             state: parse_session_state(&state_str)?,
@@ -1231,9 +1255,22 @@ impl SessionPersistence {
         let mut exports = Vec::with_capacity(session_rows.len());
         for row in session_rows {
             let (
-                id, state, created_at, expires_at, promoted, name,
-                session_type, domain, ctx,
-                jd, profile, co, lp, re, tp, sn,
+                id,
+                state,
+                created_at,
+                expires_at,
+                promoted,
+                name,
+                session_type,
+                domain,
+                ctx,
+                jd,
+                profile,
+                co,
+                lp,
+                re,
+                tp,
+                sn,
             ) = row;
             let sid = Uuid::parse_str(&id).context("parse session uuid for export")?;
 

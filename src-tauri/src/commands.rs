@@ -11,8 +11,8 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto,
-    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto,
+    DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionContextFieldsDto,
+    SessionSnapshotDto, SmartResumeImportDto, UserDto,
 };
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use crate::health::{checks, hardware};
