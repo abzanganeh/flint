@@ -16,7 +16,11 @@ import {
   type SessionSnapshotDto,
 } from "./commands";
 import { onSmartResumeImportToken } from "./events";
-import { parseFlintImportToken, buildContextText, persistCompanyIntel } from "./lib/smartResumeImport";
+import {
+  buildCompanyOverviewText,
+  parseFlintImportToken,
+  persistCompanyIntel,
+} from "./lib/smartResumeImport";
 import { SessionState } from "./types";
 import "./App.css";
 import DigestReview from "./screens/DigestReview";
@@ -72,7 +76,9 @@ function preFillFromSnapshot(snapshot: SessionSnapshotDto): SessionPreFill | nul
     name: snapshot.name ?? "",
     sessionType: snapshot.sessionType ?? "interview",
     domain: snapshot.domain ?? "software engineering",
+    // Carry both for backward compat — SessionDesign prefers contextFields.
     contextText: snapshot.contextText,
+    contextFields: snapshot.contextFields,
   };
 }
 
@@ -154,10 +160,17 @@ function App() {
         name: result.sessionName,
         sessionType: result.sessionType,
         domain: result.domain,
-        contextText: buildContextText(result.jdText, result.companyIntel),
-        profileText: result.resumeSummary,
         smartResumeSessionId: result.smartResumeSessionId,
-        companyIntel: result.companyIntel,
+        // Map Smart Resume fields directly to structured context fields.
+        contextFields: {
+          jobDescription: result.jdText,
+          profile: result.resumeSummary ?? "",
+          companyOverview: buildCompanyOverviewText(result.companyIntel),
+          leadershipPrinciples: "",
+          roleExpectations: "",
+          technicalPrep: "",
+          strategyNotes: "",
+        },
       });
       setScreen("session-design");
     } catch (err) {

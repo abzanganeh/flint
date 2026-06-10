@@ -61,6 +61,22 @@ export function loadPendingCompanyIntel(): CompanyIntelDto | undefined {
   }
 }
 
+/**
+ * Format a Smart Resume `CompanyIntelDto` as plain text for the `companyOverview`
+ * structured field (Phase 5.5.1).
+ *
+ * Returns an empty string when there is no useful content — callers can check
+ * `result.length > 0` before pre-filling the field.
+ */
+export function buildCompanyOverviewText(intel?: CompanyIntelDto): string {
+  if (!hasCompanyIntel(intel)) return "";
+  const lines: string[] = [];
+  if (intel!.mission) lines.push(`Mission: ${intel!.mission}`);
+  if (intel!.values.length > 0) lines.push(`Core Values: ${intel!.values.join(", ")}`);
+  if (intel!.cultureNotes) lines.push(`Culture: ${intel!.cultureNotes}`);
+  return lines.join("\n");
+}
+
 /** Append Smart Resume company culture block after the job description. */
 export function buildContextText(jdText: string, companyIntel?: CompanyIntelDto): string {
   const parts = [jdText.trim()];

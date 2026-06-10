@@ -11,8 +11,8 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionSnapshotDto,
-    SmartResumeImportDto, UserDto,
+    DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionContextFieldsDto,
+    SessionSnapshotDto, SmartResumeImportDto, UserDto,
 };
 use crate::events::{emit_session_state_change, SessionStateChangePayload};
 use crate::health::{checks, hardware};
@@ -454,6 +454,181 @@ pub async fn ingest_context(
     ingest_result
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 5.5.1 — structured Session Design context fields
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Assemble a single labelled RAG blob from structured context fields.
+///
+/// Only non-empty fields contribute a section so the embedding model can
+/// distinguish signal types without noise from blank placeholders.
+fn assemble_rag_blob(fields: &SessionContextFieldsDto) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(7);
+    let mut push = |label: &str, text: &str| {
+        let t = text.trim();
+        if !t.is_empty() {
+            parts.push(format!("[{label}]\n{t}"));
+        }
+    };
+    push("JOB DESCRIPTION", &fields.job_description);
+    push("YOUR PROFILE", &fields.profile);
+    push("COMPANY OVERVIEW", &fields.company_overview);
+    push("LEADERSHIP PRINCIPLES", &fields.leadership_principles);
+    push("ROLE EXPECTATIONS", &fields.role_expectations);
+    push("TECHNICAL PREPARATION", &fields.technical_prep);
+    push("STRATEGY NOTES", &fields.strategy_notes);
+    parts.join("\n\n")
+}
+
+/// Chunk, embed, and store structured Session Design context; extract digest.
+///
+/// Replaces the freeform `ingest_context` for v1.5 sessions. Each field is
+/// stored in its own SQLite column (for exact draft restore), and all non-empty
+/// fields are assembled into a labelled RAG blob before embedding.
+///
+/// Required fields (`job_description`, `profile`) must be non-empty or an
+/// error is returned before any state transition.
+///
+/// Valid from: `CONFIGURING`.  
+/// Emits: `INGESTING` immediately, then `DIGEST_REVIEW` when done.
+#[tauri::command]
+pub async fn ingest_structured_context(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    fields: SessionContextFieldsDto,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    if fields.job_description.trim().is_empty() {
+        return Err("Job description is required — please paste the job posting.".to_string());
+    }
+    if fields.profile.trim().is_empty() {
+        return Err("Your profile is required — please paste your resume or bio.".to_string());
+    }
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Configuring {
+            return Err(format!(
+                "ingest_structured_context is only valid from CONFIGURING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    // Transition → INGESTING before any work begins.
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::Ingesting)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::Ingesting);
+
+    let blob = assemble_rag_blob(&fields);
+    let raw_chunks = chunk_text(&blob, 200, 50);
+    if raw_chunks.is_empty() {
+        rollback_ingest_to_configuring(&state, &app).await;
+        return Err(
+            "Assembled context is empty — check that required fields are filled.".to_string(),
+        );
+    }
+
+    // Persist the assembled blob (context_text) and each individual field so
+    // draft restore can repopulate the form precisely.
+    if let Err(e) = state.persistence.store_context_text(sid, &blob) {
+        warn!(session_id = %sid, error = %e, "failed to store context blob");
+    }
+    let domain_fields = crate::session::persistence::SessionContextFields::from(fields.clone());
+    if let Err(e) = state.persistence.store_context_fields(sid, &domain_fields) {
+        warn!(session_id = %sid, error = %e, "failed to store context fields");
+    }
+
+    let ingest_result: Result<(), String> = async {
+        // ── 1. Embed ──────────────────────────────────────────────────────────
+        let embedder = state
+            .wait_for_embedder(Duration::from_secs(120))
+            .await
+            .map_err(|e| format!("Embedding failed: {e}"))?;
+        let raw_chunks_owned = raw_chunks.clone();
+        let embeddings = tokio::task::spawn_blocking(move || {
+            let refs: Vec<&str> = raw_chunks_owned.iter().map(|s| s.as_str()).collect();
+            embedder.embed_batch(&refs)
+        })
+        .await
+        .map_err(|e| format!("Embedder task panicked: {e}"))?
+        .map_err(|e| format!("Embedding failed: {e}"))?;
+
+        // ── 2. Ingest into vector store ───────────────────────────────────────
+        let refs: Vec<&str> = raw_chunks.iter().map(|s| s.as_str()).collect();
+        let chunks: Vec<Chunk> = refs
+            .iter()
+            .zip(embeddings)
+            .map(|(text, embedding)| Chunk {
+                id: Uuid::new_v4(),
+                text: text.to_string(),
+                embedding,
+                session_id: sid,
+            })
+            .collect();
+        state
+            .vector_store
+            .ingest(sid, chunks)
+            .await
+            .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
+
+        // ── 3. Extract digest via LLM ─────────────────────────────────────────
+        let llm = llm_for_digest(&state);
+        let digest = extract_digest(&blob, llm.as_ref()).await.map_err(|e| {
+            warn!(error = %e, "digest extraction failed");
+            format!("Digest extraction failed — try rephrasing your context. ({e})")
+        })?;
+
+        *state.session_digest.write().await = Some(digest.clone());
+        if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
+            warn!(session_id = %sid, error = %e, "failed to persist session digest");
+        }
+
+        // ── 4. Transition → DIGEST_REVIEW ─────────────────────────────────────
+        {
+            let mut machine = state.state_machine.lock().await;
+            machine
+                .transition(SessionState::DigestReview)
+                .map_err(session_error)?;
+        }
+        emit_state(&app, SessionState::DigestReview);
+
+        info!(session_id = %sid, chunks = raw_chunks.len(), "structured context ingested");
+        Ok(())
+    }
+    .await;
+
+    if ingest_result.is_err() {
+        rollback_ingest_to_configuring(&state, &app).await;
+    }
+    ingest_result
+}
+
+/// Load persisted structured context fields for the given session.
+///
+/// Used by draft restore to re-populate the Session Design form exactly as
+/// the user left it. All fields default to empty string for sessions created
+/// before the v6 migration — callers check `job_description.is_empty()` to
+/// detect legacy sessions.
+#[tauri::command]
+pub async fn get_session_context_fields(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<SessionContextFieldsDto, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+    state
+        .persistence
+        .load_context_fields(sid)
+        .map(SessionContextFieldsDto::from)
+        .map_err(|e| e.to_string())
+}
+
 /// Accept the (possibly edited) digest and trigger pre-warming.
 ///
 /// Valid from: `DIGEST_REVIEW`.  
@@ -627,6 +802,9 @@ pub async fn get_session_snapshot(
             .as_ref()
             .filter(|m| !m.context_text.is_empty())
             .map(|m| m.context_text.clone()),
+        context_fields: resume_meta
+            .as_ref()
+            .map(|m| SessionContextFieldsDto::from(m.context_fields.clone())),
     })
 }
 

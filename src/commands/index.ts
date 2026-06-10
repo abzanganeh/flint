@@ -186,6 +186,17 @@ export interface DigestDto {
   topicsToAvoid: string[];
 }
 
+/** Structured Session Design context fields (Phase 5.5.1). */
+export interface SessionContextFields {
+  jobDescription: string;
+  profile: string;
+  companyOverview: string;
+  leadershipPrinciples: string;
+  roleExpectations: string;
+  technicalPrep: string;
+  strategyNotes: string;
+}
+
 export interface SessionSnapshotDto {
   sessionId: string | null;
   state: string;
@@ -193,7 +204,10 @@ export interface SessionSnapshotDto {
   name?: string;
   sessionType?: string;
   domain?: string;
+  /** Assembled RAG blob — kept for backward compat. */
   contextText?: string;
+  /** Structured fields (Phase 5.5.1). Present from CONFIGURING onward. */
+  contextFields?: SessionContextFields;
 }
 
 /** Create a new session. Returns the session UUID string. */
@@ -203,6 +217,29 @@ export const createSession = (config: SessionConfigDto): Promise<string> =>
 /** Chunk, embed, and ingest context text; extract the digest. */
 export const ingestContext = (sessionId: string, text: string): Promise<void> =>
   invoke<void>("ingest_context", { sessionId, text });
+
+/**
+ * Ingest structured Session Design fields (Phase 5.5.1).
+ *
+ * Validates `jobDescription` and `profile` are non-empty on the Rust side,
+ * assembles a labelled RAG blob, stores each field in its own SQLite column,
+ * then runs the full embed → digest pipeline. Use this instead of `ingestContext`
+ * for all v1.5 sessions.
+ */
+export const ingestStructuredContext = (
+  sessionId: string,
+  fields: SessionContextFields,
+): Promise<void> =>
+  invoke<void>("ingest_structured_context", { sessionId, fields });
+
+/**
+ * Load persisted structured context fields for a session.
+ *
+ * All fields default to empty string for sessions created before v6. Check
+ * `jobDescription.length > 0` to detect whether structured fields were stored.
+ */
+export const getSessionContextFields = (sessionId: string): Promise<SessionContextFields> =>
+  invoke<SessionContextFields>("get_session_context_fields", { sessionId });
 
 /** Discard in-progress session setup and return the state machine to IDLE. */
 export const abandonSessionDraft = (): Promise<void> =>
