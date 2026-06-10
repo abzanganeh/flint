@@ -11,9 +11,8 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto,
-    SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto,
-    UserDto, WebSourceDto,
+    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto,
+    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_session_state_change, emit_token_usage_update, SessionStateChangePayload,
@@ -1250,9 +1249,10 @@ fn record_research_usage(
             usage_category: "research_chat".to_string(),
         },
     );
-    let _ = state
-        .cost_tracker
-        .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
+    let _ =
+        state
+            .cost_tracker
+            .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
 }
 
 /// Run a single research chat turn: RAG when sufficient, otherwise web search (Tavily).

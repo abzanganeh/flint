@@ -248,9 +248,15 @@ mod tests {
         assert!(!rag_is_sufficient(&[]));
         assert!(!rag_is_sufficient(&[scored("weak", 0.2)]));
         // just below threshold
-        assert!(!rag_is_sufficient(&[scored("near", RAG_SUFFICIENCY_THRESHOLD - 0.001)]));
+        assert!(!rag_is_sufficient(&[scored(
+            "near",
+            RAG_SUFFICIENCY_THRESHOLD - 0.001
+        )]));
         // exactly at threshold
-        assert!(rag_is_sufficient(&[scored("exact", RAG_SUFFICIENCY_THRESHOLD)]));
+        assert!(rag_is_sufficient(&[scored(
+            "exact",
+            RAG_SUFFICIENCY_THRESHOLD
+        )]));
         // above threshold
         assert!(rag_is_sufficient(&[scored("strong", 0.5)]));
     }
