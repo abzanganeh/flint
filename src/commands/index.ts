@@ -523,3 +523,19 @@ export const isProviderKeyPresent = (provider: LlmProvider): Promise<boolean> =>
  */
 export const clearProviderKey = (provider: LlmProvider): Promise<void> =>
   invoke<void>("clear_provider_key", { provider });
+
+// ── Phase 5.5.3 — Question bank ──────────────────────────────────────────────
+
+export const getQuestionBank = (sessionId: string): Promise<string[]> =>
+  invoke<string[]>("get_question_bank", { sessionId });
+
+export const addToQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
+  invoke<string[]>("add_to_question_bank", { sessionId, question });
+
+export const removeFromQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
+  invoke<string[]>("remove_from_question_bank", { sessionId, question });
+
+// ── Phase 5.5.6 — Research chat ──────────────────────────────────────────────
+
+export const runResearchChat = (sessionId: string, message: string): Promise<void> =>
+  invoke<void>("run_research_chat", { sessionId, message });

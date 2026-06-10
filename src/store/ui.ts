@@ -16,6 +16,7 @@ interface UIStore extends UIState {
   setPanelLayout: (panelLayout: PanelLayout) => void;
   setPanelSize: (id: PanelId, size: number) => void;
   togglePanelCollapsed: (id: PanelId) => void;
+  setLayoutMode: (mode: "stack" | "grid") => void;
   setFocusedPanel: (focusedPanel: PanelId | null) => void;
   appendDirectionalToken: (token: string) => void;
   appendDepthToken: (token: string) => void;
@@ -32,6 +33,7 @@ interface UIStore extends UIState {
     input: number,
     output: number,
     costDelta: number,
+    usageCategory?: string,
   ) => void;
   setCostCap: (cap: CostCapState) => void;
   setNotificationQueue: (notificationQueue: Notification[]) => void;
@@ -42,14 +44,29 @@ interface UIStore extends UIState {
   setAnswerNowMode: (answerNowMode: boolean) => void;
 }
 
+// Default panel sizes per layout mode.
+// Stack mode follows FR-4.6: Transcript 20%, Directional 30%, Depth 30%,
+// Clarifying 10%, Context 10% (weights sum to 5).
+const DEFAULT_STACK_SIZES: PanelLayout["sizes"] = {
+  transcript: 1.0,
+  directional: 1.5,
+  depth: 1.5,
+  clarifying: 0.5,
+  context: 0.5,
+};
+
+// Grid mode (horizontal): Directional dominant, Transcript and Depth equal,
+// Clarifying + Context narrower side panels.
+const DEFAULT_GRID_SIZES: PanelLayout["sizes"] = {
+  transcript: 1,
+  directional: 1.5,
+  depth: 1,
+  clarifying: 0.75,
+  context: 0.75,
+};
+
 const defaultPanelLayout: PanelLayout = {
-  sizes: {
-    transcript: 1,
-    directional: 1.5,
-    depth: 1,
-    clarifying: 0.75,
-    context: 0.75,
-  },
+  sizes: DEFAULT_STACK_SIZES,
   collapsed: {
     transcript: false,
     directional: false,
@@ -64,6 +81,7 @@ const defaultTokenUsage: TokenUsage = {
   output: 0,
   total: 0,
   costEstimate: 0,
+  breakdown: {},
 };
 
 const defaultCostCap: CostCapState = {
@@ -74,8 +92,31 @@ const defaultCostCap: CostCapState = {
   maxCostEstimateUsd: null,
 };
 
+// Safely resolve the persisted layout mode. Defaults to "stack" (FR-4.6) when
+// localStorage is missing (e.g. SSR) or contains an unknown value.
+function readPersistedLayoutMode(): "stack" | "grid" {
+  try {
+    const raw = typeof localStorage !== "undefined"
+      ? localStorage.getItem("flint_layout_mode")
+      : null;
+    if (raw === "stack" || raw === "grid") return raw;
+  } catch {
+    // localStorage may throw in privacy modes; fall through to default.
+  }
+  return "stack";
+}
+
+function persistLayoutMode(mode: "stack" | "grid"): void {
+  try {
+    localStorage.setItem("flint_layout_mode", mode);
+  } catch {
+    // Best-effort persistence; toggle still applies in-memory.
+  }
+}
+
 export const useUIStore = create<UIStore>((set) => ({
   panelLayout: defaultPanelLayout,
+  layoutMode: readPersistedLayoutMode(),
   focusedPanel: null,
   streamingBuffers: { directional: "", depth: "" },
   confidenceLevel: null,
@@ -93,6 +134,19 @@ export const useUIStore = create<UIStore>((set) => ({
   answerNowMode: false,
 
   setPanelLayout: (panelLayout) => set({ panelLayout }),
+
+  setLayoutMode: (layoutMode) => {
+    persistLayoutMode(layoutMode);
+    set((s) => ({
+      layoutMode,
+      // Reseed sizes to that mode's defaults so panel proportions match the
+      // spec. Collapsed state is preserved — it's per-panel intent, not layout.
+      panelLayout: {
+        ...s.panelLayout,
+        sizes: layoutMode === "stack" ? DEFAULT_STACK_SIZES : DEFAULT_GRID_SIZES,
+      },
+    }));
+  },
 
   setPanelSize: (id, size) =>
     set((s) => ({
@@ -158,15 +212,22 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setTokenUsage: (tokenUsage) => set({ tokenUsage }),
 
-  accumulateTokenUsage: (input, output, costDelta) =>
-    set((s) => ({
-      tokenUsage: {
-        input: s.tokenUsage.input + input,
-        output: s.tokenUsage.output + output,
-        total: s.tokenUsage.total + input + output,
-        costEstimate: s.tokenUsage.costEstimate + costDelta,
-      },
-    })),
+  accumulateTokenUsage: (input, output, costDelta, usageCategory) =>
+    set((s) => {
+      const breakdown = { ...s.tokenUsage.breakdown };
+      if (usageCategory) {
+        breakdown[usageCategory] = (breakdown[usageCategory] ?? 0) + input + output;
+      }
+      return {
+        tokenUsage: {
+          input: s.tokenUsage.input + input,
+          output: s.tokenUsage.output + output,
+          total: s.tokenUsage.total + input + output,
+          costEstimate: s.tokenUsage.costEstimate + costDelta,
+          breakdown,
+        },
+      };
+    }),
 
   setCostCap: (costCap) => set({ costCap }),
 

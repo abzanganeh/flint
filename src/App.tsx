@@ -23,6 +23,7 @@ import {
 } from "./lib/smartResumeImport";
 import { SessionState } from "./types";
 import "./App.css";
+import "./components/rehearsal-enrichment.css";
 import DigestReview from "./screens/DigestReview";
 import HealthCheck from "./screens/HealthCheck";
 import LiveOverlay from "./screens/LiveOverlay";
@@ -30,8 +31,9 @@ import Onboarding from "./screens/Onboarding";
 import { Recovery } from "./screens/Recovery";
 import Rehearsal from "./screens/Rehearsal";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
-import { SessionList } from "./screens/SessionList";
 import TitleBar, { type NavItem } from "./components/TitleBar";
+import { SessionList } from "./screens/SessionList";
+import ProviderSettings from "./screens/ProviderSettings";
 
 type AppScreen =
   | "loading"
@@ -40,6 +42,7 @@ type AppScreen =
   | "recovery"
   | "session-design"
   | "session-list"
+  | "settings"
   | "digest-review"
   | "rehearsal"
   | "live";
@@ -52,6 +55,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "recovery",
   "session-design",
   "session-list",
+  "settings",
   "digest-review",
   "rehearsal",
 ];
@@ -339,6 +343,11 @@ function App() {
       onClick: () => setScreen("session-list"),
       active: screen === "session-list",
     },
+    {
+      label: "Settings",
+      onClick: () => setScreen("settings"),
+      active: screen === "settings",
+    },
   ];
 
   const isShellScreen = SHELL_SCREENS.includes(screen);
@@ -423,6 +432,14 @@ function App() {
             setScreen("session-design");
           }}
         />
+      </Shell>
+    );
+  }
+
+  if (screen === "settings") {
+    return (
+      <Shell nav={nav}>
+        <ProviderSettings onBack={() => setScreen("session-design")} />
       </Shell>
     );
   }

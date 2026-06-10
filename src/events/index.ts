@@ -46,6 +46,7 @@ export interface TokenUsageUpdateEventPayload {
   output: number;
   total: number;
   cost_estimate: number;
+  usage_category: string;
 }
 
 export interface SessionStateChangeEventPayload {
@@ -220,3 +221,27 @@ export const onSmartResumeImportToken = (
   handler: (token: string) => void,
 ): Promise<UnlistenFn> =>
   listen<string>("smart_resume_import_token", (event) => handler(event.payload));
+
+// ── Phase 5.5.6 — Research chat events ────────────────────────────────────
+
+export interface ResearchTokenEventPayload {
+  token: string;
+}
+
+export interface ResearchCitationEventPayload {
+  chunks: string[];
+}
+
+export const onResearchToken = (
+  handler: (payload: ResearchTokenEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<ResearchTokenEventPayload>("research_token", (event) =>
+    handler(event.payload),
+  );
+
+export const onResearchCitation = (
+  handler: (payload: ResearchCitationEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<ResearchCitationEventPayload>("research_citation", (event) =>
+    handler(event.payload),
+  );

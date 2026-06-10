@@ -53,6 +53,9 @@ pub struct TokenUsageUpdatePayload {
     pub output: u64,
     pub total: u64,
     pub cost_estimate: f64,
+    /// Categorises the spend so the UI can break it down per activity.
+    /// Values: `"rehearsal_turn"`, `"live_turn"`, `"research_chat"`, `"digest"`, `"pre_warm"`.
+    pub usage_category: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

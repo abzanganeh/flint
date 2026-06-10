@@ -143,7 +143,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -270,6 +270,21 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v6")?;
         info!("sqlite schema migrated to version 6");
+    }
+
+    if current < 7 {
+        // Phase 5.5.3 — question bank persisted per session.
+        // Stored as a JSON array of strings so the Rehearsal UI can add/remove
+        // questions without a column-per-question schema.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN question_bank_json TEXT NOT NULL DEFAULT '[]';
+
+            PRAGMA user_version = 7;
+            ",
+        )
+        .context("schema migration v7")?;
+        info!("sqlite schema migrated to version 7");
     }
 
     Ok(())
@@ -1002,6 +1017,40 @@ impl SessionPersistence {
             technical_prep: tp,
             strategy_notes: sn,
         })
+    }
+
+    // ── Question bank (Phase 5.5.3) ──────────────────────────────────────────
+
+    /// Persist the question bank JSON for a session.
+    ///
+    /// `questions` is the full ordered list; the caller owns de-dup / ordering.
+    pub fn store_question_bank(&self, session_id: Uuid, questions: &[String]) -> Result<()> {
+        let json = serde_json::to_string(questions).context("serialize question bank")?;
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET question_bank_json = ?1 WHERE id = ?2",
+            rusqlite::params![json, sid],
+        )
+        .context("store question bank")?;
+        debug!(session_id = %session_id, count = questions.len(), "question bank stored");
+        Ok(())
+    }
+
+    /// Load the persisted question bank for a session. Returns an empty vec
+    /// when no questions have been saved or the column defaulted to `'[]'`.
+    pub fn load_question_bank(&self, session_id: Uuid) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let json: String = conn
+            .query_row(
+                "SELECT question_bank_json FROM sessions WHERE id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .context("load question bank")?;
+        let questions: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
+        Ok(questions)
     }
 
     /// Return the raw context text for a session (empty string if not stored).
@@ -2116,6 +2165,82 @@ mod tests {
         let meta = db.get_session_metadata(sid).unwrap();
         assert_eq!(meta.context_fields.job_description, "Senior Rust engineer");
         assert!(meta.context_fields.profile.is_empty());
+    }
+
+    // ── Phase 5.5.3 — question bank ──────────────────────────────────────
+
+    #[test]
+    fn store_and_load_question_bank_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Bank", "interview", "swe")
+            .unwrap();
+        let qs = vec![
+            "Tell me about yourself".to_string(),
+            "Why this company?".to_string(),
+            "Describe a hard bug".to_string(),
+        ];
+        db.store_question_bank(sid, &qs).unwrap();
+        let loaded = db.load_question_bank(sid).unwrap();
+        assert_eq!(loaded, qs);
+    }
+
+    #[test]
+    fn load_question_bank_defaults_to_empty_for_new_session() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "New", "interview", "swe")
+            .unwrap();
+        let loaded = db.load_question_bank(sid).unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn store_question_bank_overwrites_previous_value() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Overwrite", "interview", "swe")
+            .unwrap();
+        db.store_question_bank(sid, &["A".to_string(), "B".to_string()])
+            .unwrap();
+        db.store_question_bank(sid, &["C".to_string()]).unwrap();
+        let loaded = db.load_question_bank(sid).unwrap();
+        assert_eq!(loaded, vec!["C".to_string()]);
+    }
+
+    #[test]
+    fn store_question_bank_preserves_order() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Order", "interview", "swe")
+            .unwrap();
+        let qs = vec!["z".to_string(), "a".to_string(), "m".to_string()];
+        db.store_question_bank(sid, &qs).unwrap();
+        let loaded = db.load_question_bank(sid).unwrap();
+        assert_eq!(
+            loaded, qs,
+            "insertion order must be preserved across reload"
+        );
+    }
+
+    #[test]
+    fn load_question_bank_recovers_from_corrupted_json() {
+        // The migration default is `'[]'` but a future bug or manual edit could
+        // leave a malformed value. We never want to crash the session on read.
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Corrupted", "interview", "swe")
+            .unwrap();
+        {
+            let conn = db.db.lock().unwrap();
+            conn.execute(
+                "UPDATE sessions SET question_bank_json = ?1 WHERE id = ?2",
+                params!["{not json", sid.to_string()],
+            )
+            .unwrap();
+        }
+        let loaded = db.load_question_bank(sid).unwrap();
+        assert!(loaded.is_empty());
     }
 
     #[test]
