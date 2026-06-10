@@ -33,7 +33,8 @@ import Rehearsal from "./screens/Rehearsal";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
-import ProviderSettings from "./screens/ProviderSettings";
+import { SessionSummary } from "./screens/SessionSummary";
+import Settings from "./screens/Settings";
 
 type AppScreen =
   | "loading"
@@ -45,7 +46,8 @@ type AppScreen =
   | "settings"
   | "digest-review"
   | "rehearsal"
-  | "live";
+  | "live"
+  | "session-summary";
 
 // Screens that render inside the standard shell (title bar + top padding).
 // "live" has its own frameless overlay layout.
@@ -58,6 +60,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "settings",
   "digest-review",
   "rehearsal",
+  "session-summary",
 ];
 
 interface ShellProps {
@@ -365,8 +368,7 @@ function App() {
       <LiveOverlay
         sessionId={sessionId}
         onEnded={() => {
-          setSessionId(null);
-          setScreen("session-design");
+          setScreen("session-summary");
         }}
         onReturnToSetup={() => void handleReturnToSessionDesign()}
       />
@@ -439,7 +441,7 @@ function App() {
   if (screen === "settings") {
     return (
       <Shell nav={nav}>
-        <ProviderSettings onBack={() => setScreen("session-design")} />
+        <Settings onBack={() => setScreen("session-design")} />
       </Shell>
     );
   }
@@ -501,6 +503,19 @@ function App() {
           sessionId={sessionId}
           onComplete={() => setScreen("live")}
           onReturnToSetup={() => void handleReturnToSessionDesign()}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "session-summary") {
+    return (
+      <Shell nav={nav}>
+        <SessionSummary
+          onDone={() => {
+            setSessionId(null);
+            setScreen("session-list");
+          }}
         />
       </Shell>
     );

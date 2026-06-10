@@ -3,7 +3,7 @@ mod auth_session;
 mod commands;
 pub mod confidence;
 pub mod cost;
-mod deep_link;
+pub mod deep_link;
 pub mod digest;
 mod dto;
 mod events;

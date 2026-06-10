@@ -2,6 +2,33 @@
 
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+/// Scan process arguments and the `FLINT_IMPORT_URL` env variable to capture
+/// a cold-start import token before the React WebView mounts.
+///
+/// Priority: first matching CLI arg wins; env var is the fallback for dev
+/// workflows where the shell handler passes the URL via the environment.
+pub fn capture_cold_start_token() -> Option<String> {
+    for arg in std::env::args().skip(1) {
+        if let Some(t) = parse_import_token(&arg) {
+            return Some(t);
+        }
+    }
+    capture_cold_start_token_from_env()
+}
+
+/// Check only `FLINT_IMPORT_URL` for a cold-start token (no argv scan).
+///
+/// Useful in tests where `std::env::args()` reflects the test runner's own
+/// arguments rather than a `flint://` deep link.
+pub fn capture_cold_start_token_from_env() -> Option<String> {
+    let url = std::env::var("FLINT_IMPORT_URL").ok()?;
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_import_token(trimmed)
+}
+
 /// Extract the handoff token from `flint://import?token=<uuid>`.
 pub fn parse_import_token(url: &str) -> Option<String> {
     let trimmed = url.trim();
@@ -104,5 +131,60 @@ mod tests {
             token.as_deref(),
             Some("550e8400-e29b-41d4-a716-446655440000")
         );
+    }
+
+    #[test]
+    fn accepts_import_subpath() {
+        // `flint://import/` (with trailing slash) should still be accepted.
+        let token =
+            parse_import_token("flint://import/?token=550e8400-e29b-41d4-a716-446655440000");
+        assert_eq!(
+            token.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn rejects_token_over_64_chars() {
+        // Token beyond 64 chars must be rejected.
+        let long = "a".repeat(65);
+        let url = format!("flint://import?token={long}");
+        assert!(parse_import_token(&url).is_none());
+    }
+
+    #[test]
+    fn accepts_token_exactly_64_chars() {
+        let token_64 = "a".repeat(64);
+        let url = format!("flint://import?token={token_64}");
+        assert_eq!(parse_import_token(&url).as_deref(), Some(token_64.as_str()));
+    }
+
+    #[test]
+    fn token_with_trailing_whitespace_stripped() {
+        // URLs coming from xdg-open on some distros may carry a trailing newline.
+        let token =
+            parse_import_token("  flint://import?token=550e8400-e29b-41d4-a716-446655440000  ");
+        assert_eq!(
+            token.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+    }
+
+    #[test]
+    fn last_token_param_wins_when_duplicated() {
+        // If two `token=` params are present, first match wins (predictable behaviour).
+        let token = parse_import_token(
+            "flint://import?token=first-token-00000000000000000000000000&token=second",
+        );
+        assert_eq!(
+            token.as_deref(),
+            Some("first-token-00000000000000000000000000")
+        );
+    }
+
+    #[test]
+    fn rejects_non_flint_scheme() {
+        assert!(parse_import_token("https://import?token=abc").is_none());
+        assert!(parse_import_token("http://flint?token=abc").is_none());
     }
 }

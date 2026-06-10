@@ -145,24 +145,7 @@ impl AppState {
 
         // Capture a cold-start deep-link token before the React WebView mounts.
         // React polls `get_pending_import_token` during bootstrap to pick this up.
-        let pending_import_token = {
-            let mut token: Option<String> = None;
-            for arg in std::env::args().skip(1) {
-                if let Some(t) = deep_link::parse_import_token(&arg) {
-                    token = Some(t);
-                    break;
-                }
-            }
-            if token.is_none() {
-                if let Ok(url) = std::env::var("FLINT_IMPORT_URL") {
-                    let trimmed = url.trim();
-                    if !trimmed.is_empty() {
-                        token = deep_link::parse_import_token(trimmed);
-                    }
-                }
-            }
-            Mutex::new(token)
-        };
+        let pending_import_token = Mutex::new(deep_link::capture_cold_start_token());
 
         // ── Session persistence ──────────────────────────────────────────────
         let persistence = Arc::new(

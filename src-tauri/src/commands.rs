@@ -722,10 +722,28 @@ pub async fn get_digest(
 ) -> Result<DigestDto, String> {
     validate_session_id(&state, &session_id).await?;
 
-    let guard = state.session_digest.read().await;
-    match guard.as_ref() {
-        Some(digest) => Ok(DigestDto::from(digest.clone())),
-        None => Err("Digest not yet available. Complete context ingestion first.".to_string()),
+    let sid = Uuid::parse_str(&session_id).map_err(|_| "Invalid session_id format".to_string())?;
+
+    // Fast path: digest is still warm in memory.
+    {
+        let guard = state.session_digest.read().await;
+        if let Some(digest) = guard.as_ref() {
+            return Ok(DigestDto::from(digest.clone()));
+        }
+    }
+
+    // Cold path: app restarted since digest was generated — load from SQLite
+    // and repopulate the in-memory cache so subsequent calls are free.
+    match state.persistence.load_session_digest(sid) {
+        Ok(Some(digest)) => {
+            *state.session_digest.write().await = Some(digest.clone());
+            Ok(DigestDto::from(digest))
+        }
+        Ok(None) => Err("Digest not yet available. Complete context ingestion first.".to_string()),
+        Err(e) => {
+            tracing::warn!(error = %e, "get_digest: SQLite fallback failed");
+            Err("Digest not yet available. Complete context ingestion first.".to_string())
+        }
     }
 }
 
