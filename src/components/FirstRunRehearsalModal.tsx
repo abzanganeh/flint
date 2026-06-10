@@ -56,8 +56,9 @@ export default function FirstRunRehearsalModal({
         <h2 className="first-run-modal__title">Before you rehearse</h2>
 
         <p className="first-run-modal__body">
-          Flint answers questions using <strong>only the context you paste</strong> — not the
-          live web. The more you fill in, the more grounded and specific the answers will be.
+          Flint answers from your pasted context first. During rehearsal you can also
+          search the web (Tavily key in Settings) and save findings into Technical Prep.
+          The more context you gather here, the better live answers will be.
         </p>
 
         {emptyFields.length > 0 && (

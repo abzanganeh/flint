@@ -500,28 +500,31 @@ export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =
 
 // ── Phase 7.7 — Provider API key management ──────────────────────────────────
 
-export type LlmProvider = "groq" | "openai" | "anthropic";
+export type ApiKeyProvider = "groq" | "openai" | "anthropic" | "tavily";
+
+/** @deprecated Use ApiKeyProvider */
+export type LlmProvider = Extract<ApiKeyProvider, "groq" | "openai" | "anthropic">;
 
 /**
  * Store an LLM provider API key in the OS keychain. The plaintext value
  * lives in JS for the duration of this call only and is never echoed by
  * the backend.
  */
-export const saveProviderKey = (provider: LlmProvider, key: string): Promise<void> =>
+export const saveProviderKey = (provider: ApiKeyProvider, key: string): Promise<void> =>
   invoke<void>("save_provider_key", { provider, key });
 
 /**
  * Whether a key is currently stored for `provider`. The actual key value
  * is never sent over IPC.
  */
-export const isProviderKeyPresent = (provider: LlmProvider): Promise<boolean> =>
+export const isProviderKeyPresent = (provider: ApiKeyProvider): Promise<boolean> =>
   invoke<boolean>("is_provider_key_present", { provider });
 
 /**
  * Remove `provider`'s key from the OS keychain. Safe to call when no key
  * is stored.
  */
-export const clearProviderKey = (provider: LlmProvider): Promise<void> =>
+export const clearProviderKey = (provider: ApiKeyProvider): Promise<void> =>
   invoke<void>("clear_provider_key", { provider });
 
 // ── Phase 5.5.3 — Question bank ──────────────────────────────────────────────
@@ -539,3 +542,26 @@ export const removeFromQuestionBank = (sessionId: string, question: string): Pro
 
 export const runResearchChat = (sessionId: string, message: string): Promise<void> =>
   invoke<void>("run_research_chat", { sessionId, message });
+
+export interface WebSource {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface AppendResearchResult {
+  chunksAdded: number;
+}
+
+export const appendResearchToContext = (
+  sessionId: string,
+  question: string,
+  answer: string,
+  webSources: WebSource[],
+): Promise<AppendResearchResult> =>
+  invoke<AppendResearchResult>("append_research_to_context", {
+    sessionId,
+    question,
+    answer,
+    webSources,
+  });

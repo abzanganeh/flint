@@ -230,6 +230,15 @@ export interface ResearchTokenEventPayload {
 
 export interface ResearchCitationEventPayload {
   chunks: string[];
+  webSources?: WebSourceCitation[];
+  source?: "rag" | "web" | "rag_and_web" | "none";
+  canAddToContext?: boolean;
+}
+
+export interface WebSourceCitation {
+  title: string;
+  url: string;
+  snippet: string;
 }
 
 export const onResearchToken = (

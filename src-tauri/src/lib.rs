@@ -16,6 +16,7 @@ mod keychain;
 pub mod llm;
 pub mod orchestrator;
 pub mod rag;
+pub mod research;
 pub mod session;
 pub mod smart_resume;
 mod state;
@@ -179,6 +180,7 @@ pub fn run() {
             commands::remove_from_question_bank,
             // Phase 5.5.6 — research chat
             commands::run_research_chat,
+            commands::append_research_to_context,
             // Live session (Phase 3+)
             commands::start_session,
             commands::stop_session,

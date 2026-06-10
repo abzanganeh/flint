@@ -4,17 +4,18 @@ import {
   clearProviderKey,
   isProviderKeyPresent,
   saveProviderKey,
-  type LlmProvider,
+  type ApiKeyProvider,
 } from "../commands";
 
 interface ProviderRow {
-  provider: LlmProvider;
+  provider: ApiKeyProvider;
   label: string;
   placeholder: string;
   helpUrl: string;
+  description?: string;
 }
 
-const PROVIDERS: ProviderRow[] = [
+const LLM_PROVIDERS: ProviderRow[] = [
   {
     provider: "groq",
     label: "Groq",
@@ -32,6 +33,16 @@ const PROVIDERS: ProviderRow[] = [
     label: "Anthropic",
     placeholder: "sk-ant-…",
     helpUrl: "https://console.anthropic.com/settings/keys",
+  },
+];
+
+const WEB_PROVIDERS: ProviderRow[] = [
+  {
+    provider: "tavily",
+    label: "Tavily (web search)",
+    placeholder: "tvly-…",
+    helpUrl: "https://tavily.com/",
+    description: "Enables web research during rehearsal when your pasted context is insufficient.",
   },
 ];
 
@@ -106,12 +117,17 @@ function ProviderEntry({ row }: ProviderEntryProps) {
         )}
       </div>
 
+      {row.description && (
+        <p className="provider-settings__description">{row.description}</p>
+      )}
+
       {error && <p className="provider-settings__error">{error}</p>}
       {success && <p className="provider-settings__success">Saved.</p>}
 
       {!editing ? (
         <div className="provider-settings__actions">
           <button
+            type="button"
             className="provider-settings__btn provider-settings__btn--edit"
             onClick={() => setEditing(true)}
           >
@@ -119,6 +135,7 @@ function ProviderEntry({ row }: ProviderEntryProps) {
           </button>
           {keyPresent && (
             <button
+              type="button"
               className="provider-settings__btn provider-settings__btn--clear"
               onClick={() => void handleClear()}
             >
@@ -158,6 +175,7 @@ function ProviderEntry({ row }: ProviderEntryProps) {
           </button>
           <button
             className="provider-settings__btn provider-settings__btn--cancel"
+            type="button"
             onClick={() => setEditing(false)}
           >
             Cancel
@@ -184,12 +202,20 @@ export default function ProviderSettings({ onBack }: ProviderSettingsProps) {
         <h2 className="provider-settings__title">API Keys</h2>
         <p className="provider-settings__subtitle">
           Keys are stored in your OS keychain — never in plain text or uploaded anywhere.
-          Groq is required for digest extraction and research chat.
+          Groq is required for digest extraction. Tavily enables web research during rehearsal prep.
         </p>
       </div>
 
+      <h3 className="provider-settings__section-title">LLM providers</h3>
       <div className="provider-settings__list">
-        {PROVIDERS.map((row) => (
+        {LLM_PROVIDERS.map((row) => (
+          <ProviderEntry key={row.provider} row={row} />
+        ))}
+      </div>
+
+      <h3 className="provider-settings__section-title">Web search</h3>
+      <div className="provider-settings__list">
+        {WEB_PROVIDERS.map((row) => (
           <ProviderEntry key={row.provider} row={row} />
         ))}
       </div>

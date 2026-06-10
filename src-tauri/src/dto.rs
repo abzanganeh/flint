@@ -293,6 +293,24 @@ pub struct SessionSnapshotDto {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Prep research DTOs (Phase 5.6)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSourceDto {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendResearchResultDto {
+    pub chunks_added: usize,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Session list DTOs (Phase 6)
 // ──────────────────────────────────────────────────────────────────────────────
 

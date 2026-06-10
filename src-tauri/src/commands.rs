@@ -11,8 +11,9 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionContextFieldsDto,
-    SessionSnapshotDto, SmartResumeImportDto, UserDto,
+    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto,
+    SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto,
+    UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_session_state_change, emit_token_usage_update, SessionStateChangePayload,
@@ -30,6 +31,10 @@ use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
+use crate::research::{self, tavily, ResearchSource};
+
+/// Approximate base chars added to a research prompt (template + labels).
+const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
 use crate::session::draft;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
@@ -1195,20 +1200,62 @@ pub async fn remove_from_question_bank(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Phase 5.5.6 — Research chat
+// Phase 5.5.6 / 5.6 — Research chat (RAG + prep web search)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Run a single research chat turn grounded in session RAG context only.
-///
-/// Retrieves the top-8 most relevant chunks for `message`, builds a context
-/// block, sends one non-streaming completion, then emits a `research_token`
-/// event with the answer text and a `research_citation` event with the
-/// source chunk texts. No memory across turns — each call is independent.
-///
-/// Phase 5.5.7 — emits a `token_usage_update` with
-/// `usage_category: "research_chat"` so the per-session widget can show the
-/// breakdown, and records against the Phase 7.4 cost tracker. Suspended
-/// trackers reject the call before any LLM spend.
+fn emit_research_citation(
+    app: &AppHandle,
+    source: ResearchSource,
+    rag_chunks: &[String],
+    web_sources: &[crate::interfaces::web_search::WebSearchResult],
+) {
+    let web_payload: Vec<serde_json::Value> = web_sources
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "title": s.title,
+                "url": s.url,
+                "snippet": s.snippet,
+            })
+        })
+        .collect();
+    let can_add = source == ResearchSource::Web || source == ResearchSource::RagAndWeb;
+    let _ = app.emit(
+        "research_citation",
+        serde_json::json!({
+            "chunks": rag_chunks,
+            "webSources": web_payload,
+            "source": source.as_str(),
+            "canAddToContext": can_add,
+        }),
+    );
+}
+
+fn record_research_usage(
+    app: &AppHandle,
+    state: &AppState,
+    prompt_len: usize,
+    response_len: usize,
+) {
+    let input_tokens = (prompt_len as u64 + 500) / 4;
+    let output_tokens = (response_len as u64 + 100) / 4;
+    let cost_estimate = (input_tokens + output_tokens) as f64 * 0.0000002;
+    emit_token_usage_update(
+        app,
+        TokenUsageUpdatePayload {
+            input: input_tokens,
+            output: output_tokens,
+            total: input_tokens + output_tokens,
+            cost_estimate,
+            usage_category: "research_chat".to_string(),
+        },
+    );
+    let _ = state
+        .cost_tracker
+        .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
+}
+
+/// Run a single research chat turn: RAG when sufficient, otherwise web search (Tavily).
 ///
 /// Valid from: `REHEARSING` only.
 #[tauri::command]
@@ -1242,7 +1289,6 @@ pub async fn run_research_chat(
         return Err("Research message must not be empty.".to_string());
     }
 
-    // Embed the question to retrieve relevant chunks.
     let embedder = state
         .wait_for_embedder(std::time::Duration::from_secs(30))
         .await
@@ -1265,92 +1311,145 @@ pub async fn run_research_chat(
         .await
         .map_err(|e| format!("RAG retrieval failed: {e}"))?;
 
-    if chunks.is_empty() {
-        // Emit an honest "not in context" response rather than hallucinating.
-        let canned = "I don't have information about that in the pasted context.";
-        let _ = app.emit("research_token", serde_json::json!({ "token": canned }));
-        let _ = app.emit("research_citation", serde_json::json!({ "chunks": [] }));
-        // Cheap path — record only the embedding spend so the widget shows movement.
-        let input_tokens = (message.len() as u64 + 50) / 4;
-        let output_tokens = (canned.len() as u64) / 4;
-        let cost = (input_tokens + output_tokens) as f64 * 0.0000002;
-        emit_token_usage_update(
-            &app,
-            TokenUsageUpdatePayload {
-                input: input_tokens,
-                output: output_tokens,
-                total: input_tokens + output_tokens,
-                cost_estimate: cost,
-                usage_category: "research_chat".to_string(),
-            },
-        );
-        let _ = state
-            .cost_tracker
-            .record_turn_with_transition(input_tokens, output_tokens, cost);
-        return Ok(());
-    }
-
-    let context_block: String = chunks
-        .iter()
-        .enumerate()
-        .map(|(i, c)| format!("[{}] {}", i + 1, c.chunk.text))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    let prompt = format!(
-        "You are a research assistant for interview preparation. \
-        Answer the question using ONLY the pasted context below. \
-        If the answer is not in the context, say so explicitly.\n\n\
-        CONTEXT:\n{context_block}\n\n\
-        QUESTION: {message}\n\n\
-        ANSWER:"
-    );
-
     let llm = llm_for_digest(&state);
-    let response = llm
-        .complete(
-            prompt.clone(),
-            CompletionConfig {
-                max_tokens: Some(400),
-                temperature: 0.1,
-                stream: false,
-            },
-        )
+    let web = tavily::resolve_tavily();
+
+    let outcome = research::run_prep_research_turn(&message, chunks, llm, web)
         .await
-        .map_err(|e| format!("Research chat LLM call failed: {e}"))?;
+        .map_err(|e| format!("Research turn failed: {e}"))?;
 
-    // Emit response as a single token event (non-streaming for simplicity).
-    let _ = app.emit("research_token", serde_json::json!({ "token": response }));
-
-    // Emit citations so the UI can show which chunks grounded the answer.
-    let citation_texts: Vec<&str> = chunks.iter().map(|c| c.chunk.text.as_str()).collect();
     let _ = app.emit(
-        "research_citation",
-        serde_json::json!({ "chunks": citation_texts }),
+        "research_token",
+        serde_json::json!({ "token": outcome.response }),
     );
 
-    // Phase 5.5.7 + 7.4 — record token spend and surface to the UI / cost cap.
-    // The 4 chars/token heuristic mirrors the orchestrator's accounting in
-    // `run_turn`; the +500 budget covers the system framing in the prompt.
-    let input_tokens = (prompt.len() as u64 + 500) / 4;
-    let output_tokens = (response.len() as u64 + 100) / 4;
-    let cost_estimate = (input_tokens + output_tokens) as f64 * 0.0000002;
-    emit_token_usage_update(
+    emit_research_citation(
         &app,
-        TokenUsageUpdatePayload {
-            input: input_tokens,
-            output: output_tokens,
-            total: input_tokens + output_tokens,
-            cost_estimate,
-            usage_category: "research_chat".to_string(),
-        },
+        outcome.source,
+        &outcome.rag_citations,
+        &outcome.web_sources,
     );
-    let _ =
-        state
-            .cost_tracker
-            .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
+
+    record_research_usage(
+        &app,
+        &state,
+        message.len() + RESEARCH_PROMPT_OVERHEAD_CHARS,
+        outcome.response.len(),
+    );
 
     Ok(())
+}
+
+/// Append a prep research answer (and optional web sources) into session RAG context.
+///
+/// Adds a labelled block to Technical Prep, re-chunks, embeds, and ingests.
+/// Valid from: `REHEARSING` only.
+#[tauri::command]
+pub async fn append_research_to_context(
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+    answer: String,
+    web_sources: Vec<WebSourceDto>,
+) -> Result<AppendResearchResultDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "append_research_to_context is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let question = question.trim().to_string();
+    let answer = answer.trim().to_string();
+    if question.is_empty() || answer.is_empty() {
+        return Err("Question and answer must not be empty.".to_string());
+    }
+
+    let web_hits: Vec<crate::interfaces::web_search::WebSearchResult> = web_sources
+        .into_iter()
+        .map(|s| crate::interfaces::web_search::WebSearchResult {
+            title: s.title,
+            url: s.url,
+            snippet: s.snippet,
+        })
+        .collect();
+
+    let block = research::format_research_append_block(&question, &answer, &web_hits);
+
+    let mut fields = state
+        .persistence
+        .load_context_fields(sid)
+        .map_err(|e| e.to_string())?;
+
+    if !fields.technical_prep.trim().is_empty() {
+        fields.technical_prep.push_str("\n\n");
+    }
+    fields.technical_prep.push_str(&block);
+    state
+        .persistence
+        .store_context_fields(sid, &fields)
+        .map_err(|e| e.to_string())?;
+
+    let existing_text = state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())?;
+    let merged = if existing_text.trim().is_empty() {
+        format!("[TECHNICAL PREPARATION]\n{block}")
+    } else {
+        format!("{existing_text}\n\n[TECHNICAL PREPARATION — WEB RESEARCH]\n{block}")
+    };
+    state
+        .persistence
+        .store_context_text(sid, &merged)
+        .map_err(|e| e.to_string())?;
+
+    let raw_chunks = chunk_text(&block, 200, 50);
+    if raw_chunks.is_empty() {
+        return Ok(AppendResearchResultDto { chunks_added: 0 });
+    }
+
+    let embedder = state
+        .wait_for_embedder(std::time::Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("Embedding unavailable: {e}"))?;
+
+    let raw_owned = raw_chunks.clone();
+    let embeddings = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = raw_owned.iter().map(|s| s.as_str()).collect();
+        embedder.embed_batch(&refs)
+    })
+    .await
+    .map_err(|e| format!("Embedder task panicked: {e}"))?
+    .map_err(|e| format!("Embedding failed: {e}"))?;
+
+    let ingest_chunks: Vec<Chunk> = raw_chunks
+        .into_iter()
+        .zip(embeddings)
+        .map(|(text, embedding)| Chunk {
+            id: Uuid::new_v4(),
+            text,
+            embedding,
+            session_id: sid,
+        })
+        .collect();
+    let count = ingest_chunks.len();
+
+    state
+        .vector_store
+        .ingest(sid, ingest_chunks)
+        .await
+        .map_err(|e| format!("Failed to ingest research into RAG: {e}"))?;
+
+    info!(session_id = %sid, chunks_added = count, "prep research appended to context");
+    Ok(AppendResearchResultDto {
+        chunks_added: count,
+    })
 }
 
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
