@@ -165,6 +165,7 @@ pub fn run() {
             commands::abandon_session_draft,
             commands::confirm_digest,
             commands::get_digest,
+            commands::reextract_digest,
             commands::import_from_smart_resume,
             commands::get_pending_import_token,
             commands::get_session_context,

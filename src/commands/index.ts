@@ -253,6 +253,10 @@ export const confirmDigest = (sessionId: string, digest: DigestDto): Promise<voi
 export const getDigest = (sessionId: string): Promise<DigestDto> =>
   invoke<DigestDto>("get_digest", { sessionId });
 
+/** Re-run digest extraction without re-embedding (DIGEST_REVIEW only). */
+export const reextractDigest = (sessionId: string): Promise<DigestDto> =>
+  invoke<DigestDto>("reextract_digest", { sessionId });
+
 /** Return persisted context text for any session (Past Sessions → Start similar). */
 export const getSessionContext = (sessionId: string): Promise<string> =>
   invoke<string>("get_session_context", { sessionId });

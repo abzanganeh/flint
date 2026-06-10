@@ -132,8 +132,22 @@ function App() {
   const [pendingImportToken, setPendingImportToken] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const [settingsReturnScreen, setSettingsReturnScreen] =
+    useState<AppScreen>("session-design");
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    "api-keys" | "usage-cap" | "privacy"
+  >("api-keys");
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
+
+  const openSettings = (
+    returnTo: AppScreen = screen,
+    initialTab: "api-keys" | "usage-cap" | "privacy" = "api-keys",
+  ) => {
+    setSettingsReturnScreen(returnTo);
+    setSettingsInitialTab(initialTab);
+    setScreen("settings");
+  };
 
   const queueImportToken = (token: string | null) => {
     if (!token) return;
@@ -299,6 +313,40 @@ function App() {
     };
   }, []);
 
+  // If Rust still has a DIGEST_REVIEW draft but the UI landed on session-design
+  // (e.g. Settings → Back used the wrong screen), route back to Digest Review.
+  useEffect(() => {
+    if (screen !== "session-design") return;
+    let cancelled = false;
+    void getSessionSnapshot()
+      .then((snapshot) => {
+        if (cancelled) return;
+        if (
+          snapshot.sessionId &&
+          snapshot.state === SessionState.DIGEST_REVIEW
+        ) {
+          setSessionId(snapshot.sessionId);
+          setScreen("digest-review");
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [screen]);
+
+  const handleEditContextFromDigest = async () => {
+    if (!sessionId) return;
+    try {
+      const snapshot = await returnToSessionDesign(sessionId);
+      setSessionId(snapshot.sessionId);
+      setSessionPreFill(preFillFromSnapshot(snapshot));
+      setScreen("session-design");
+    } catch (err) {
+      setImportError(String(err));
+    }
+  };
+
   const handleReturnToSessionDesign = async () => {
     if (!sessionId) {
       setScreen("session-design");
@@ -348,7 +396,7 @@ function App() {
     },
     {
       label: "Settings",
-      onClick: () => setScreen("settings"),
+      onClick: () => openSettings(screen),
       active: screen === "settings",
     },
   ];
@@ -441,7 +489,10 @@ function App() {
   if (screen === "settings") {
     return (
       <Shell nav={nav}>
-        <Settings onBack={() => setScreen("session-design")} />
+        <Settings
+          initialTab={settingsInitialTab}
+          onBack={() => setScreen(settingsReturnScreen)}
+        />
       </Shell>
     );
   }
@@ -483,6 +534,8 @@ function App() {
         <DigestReview
           sessionId={sessionId}
           onComplete={() => setScreen("rehearsal")}
+          onOpenSettings={() => openSettings("digest-review", "api-keys")}
+          onEditContext={() => void handleEditContextFromDigest()}
           onStartOver={() => {
             void abandonSessionDraft()
               .catch(() => undefined)

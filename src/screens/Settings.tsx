@@ -16,6 +16,7 @@ type Tab = "api-keys" | "usage-cap" | "privacy";
 
 interface Props {
   onBack?: () => void;
+  initialTab?: Tab;
 }
 
 // ── Cost Cap Tab ──────────────────────────────────────────────────────────────
@@ -266,8 +267,9 @@ function PrivacyTab() {
           Delete account
         </h4>
         <p className="settings-tab__description">
-          Permanently deletes your account, all session data, and your API keys
-          from the keychain. This cannot be undone.
+          Permanently deletes your account and all session data. API keys in your
+          OS keychain are kept so you do not need to re-enter them. This cannot be
+          undone.
         </p>
         <label className="settings-tab__label">
           Type <strong>DELETE</strong> to confirm
@@ -298,8 +300,8 @@ const TAB_LABELS: Record<Tab, string> = {
   privacy: "Privacy",
 };
 
-export default function Settings({ onBack }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>("api-keys");
+export default function Settings({ onBack, initialTab = "api-keys" }: Props) {
+  const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   return (
     <div className="settings-screen">

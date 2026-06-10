@@ -751,6 +751,59 @@ pub async fn get_digest(
     }
 }
 
+/// Re-run digest extraction for the current session without re-embedding.
+///
+/// Valid from `DIGEST_REVIEW` only. Uses the persisted context blob and the
+/// currently configured Groq key. Context fields and Smart Resume handoff data
+/// are untouched.
+#[tauri::command]
+pub async fn reextract_digest(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<DigestDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::DigestReview {
+            return Err(format!(
+                "reextract_digest is only valid from DIGEST_REVIEW (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    if keychain::get_api_key("groq").is_err() {
+        return Err(
+            "Groq API key is required for digest extraction. Add it in Settings → API Keys."
+                .to_string(),
+        );
+    }
+
+    let blob = state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())?;
+    if blob.trim().is_empty() {
+        return Err(
+            "Session context is missing — use Edit context to return to Session Design."
+                .to_string(),
+        );
+    }
+
+    let llm = llm_for_digest(&state);
+    let digest = extract_digest(&blob, llm.as_ref())
+        .await
+        .map_err(|e| format!("Digest extraction failed — {e}"))?;
+
+    *state.session_digest.write().await = Some(digest.clone());
+    if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
+        warn!(session_id = %sid, error = %e, "failed to persist re-extracted digest");
+    }
+
+    Ok(DigestDto::from(digest))
+}
+
 /// Redeem a single-use Smart Resume handoff token and return session pre-fill data.
 #[tauri::command]
 pub async fn import_from_smart_resume(token: String) -> Result<SmartResumeImportDto, String> {
@@ -1074,7 +1127,10 @@ pub async fn return_to_session_design(
     };
 
     match current {
-        SessionState::Rehearsing | SessionState::Ready | SessionState::Ended => {
+        SessionState::Rehearsing
+        | SessionState::Ready
+        | SessionState::Ended
+        | SessionState::DigestReview => {
             let mut machine = state.state_machine.lock().await;
             machine
                 .transition(SessionState::Configuring)
@@ -2213,7 +2269,7 @@ pub async fn delete_account(
         token,
         Arc::clone(&state.persistence),
         Arc::clone(&state.vector_store),
-        Box::new(keychain::clear_all_user_secrets),
+        Box::new(keychain::clear_account_secrets),
     )
     .await;
 

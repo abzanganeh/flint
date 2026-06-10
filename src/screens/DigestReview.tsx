@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 
-import { confirmDigest, getDigest, type DigestDto } from "../commands";
+import {
+  confirmDigest,
+  getDigest,
+  isProviderKeyPresent,
+  reextractDigest,
+  type DigestDto,
+} from "../commands";
 import { onSessionStateChange } from "../events";
+import { isPlaceholderDigest } from "../lib/digestPlaceholder";
 import { SessionState } from "../types";
 import "./DigestReview.css";
 
@@ -121,16 +128,22 @@ export interface DigestReviewProps {
   sessionId: string;
   onComplete: () => void;
   onStartOver: () => void;
+  onOpenSettings: () => void;
+  onEditContext: () => void;
 }
 
 export default function DigestReview({
   sessionId,
   onComplete,
   onStartOver,
+  onOpenSettings,
+  onEditContext,
 }: DigestReviewProps) {
   const [digest, setDigest] = useState<DigestDto | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isConfirming, setIsConfirming] = useState(false);
+  const [isReextracting, setIsReextracting] = useState(false);
+  const [groqKeyPresent, setGroqKeyPresent] = useState<boolean | null>(null);
   const [preWarmPhase, setPreWarmPhase] = useState<PreWarmPhase>("idle");
   const [error, setError] = useState<string | null>(null);
 
@@ -139,9 +152,16 @@ export default function DigestReview({
     onCompleteRef.current = onComplete;
   }, [onComplete]);
 
+  const refreshGroqKey = () => {
+    void isProviderKeyPresent("groq")
+      .then(setGroqKeyPresent)
+      .catch(() => setGroqKeyPresent(false));
+  };
+
   // ── Fetch digest on mount ─────────────────────────────────────────────────
   useEffect(() => {
     setIsLoading(true);
+    refreshGroqKey();
     getDigest(sessionId)
       .then((d) => {
         setDigest(d);
@@ -152,6 +172,21 @@ export default function DigestReview({
         setIsLoading(false);
       });
   }, [sessionId]);
+
+  const needsGroqKey =
+    digest !== null && isPlaceholderDigest(digest) && groqKeyPresent !== true;
+
+  const handleReextract = () => {
+    setIsReextracting(true);
+    setError(null);
+    reextractDigest(sessionId)
+      .then((d) => {
+        setDigest(d);
+        refreshGroqKey();
+      })
+      .catch((err: unknown) => setError(String(err)))
+      .finally(() => setIsReextracting(false));
+  };
 
   // ── Listen to state-change events ────────────────────────────────────────
   useEffect(() => {
@@ -223,6 +258,48 @@ export default function DigestReview({
           <div className="dr-loading">
             <div className="dr-spinner" aria-hidden="true" />
             <span>Loading digest…</span>
+          </div>
+        )}
+
+        {needsGroqKey && (
+          <div className="dr-groq-banner" role="status">
+            <p>
+              Digest fields show placeholders because no Groq API key was configured
+              during extraction. Add your key, then re-extract — your session context
+              is saved.
+            </p>
+            <div className="dr-groq-banner__actions">
+              <button
+                type="button"
+                className="dr-btn-secondary"
+                onClick={onOpenSettings}
+                disabled={isConfirming || isReextracting}
+              >
+                Add Groq API key
+              </button>
+              <button
+                type="button"
+                className="dr-btn-secondary"
+                onClick={onEditContext}
+                disabled={isConfirming || isReextracting}
+              >
+                Edit context
+              </button>
+            </div>
+          </div>
+        )}
+
+        {!isLoading && digest && groqKeyPresent && isPlaceholderDigest(digest) && (
+          <div className="dr-groq-banner dr-groq-banner--ready" role="status">
+            <p>Groq key is configured. Re-extract the digest from your saved context.</p>
+            <button
+              type="button"
+              className="dr-btn-secondary"
+              onClick={handleReextract}
+              disabled={isConfirming || isReextracting}
+            >
+              {isReextracting ? "Re-extracting…" : "Re-extract digest"}
+            </button>
           </div>
         )}
 
@@ -339,10 +416,33 @@ export default function DigestReview({
         {/* Actions */}
         {!isLoading && digest && (
           <div className="dr-actions">
+            {groqKeyPresent && !isPlaceholderDigest(digest) && (
+              <button
+                type="button"
+                className="dr-btn-secondary"
+                onClick={handleReextract}
+                disabled={isConfirming || isReextracting}
+              >
+                {isReextracting ? "Re-extracting…" : "Re-extract"}
+              </button>
+            )}
+            <button
+              type="button"
+              className="dr-btn-secondary"
+              onClick={onEditContext}
+              disabled={isConfirming || isReextracting}
+            >
+              Edit context
+            </button>
             <button
               className="dr-btn-primary"
               onClick={handleConfirm}
-              disabled={isConfirming}
+              disabled={isConfirming || isReextracting || needsGroqKey}
+              title={
+                needsGroqKey
+                  ? "Add a Groq API key and re-extract the digest first"
+                  : undefined
+              }
             >
               {isConfirming ? "Pre-warming…" : "Confirm and Pre-warm"}
             </button>
