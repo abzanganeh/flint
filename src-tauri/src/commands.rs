@@ -219,17 +219,79 @@ pub async fn run_health_check(
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// LLM for digest extraction: Groq when a key is in the keychain, else stub.
-fn llm_for_digest(state: &AppState) -> Arc<dyn LLMProvider> {
-    match keychain::get_api_key("groq") {
-        Ok(api_key) => match GroqProvider::new(api_key) {
-            Ok(provider) => Arc::new(provider),
-            Err(e) => {
-                warn!(error = %e, "Groq provider init failed for digest — using stub");
-                Arc::clone(&state.llm)
-            }
-        },
-        Err(_) => Arc::clone(&state.llm),
+/// Attempt digest extraction through a provider chain: Groq → OpenRouter → Ollama.
+///
+/// Every provider failure is logged and appended to an accumulated error string so
+/// the final message tells the user exactly what was tried and why each step failed.
+/// The real HTTP/network error is included via `{:#}` (full anyhow chain).
+async fn extract_digest_resilient(
+    context_text: &str,
+    _state: &AppState,
+) -> Result<crate::digest::Digest, String> {
+    let mut failures: Vec<String> = Vec::new();
+
+    // ── 1. Groq ──────────────────────────────────────────────────────────────
+    if let Ok(api_key) = keychain::get_api_key("groq") {
+        match GroqProvider::new(api_key) {
+            Ok(provider) => match extract_digest(context_text, &provider).await {
+                Ok(digest) => return Ok(digest),
+                Err(e) => {
+                    let detail = format!("{e:#}");
+                    warn!(error = %detail, "digest extraction via Groq failed");
+                    failures.push(format!("Groq: {detail}"));
+                }
+            },
+            Err(e) => failures.push(format!("Groq provider init: {e}")),
+        }
     }
+
+    // ── 2. OpenRouter ─────────────────────────────────────────────────────────
+    if let Some(provider) = openrouter::resolve_openrouter() {
+        match extract_digest(context_text, provider.as_ref()).await {
+            Ok(digest) => return Ok(digest),
+            Err(e) => {
+                let detail = format!("{e:#}");
+                warn!(error = %detail, "digest extraction via OpenRouter failed");
+                failures.push(format!("OpenRouter: {detail}"));
+            }
+        }
+    }
+
+    // ── 3. Ollama ─────────────────────────────────────────────────────────────
+    if let Ok(ollama) = OllamaProvider::new() {
+        if ollama.health_check().await {
+            match extract_digest(context_text, &ollama).await {
+                Ok(digest) => return Ok(digest),
+                Err(e) => {
+                    let detail = format!("{e:#}");
+                    warn!(error = %detail, "digest extraction via Ollama failed");
+                    failures.push(format!("Ollama: {detail}"));
+                }
+            }
+        }
+    }
+
+    // ── Build actionable guidance ─────────────────────────────────────────────
+    let detail = failures.join("; ");
+    let guidance = if detail.contains("401")
+        || detail.contains("Unauthorized")
+        || detail.contains("invalid_api_key")
+    {
+        "Your Groq API key appears to be invalid — re-enter it in Settings → API Keys."
+    } else if detail.contains("429") || detail.contains("rate_limit") {
+        "Groq rate limit reached. Wait a moment, or add an OpenRouter key in Settings as a cloud fallback."
+    } else if failures.is_empty() {
+        "No LLM provider is configured. Add a Groq API key in Settings → API Keys."
+    } else {
+        "LLM call failed. Check your API key in Settings → API Keys, or start Ollama on localhost:11434."
+    };
+
+    error!(providers_tried = ?failures, "all digest extraction providers exhausted");
+    Err(if failures.is_empty() {
+        guidance.to_string()
+    } else {
+        format!("{guidance}\n\nDetail: {detail}")
+    })
 }
 
 /// Discard an in-progress session setup and return to IDLE (Start Over).
@@ -432,11 +494,7 @@ pub async fn ingest_context(
             .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
 
         // ── 5. Extract digest via LLM ────────────────────────────────────────
-        let llm = llm_for_digest(&state);
-        let digest = extract_digest(&text, llm.as_ref()).await.map_err(|e| {
-            warn!(error = %e, "digest extraction failed");
-            format!("Digest extraction failed — try rephrasing your context. ({e})")
-        })?;
+        let digest = extract_digest_resilient(&text, &state).await?;
 
         *state.session_digest.write().await = Some(digest.clone());
         if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
@@ -588,11 +646,7 @@ pub async fn ingest_structured_context(
             .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
 
         // ── 3. Extract digest via LLM ─────────────────────────────────────────
-        let llm = llm_for_digest(&state);
-        let digest = extract_digest(&blob, llm.as_ref()).await.map_err(|e| {
-            warn!(error = %e, "digest extraction failed");
-            format!("Digest extraction failed — try rephrasing your context. ({e})")
-        })?;
+        let digest = extract_digest_resilient(&blob, &state).await?;
 
         *state.session_digest.write().await = Some(digest.clone());
         if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
@@ -785,13 +839,6 @@ pub async fn reextract_digest(
         }
     }
 
-    if keychain::get_api_key("groq").is_err() {
-        return Err(
-            "Groq API key is required for digest extraction. Add it in Settings → API Keys."
-                .to_string(),
-        );
-    }
-
     let blob = state
         .persistence
         .get_session_context(sid)
@@ -803,10 +850,7 @@ pub async fn reextract_digest(
         );
     }
 
-    let llm = llm_for_digest(&state);
-    let digest = extract_digest(&blob, llm.as_ref())
-        .await
-        .map_err(|e| format!("Digest extraction failed — {e}"))?;
+    let digest = extract_digest_resilient(&blob, &state).await?;
 
     *state.session_digest.write().await = Some(digest.clone());
     if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
