@@ -6,9 +6,9 @@
 
 ---
 
-## Current Status (audited 2026-06-10 — `feature/strategy-b-phase1b-clean-slate`)
+## Current Status (audited 2026-06-11 — `feature/mock-interview`)
 
-> **You are here:** Phase 1 fully signed off (1.A + 1.B manual test confirmed). Phase 2 code complete — pending manual device test + Chrome Web Store submission. Next code track: **Strategy B Phase 3** — Supabase SSO + unified credit ledger.
+> **You are here:** Phase 8 Mock Interview code complete on `feature/mock-interview` (not merged to `main`). Strategy B Phase 1 signed off; Phase 2 code complete — pending manual device test + Chrome Web Store submission. **Next:** merge mock-interview PR → manual Phase 8 gate → Strategy B Phase 3 (SSO + credit ledger).
 
 | Phase | Code on `main` | Review gate | Notes |
 |-------|----------------|-------------|-------|
@@ -19,6 +19,7 @@
 | 5.5 v1.5 | ✅ Complete | ⏳ Open | Merged via PR #11 — question bank, checklist, research chat, settings, stack layout |
 | 6 Post-session | ✅ Complete | ⏳ Open | Summary screen + `get_digest` fallback added in this branch |
 | 7 Hardening | 🔄 Partial | ⏳ Open | eval baseline committed; 7.1 coverage + 7.8 installers + NFR run still open |
+| **8 Mock Interview** | ⏳ Branch only | ⏳ Open | `feature/mock-interview` @ `3c2aea3` — TTS + coach + mic capture; manual E2E pending |
 | Strategy B Ph1 | ✅ Code + manual | ✅ Signed off | 1.A 2026-06-09; 1.B 2026-06-10 |
 | Strategy B Ph2 | ✅ Code complete | ⏳ Open | Manual device test + Store submission pending |
 
@@ -36,12 +37,13 @@
 
 ### What to implement next
 
-1. **Merge `feature/strategy-b-phase1b-clean-slate`** → closes all ROADMAP.md code gaps + Phase 1.B ✅ signed off
-2. **Merge `feature/extension-mvp`** (flint-extension) + smart-resume test move → Phase 2 code-complete
-3. **Manual Phase 2 gate** — load extension in Chrome, LinkedIn job → Save JD → Open in Flint → verify pre-fill; then submit to Chrome Web Store
-4. **Strategy B Phase 3** — Supabase SSO migration + unified credit ledger (5–7 weeks)
-5. Close Phase 3/4/5 manual review gates in parallel
-6. **7.8** signed installers before extension public beta
+1. **Merge `feature/mock-interview`** → Phase 8 code on `main`; run Phase 8 manual gate (checklist below)
+2. **Phase 8 follow-ups** (post-merge) — dynamic follow-up questions, mock summary/replay UI, Piper/ElevenLabs TTS
+3. **Merge `feature/extension-mvp`** (flint-extension) + smart-resume test move → Phase 2 code-complete
+4. **Manual Phase 2 gate** — load extension in Chrome, LinkedIn job → Save JD → Open in Flint → verify pre-fill; then submit to Chrome Web Store
+5. **Strategy B Phase 3** — Supabase SSO migration + unified credit ledger (5–7 weeks)
+6. Close Phase 3/4/5 manual review gates in parallel
+7. **7.8** signed installers before extension public beta
 
 Companion integration track: `docs/STRATEGY_B_INTEGRATION_PLAN.md`
 
@@ -468,6 +470,75 @@ Comprehensive audit run 2026-06-03 against `.cursor/rules` and `docs/flint_syste
 - [ ] Installers signed and tested on clean macOS/Windows/Linux VMs (7.8)
 - [ ] Stealth: not detected by 3 different screen capture tools tested
 - [ ] Settings UI: provider keys, cost cap, GDPR delete/export (cross-cutting — blocks v1 UX)
+
+---
+
+## Phase 8 — Guided Mock Interview
+
+**Goal:** Mic-only practice mode where an AI interviewer asks digest questions via TTS, the user answers aloud, and Flint streams a suggested answer plus structured coach feedback (grammar, tone, gaps, polished rewrite, score).  
+**Duration:** ~1 week (Phase 1 slice)  
+**Branch:** `feature/mock-interview` @ `3c2aea3` — **not merged to `main`**  
+**Status:** ✅ Code complete — ⏳ manual device gate open
+
+### Architecture (implemented)
+
+| Layer | Module / file | Role |
+|-------|---------------|------|
+| State | `session/state.rs` | `MOCK_INTERVIEW` state; `REHEARSING ↔ MOCK_INTERVIEW → READY` |
+| Persistence | `session/persistence.rs` v8 | `mock_turns` table — question, user_text, audio_path, coach_json, suggested, score |
+| TTS | `mock/tts.rs` | Platform TTS: macOS `say`, Linux `espeak-ng`/`espeak`, Windows PowerShell |
+| Conductor | `mock/conductor.rs` | Sequences `digest.likely_questions`; speaks question; streams suggested answer |
+| Mic | `mock/mic_capture.rs` | Mic-only VAD + Whisper; emits `mock_user_transcribed` |
+| Audio | `mock/audio_writer.rs` | Per-turn WAV under `{app_data}/mock_audio/` |
+| Coach | `mock/coach.rs` | Post-answer LLM → `CoachFeedback` JSON |
+| Commands | `commands.rs` | `start_mock`, `start_mock_turn`, `end_mock_turn`, `skip_mock_turn`, `stop_mock`, `get_mock_turns` |
+| Events | `events.rs` + `src/events/index.ts` | `mock_question_started`, `mock_user_transcribed`, `mock_suggested_token`, `mock_coach_feedback`, `mock_ended` |
+| Prompts | `prompts/mock_coach/`, `prompts/mock_suggested/` | Coach JSON schema + 120-word suggested answer |
+| UI | `MockInterview.tsx`, `SuggestedAnswerPanel.tsx`, `CoachPanel.tsx` | Turn loop + merged guidance panels |
+| Entry | `Rehearsal.tsx` | Purple **Mock Interview** button → `App.tsx` `mock-interview` screen |
+
+### Tasks
+
+| # | Task | Agent | Review? | Status |
+|---|---|---|---|---|
+| 8.1 | `MOCK_INTERVIEW` state + transitions in `session/state.rs` | Cursor Agent | State machine tests | [x] Complete — 5 transition tests |
+| 8.2 | SQLite v8 `mock_turns` + persistence helpers | Cursor Agent | Migration test on fresh DB | [x] Complete — `SCHEMA_VERSION = 8` |
+| 8.3 | Platform TTS for AI interviewer questions | Cursor Agent | Hear question spoken on each OS | [x] Complete — `mock/tts.rs`; Piper/ElevenLabs deferred |
+| 8.4 | Conductor — question sequencer + suggested-answer LLM stream | Cursor Agent (Opus) | Questions from `likely_questions` only | [x] Complete — no dynamic follow-ups yet |
+| 8.5 | Mic-only capture + per-turn WAV writer | Cursor Agent — reference Phase 3 VAD/Whisper | WAV file exists after turn | [x] Complete — `mock/mic_capture.rs`, `audio_writer.rs` |
+| 8.6 | Coach LLM thread — structured JSON feedback + score | Cursor Agent | Coach JSON parser unit tests | [x] Complete — `mock/coach.rs` |
+| 8.7 | Tauri commands + events + frontend screen | Cursor Agent | No raw `invoke()` in components | [x] Complete — IPC via `commands/index.ts` |
+| 8.8 | Rehearsal entry point — **Mock Interview** button | Cursor Agent | Button visible from REHEARSING | [x] Complete |
+| 8.9 | Dynamic follow-up questions (LLM-generated after each answer) | Cursor Agent (Opus) | Conductor generates next Q from context | [ ] Not started — Phase 8.2 |
+| 8.10 | Mock session summary + audio replay in `SessionSummary` | Cursor Agent | Replay WAV per turn from summary | [ ] Not started — `get_mock_turns` exists; UI pending |
+| 8.11 | Upgrade TTS — Piper (local) or ElevenLabs (cloud) | Cursor Agent | Voice quality vs platform TTS | [ ] Not started — platform TTS is Phase 8.1 default |
+| 8.12 | Merge PR + CI green on all platforms | Shell agent | `cargo test`, `vitest`, clippy | [ ] Pending — branch pushed, PR not opened |
+
+### Phase 8 Manual Test Checklist
+
+Prerequisites: Groq API key in Settings; digest confirmed with ≥1 `likely_questions`; mic permission granted; Linux: `espeak-ng` or `espeak` installed for TTS.
+
+- [ ] **Entry** — From Rehearsal, purple **Mock Interview** button visible; click → `MockInterview` screen loads
+- [ ] **State** — Session state transitions to `MOCK_INTERVIEW` (check via devtools / `session_state_change` event)
+- [ ] **TTS** — First question spoken aloud (platform voice); question text shown in interviewer bubble
+- [ ] **Suggested answer** — Tokens stream into Suggested Answer panel while question is displayed
+- [ ] **Start answering** — Click **Start Answering** → REC indicator; speak 10–20 s; live transcript appears in Your Answer panel
+- [ ] **Done answering** — Click **Done Answering** → coach panel shows "Analyzing…" then score + tone/gaps/grammar/polished rewrite
+- [ ] **Skip** — On a later turn, **Skip** advances without recording; conductor moves to next question
+- [ ] **Full run** — Complete all `likely_questions` → `mock_ended` fires → returns to Rehearsal
+- [ ] **Exit** — Mid-session **Exit** → `stop_mock` → back to Rehearsal, state `REHEARSING`
+- [ ] **Persistence** — After a turn, `{app_data}/mock_audio/session_*_turn_*.wav` exists; `mock_turns` row in SQLite has coach_json + score
+- [ ] **Draft recovery** — Kill app during mock → restart → draft session restores to Rehearsal (mock state in `DRAFT_STATES`)
+
+### Phase 8 Review Gate
+
+- [x] `cargo test --lib` passes (374 tests incl. mock state, TTS, WAV, coach JSON)
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `npx vitest run` passes (31 tests)
+- [ ] Manual checklist above passes on Linux (primary dev platform)
+- [ ] Manual checklist passes on macOS and Windows (TTS path differs per OS)
+- [ ] No regression: Rehearsal → Go live still works after mock session
+- [ ] PR merged to `main`
 
 ---
 
