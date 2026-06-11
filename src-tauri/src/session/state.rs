@@ -507,6 +507,7 @@ mod tests {
         assert_eq!(*sm.current(), SessionState::Configuring);
     }
 
+    #[test]
     fn test_valid_rehearsing_to_configuring() {
         let mut sm = drive(&[
             SessionState::Configuring,

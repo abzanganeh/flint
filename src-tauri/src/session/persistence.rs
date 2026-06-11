@@ -1125,32 +1125,44 @@ impl SessionPersistence {
         Ok(())
     }
 
-    /// Update user transcript, audio path, and coach fields after a turn completes.
-    pub fn update_mock_turn_result(
+    /// Update the user-facing turn fields (transcript, audio path, suggested
+    /// answer) without touching coach output.
+    ///
+    /// Coach feedback is written separately by [`update_mock_turn_coach`](Self::update_mock_turn_coach)
+    /// so the two writers cannot race on the same column set. The conductor
+    /// owns this write because it is the only task that has the final
+    /// suggested-answer text from its parallel LLM stream.
+    pub fn update_mock_turn_user_answer(
         &self,
         turn_id: Uuid,
         user_text: &str,
         audio_path: &str,
-        coach_json: &str,
         suggested: &str,
-        score: u8,
     ) -> Result<()> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         conn.execute(
             "UPDATE mock_turns
-             SET user_text = ?1, audio_path = ?2, coach_json = ?3,
-                 suggested = ?4, score = ?5
-             WHERE id = ?6",
-            params![
-                user_text,
-                audio_path,
-                coach_json,
-                suggested,
-                score,
-                turn_id.to_string()
-            ],
+             SET user_text = ?1, audio_path = ?2, suggested = ?3
+             WHERE id = ?4",
+            params![user_text, audio_path, suggested, turn_id.to_string()],
         )
-        .context("update mock turn result")?;
+        .context("update mock turn user answer")?;
+        Ok(())
+    }
+
+    /// Update only the coach feedback columns for a turn.
+    ///
+    /// Pairs with [`update_mock_turn_user_answer`](Self::update_mock_turn_user_answer);
+    /// see that method for the rationale behind splitting these writes.
+    pub fn update_mock_turn_coach(&self, turn_id: Uuid, coach_json: &str, score: u8) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "UPDATE mock_turns
+             SET coach_json = ?1, score = ?2
+             WHERE id = ?3",
+            params![coach_json, score, turn_id.to_string()],
+        )
+        .context("update mock turn coach")?;
         Ok(())
     }
 
@@ -2424,6 +2436,125 @@ mod tests {
         assert_eq!(session.responses.len(), 1);
         // Both the create (IDLE) and explicit CONFIGURING write should be present.
         assert!(!session.state_transitions.is_empty());
+    }
+
+    // ── Mock interview (Phase 8) ─────────────────────────────────────────────
+
+    fn sample_mock_turn(session_id: Uuid, turn_n: u32) -> MockTurn {
+        MockTurn {
+            id: Uuid::new_v4(),
+            session_id,
+            turn_n,
+            question: format!("Question {turn_n}"),
+            user_text: String::new(),
+            audio_path: String::new(),
+            coach_json: String::new(),
+            suggested: String::new(),
+            score: 0,
+        }
+    }
+
+    #[test]
+    fn write_and_load_mock_turn_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let turn = sample_mock_turn(sid, 1);
+        db.write_mock_turn(&turn).unwrap();
+
+        let loaded = db.load_mock_turns(sid).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, turn.id);
+        assert_eq!(loaded[0].turn_n, 1);
+        assert_eq!(loaded[0].question, "Question 1");
+    }
+
+    #[test]
+    fn update_mock_turn_user_answer_writes_only_user_columns() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let turn = sample_mock_turn(sid, 1);
+        db.write_mock_turn(&turn).unwrap();
+
+        // Coach lands first (rare but possible — keeps the test honest).
+        db.update_mock_turn_coach(turn.id, "{\"score\":81}", 81)
+            .unwrap();
+        // Conductor then writes user-side fields.
+        db.update_mock_turn_user_answer(
+            turn.id,
+            "I led the migration to microservices.",
+            "/tmp/answer.wav",
+            "Suggested: lead with outcome, then how.",
+        )
+        .unwrap();
+
+        let row = db
+            .load_mock_turns(sid)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == turn.id)
+            .unwrap();
+        // User-side write must NOT clobber coach fields.
+        assert_eq!(row.coach_json, "{\"score\":81}");
+        assert_eq!(row.score, 81);
+        assert_eq!(row.user_text, "I led the migration to microservices.");
+        assert_eq!(row.audio_path, "/tmp/answer.wav");
+        assert_eq!(row.suggested, "Suggested: lead with outcome, then how.");
+    }
+
+    #[test]
+    fn update_mock_turn_coach_writes_only_coach_columns() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let turn = sample_mock_turn(sid, 1);
+        db.write_mock_turn(&turn).unwrap();
+
+        // Conductor lands first with the user answer and suggested text.
+        db.update_mock_turn_user_answer(
+            turn.id,
+            "transcript",
+            "/tmp/a.wav",
+            "Suggested polished answer",
+        )
+        .unwrap();
+        // Coach updates only its own columns — must NOT wipe suggested/etc.
+        db.update_mock_turn_coach(turn.id, "{\"score\":72}", 72)
+            .unwrap();
+
+        let row = db
+            .load_mock_turns(sid)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == turn.id)
+            .unwrap();
+        assert_eq!(row.suggested, "Suggested polished answer");
+        assert_eq!(row.user_text, "transcript");
+        assert_eq!(row.audio_path, "/tmp/a.wav");
+        assert_eq!(row.coach_json, "{\"score\":72}");
+        assert_eq!(row.score, 72);
+    }
+
+    #[test]
+    fn load_mock_turns_orders_by_turn_n_ascending() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.write_mock_turn(&sample_mock_turn(sid, 3)).unwrap();
+        db.write_mock_turn(&sample_mock_turn(sid, 1)).unwrap();
+        db.write_mock_turn(&sample_mock_turn(sid, 2)).unwrap();
+
+        let loaded = db.load_mock_turns(sid).unwrap();
+        let turns: Vec<u32> = loaded.iter().map(|t| t.turn_n).collect();
+        assert_eq!(turns, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn delete_mock_turns_removes_rows() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.write_mock_turn(&sample_mock_turn(sid, 1)).unwrap();
+        db.write_mock_turn(&sample_mock_turn(sid, 2)).unwrap();
+
+        db.delete_mock_turns(sid).unwrap();
+        assert!(db.load_mock_turns(sid).unwrap().is_empty());
     }
 
     // ── WAL mode ─────────────────────────────────────────────────────────────

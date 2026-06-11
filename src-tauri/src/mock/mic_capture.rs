@@ -51,6 +51,12 @@ pub enum MicCommand {
 pub struct MicCapture {
     cmd_tx: mpsc::Sender<MicCommand>,
     task: JoinHandle<()>,
+    /// Signal channel into the cpal OS thread. The cpal thread blocks on the
+    /// receiver; dropping the sender (which happens when `MicCapture` is
+    /// dropped) wakes the thread so it can drop the `cpal::Stream` and exit
+    /// cleanly. Without this, the previous `thread::park()` implementation
+    /// leaked one `Stream` per `start_mock` → `stop_mock` cycle.
+    _cpal_stop_tx: std::sync::mpsc::Sender<()>,
 }
 
 impl MicCapture {
@@ -68,8 +74,9 @@ impl MicCapture {
         // callback is sync and may be called from an OS audio thread.
         let frame_tx_clone = frame_tx.clone();
         let (stream_ready_tx, stream_ready_rx) = oneshot::channel::<Result<()>>();
+        let (cpal_stop_tx, cpal_stop_rx) = std::sync::mpsc::channel::<()>();
         std::thread::spawn(move || {
-            if let Err(e) = run_cpal_mic_thread(frame_tx_clone, stream_ready_tx) {
+            if let Err(e) = run_cpal_mic_thread(frame_tx_clone, stream_ready_tx, cpal_stop_rx) {
                 error!(error = %e, "mock mic cpal thread failed");
             }
         });
@@ -85,7 +92,11 @@ impl MicCapture {
             app, session_id, audio_dir, whisper, frame_rx, cmd_rx,
         ));
 
-        Ok(Self { cmd_tx, task })
+        Ok(Self {
+            cmd_tx,
+            task,
+            _cpal_stop_tx: cpal_stop_tx,
+        })
     }
 
     /// Begin recording the user's answer for `turn_n`.
@@ -98,22 +109,43 @@ impl MicCapture {
 
     /// Stop recording and await the transcript + audio path for the turn.
     pub async fn end_turn(&self, timeout: Duration) -> Result<(String, String)> {
+        let reply_rx = self.send_end_turn().await?;
+        await_end_turn_reply(reply_rx, timeout).await
+    }
+
+    /// Send the `EndTurn` command and return the reply receiver without
+    /// awaiting it. Callers that hold a session-wide mutex use this to drop
+    /// the guard before awaiting the (potentially long) recording shutdown
+    /// so concurrent commands (e.g. `stop_mock`) are not blocked.
+    pub async fn send_end_turn(&self) -> Result<oneshot::Receiver<(String, String)>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(MicCommand::EndTurn { reply: reply_tx })
             .await
             .context("send EndTurn")?;
-        tokio::time::timeout(timeout, reply_rx)
-            .await
-            .context("end_turn timeout")?
-            .context("reply channel closed")
+        Ok(reply_rx)
     }
 
     /// Shut down the capture loop and release audio resources.
     pub async fn shutdown(self) {
         let _ = self.cmd_tx.send(MicCommand::Shutdown).await;
         let _ = self.task.await;
+        // Dropping `self` releases `_cpal_stop_tx`, which is the signal the
+        // cpal OS thread waits on (see `run_cpal_mic_thread`).
     }
+}
+
+/// Await the reply from a previously-sent `EndTurn`. Pulled out of
+/// `MicCapture::end_turn` so callers that need to release a `Mutex` guard
+/// before awaiting can do so via [`MicCapture::send_end_turn`].
+pub async fn await_end_turn_reply(
+    reply_rx: oneshot::Receiver<(String, String)>,
+    timeout: Duration,
+) -> Result<(String, String)> {
+    tokio::time::timeout(timeout, reply_rx)
+        .await
+        .context("end_turn timeout")?
+        .context("reply channel closed")
 }
 
 // ── cpal thread ───────────────────────────────────────────────────────────────
@@ -121,6 +153,7 @@ impl MicCapture {
 fn run_cpal_mic_thread(
     frame_tx: mpsc::Sender<Vec<f32>>,
     ready_tx: oneshot::Sender<Result<()>>,
+    stop_rx: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
     let host = cpal::default_host();
     let device = host
@@ -148,9 +181,13 @@ fn run_cpal_mic_thread(
     let _ = ready_tx.send(Ok(()));
     info!("mock mic stream running");
 
-    // Keep the stream alive until the process exits.  The capture_loop task
-    // holds the other end of frame_tx; when it drops, this loop will exit.
-    std::thread::park();
+    // Park here until `MicCapture` is dropped (or `shutdown()` is awaited),
+    // which drops `_cpal_stop_tx` and makes this recv return `Err`. The
+    // explicit `drop(stream)` below releases the OS audio device so the next
+    // `start_mock` does not contend with a leaked handle.
+    let _ = stop_rx.recv();
+    drop(stream);
+    info!("mock mic stream stopped");
     Ok(())
 }
 
