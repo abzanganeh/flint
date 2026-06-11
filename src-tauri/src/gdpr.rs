@@ -5,8 +5,8 @@
 //!
 //! 1. **Supabase** — call [`AuthInterface::delete_account`] so the auth row
 //!    and all RLS-scoped session rows are removed server-side.
-//! 2. **OS keychain** — purge every auth token + API key + consent flag
-//!    via [`keychain::clear_all_user_secrets`].
+//! 2. **OS keychain** — purge auth tokens + consent flags via
+//!    [`keychain::clear_account_secrets`]. BYOK API keys are preserved.
 //! 3. **Local vector store** — drop each session's `vec_chunks_{hex}` table
 //!    so embedding data is gone alongside the relational rows.
 //! 4. **Local SQLite** — truncate every user-data table in one transaction
@@ -62,7 +62,7 @@ impl DeleteAccountReport {
 }
 
 /// Abstraction for the keychain cleanup step. The production wiring passes
-/// [`crate::keychain::clear_all_user_secrets`]; tests can pass a stub so
+/// [`crate::keychain::clear_account_secrets`]; tests can pass a stub so
 /// they don't race against the user's real OS keychain.
 pub type KeychainPurge = Box<dyn FnOnce() -> Result<()> + Send>;
 

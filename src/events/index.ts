@@ -8,6 +8,11 @@ export interface TranscriptionChunkEventPayload {
   timestamp: number;
 }
 
+export interface TurnStartedEventPayload {
+  question: string;
+  turn: number;
+}
+
 export interface DirectionalTokenEventPayload {
   token: string;
 }
@@ -102,6 +107,13 @@ export const onTranscriptionChunk = (
   handler: (payload: TranscriptionChunkEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<TranscriptionChunkEventPayload>("transcription_chunk", (event) =>
+    handler(event.payload),
+  );
+
+export const onTurnStarted = (
+  handler: (payload: TurnStartedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<TurnStartedEventPayload>("turn_started", (event) =>
     handler(event.payload),
   );
 
@@ -230,6 +242,15 @@ export interface ResearchTokenEventPayload {
 
 export interface ResearchCitationEventPayload {
   chunks: string[];
+  webSources?: WebSourceCitation[];
+  source?: "rag" | "web" | "rag_and_web" | "none";
+  canAddToContext?: boolean;
+}
+
+export interface WebSourceCitation {
+  title: string;
+  url: string;
+  snippet: string;
 }
 
 export const onResearchToken = (

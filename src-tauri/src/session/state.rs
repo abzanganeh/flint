@@ -284,6 +284,7 @@ const fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
             | (Configuring, Ingesting)
             | (Ingesting, Configuring) // ingest failure rollback — user retries from Session Design
             | (Ingesting, DigestReview)
+            | (DigestReview, Configuring) // user returns to edit context / re-extract
             | (DigestReview, PreWarming)
             | (PreWarming, Rehearsing)
             | (PreWarming, Ready)
@@ -490,6 +491,16 @@ mod tests {
     }
 
     #[test]
+    fn test_valid_digest_review_to_configuring() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+        ]);
+        assert!(sm.transition(SessionState::Configuring).is_ok());
+        assert_eq!(*sm.current(), SessionState::Configuring);
+    }
+
     fn test_valid_rehearsing_to_configuring() {
         let mut sm = drive(&[
             SessionState::Configuring,

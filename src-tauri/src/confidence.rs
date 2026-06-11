@@ -53,7 +53,7 @@ pub fn model_tier_score(provider_name: &str) -> f32 {
     match provider_name {
         "claude-3-5-sonnet" | "claude" => 1.00,
         "gpt-4o" => 0.95,
-        "llama-3-3-70b-versatile" | "groq" => 0.85,
+        "llama-3-3-70b-versatile" | "groq" | "openrouter" => 0.85,
         "claude-3-5-haiku" => 0.85,
         "gpt-4o-mini" => 0.80,
         "llama3.1:8b" | "ollama-8b" => 0.60,

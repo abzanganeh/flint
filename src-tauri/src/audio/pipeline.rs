@@ -30,8 +30,8 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::AppHandle;
@@ -61,20 +61,169 @@ pub struct DetectedQuestion {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Cross-channel echo suppression — first-arrival wins
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The dual-channel architecture assumes headphones. Without them, content
+// leaks across channels in BOTH directions:
+//
+//   - Interviewer audio (speakers) → picked up by the mic → duplicate on MIC.
+//   - The user's own voice → looped back in the conferencing app's call mix
+//     (Teams/Zoom sidetone, far-end echo) → duplicate on SYSTEM.
+//
+// Attribution rule: the genuine source always transcribes FIRST — the echo
+// arrives later because it travels through speakers/network/DSP before being
+// re-captured. So whichever channel produced the content first is the true
+// speaker; a near-duplicate arriving on the opposite channel within the
+// window is the echo and is dropped. This replaces the old "SYSTEM always
+// wins" rule, which mislabelled the user's answers as Interviewer whenever
+// the call mix echoed their voice back.
+//
+// Near-duplicate matching uses two complementary signals:
+//
+//  1. Jaccard word-set overlap (≥ 0.5).  Effective for long utterances where
+//     Whisper's two transcriptions cover the same vocabulary.
+//
+//  2. Ordered prefix match: if the first ⌈N/2⌉ words of both transcriptions
+//     match exactly in order, treat it as an echo.  This catches the common
+//     failure mode where room acoustics cause Whisper to diverge only at the
+//     END of a phrase ("All right, let's take our" vs "All right, let's say
+//     guard") — Jaccard of 0.43 misses it, but the first 3 words agree exactly.
+//
+// Lowering ECHO_JACCARD_THRESHOLD from 0.6 → 0.5 and adding the prefix check
+// substantially reduces bleed-through when the user is not wearing headphones.
+
+const ECHO_WINDOW: Duration = Duration::from_secs(10);
+const ECHO_MIN_WORDS: usize = 3;
+/// Minimum words that must agree in the ordered prefix check.
+const ECHO_PREFIX_MATCH_WORDS: usize = 3;
+const ECHO_JACCARD_THRESHOLD: f32 = 0.5;
+
+#[derive(Clone)]
+struct DedupEntry {
+    tokens: Vec<String>,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct CrossChannelDedup {
+    recent_system: Vec<DedupEntry>,
+    recent_mic: Vec<DedupEntry>,
+}
+
+impl CrossChannelDedup {
+    /// Returns true iff `text` near-duplicates content recently transcribed on
+    /// the OPPOSITE channel — i.e. this arrival is the echo, not the source.
+    fn should_suppress(&mut self, source: AudioSource, text: &str, now: Instant) -> bool {
+        let tokens = tokenize_for_echo(text);
+        if tokens.len() < ECHO_MIN_WORDS {
+            return false;
+        }
+        self.prune(now);
+        let opposite = match source {
+            AudioSource::Microphone => &self.recent_system,
+            AudioSource::System => &self.recent_mic,
+        };
+        opposite.iter().any(|entry| {
+            jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD
+                || prefix_matches(&tokens, &entry.tokens)
+        })
+    }
+
+    /// Record an accepted transcript so later echoes on the opposite channel
+    /// can be matched against it.
+    fn record(&mut self, source: AudioSource, text: &str, now: Instant) {
+        let tokens = tokenize_for_echo(text);
+        if tokens.len() < ECHO_MIN_WORDS {
+            return;
+        }
+        let entry = DedupEntry { tokens, at: now };
+        match source {
+            AudioSource::System => self.recent_system.push(entry),
+            AudioSource::Microphone => self.recent_mic.push(entry),
+        }
+        self.prune(now);
+    }
+
+    fn prune(&mut self, now: Instant) {
+        if let Some(cutoff) = now.checked_sub(ECHO_WINDOW) {
+            self.recent_system.retain(|e| e.at >= cutoff);
+            self.recent_mic.retain(|e| e.at >= cutoff);
+        }
+    }
+}
+
+fn tokenize_for_echo(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn jaccard(a: &[String], b: &[String]) -> f32 {
+    use std::collections::HashSet;
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let set_a: HashSet<&String> = a.iter().collect();
+    let set_b: HashSet<&String> = b.iter().collect();
+    let intersection = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+/// True when both token sequences share at least `ECHO_PREFIX_MATCH_WORDS`
+/// ordered tokens at the start of the shorter sequence.
+///
+/// Jaccard is a bag-of-words metric and misses cases where Whisper diverges
+/// only at the end of a phrase due to different acoustic quality on each
+/// channel.  E.g. "all right lets take our" vs "all right lets say guard"
+/// has Jaccard = 0.43 but the first 3 tokens are identical → echo.
+fn prefix_matches(a: &[String], b: &[String]) -> bool {
+    let check = a.len().min(b.len()).min(ECHO_PREFIX_MATCH_WORDS * 2);
+    if check < ECHO_PREFIX_MATCH_WORDS {
+        return false;
+    }
+    let agree = a
+        .iter()
+        .zip(b.iter())
+        .take(check)
+        .filter(|(x, y)| x == y)
+        .count();
+    agree >= ECHO_PREFIX_MATCH_WORDS
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Per-channel processing state
 // ────────────────────────────────────────────────────────────────────────────
 
 /// All stateful processors that run sequentially on one audio channel.
+///
+/// `rnnoise` is `None` for the SYSTEM channel — the digital loopback signal
+/// should not be run through the speech-trained denoiser.
 struct ChannelProcessor {
-    rnnoise: RNNoiseProcessor,
+    rnnoise: Option<RNNoiseProcessor>,
     downsampler: Downsampler,
     vad: VadChunker,
 }
 
 impl ChannelProcessor {
-    fn new() -> Result<Self> {
+    fn new_mic() -> Result<Self> {
         Ok(Self {
-            rnnoise: RNNoiseProcessor::new()?,
+            rnnoise: Some(RNNoiseProcessor::new()?),
+            downsampler: Downsampler::new()?,
+            vad: VadChunker::new()?,
+        })
+    }
+
+    fn new_system() -> Result<Self> {
+        Ok(Self {
+            rnnoise: None,
             downsampler: Downsampler::new()?,
             vad: VadChunker::new()?,
         })
@@ -107,12 +256,14 @@ pub async fn run_audio_pipeline(
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
 ) -> Result<()> {
-    let mut sys_proc = ChannelProcessor::new()?;
-    let mut mic_proc = ChannelProcessor::new()?;
+    let mut sys_proc = ChannelProcessor::new_system()?;
+    let mut mic_proc = ChannelProcessor::new_mic()?;
+    let dedup = Mutex::new(CrossChannelDedup::default());
 
     loop {
+        // No `biased` — fair scheduling prevents MIC starvation under heavy
+        // SYSTEM load (e.g. continuous YouTube audio).
         let frame = tokio::select! {
-            biased;
             f = system_rx.recv() => match f {
                 Some(frame) => frame,
                 None => break,
@@ -137,6 +288,7 @@ pub async fn run_audio_pipeline(
             &detector,
             &question_tx,
             &persistence,
+            &dedup,
         )
         .await
         {
@@ -162,11 +314,19 @@ async fn process_frame(
     detector: &Arc<QuestionDetector>,
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
+    dedup: &Mutex<CrossChannelDedup>,
 ) -> Result<()> {
     let source = frame.source;
 
     // ── Step 1: RNNoise ───────────────────────────────────────────────────
-    proc.rnnoise.process_frame(&mut frame.samples)?;
+    //
+    // Only the MIC channel has RNNoise allocated (ChannelProcessor::new_mic).
+    // SYSTEM is a clean digital loopback — running it through the speech-
+    // trained denoiser damages non-speech spectra (music, multi-speaker
+    // dialogue) and degrades Whisper accuracy on that channel.
+    if let Some(rnn) = &mut proc.rnnoise {
+        rnn.process_frame(&mut frame.samples)?;
+    }
 
     // ── Step 2: Downsample 48kHz → 16kHz ─────────────────────────────────
     let downsampled = proc.downsampler.process(&frame.samples)?;
@@ -185,6 +345,23 @@ async fn process_frame(
     let Some(result) = transcription else {
         return Ok(()); // silence or hallucination — discarded by engine
     };
+
+    let now = Instant::now();
+    {
+        let mut guard = match dedup.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.should_suppress(source, &result.text, now) {
+            tracing::debug!(
+                source = %source,
+                text = %result.text,
+                "suppressed cross-channel echo (first arrival wins)"
+            );
+            return Ok(());
+        }
+        guard.record(source, &result.text, now);
+    }
 
     // ── Step 4b: emit + persist transcript chunk ──────────────────────────
     let speaker = match source {
@@ -286,13 +463,17 @@ mod tests {
 
     #[test]
     fn channel_processor_initialises() {
-        // Verify all three processors can be constructed on the test host.
-        let proc = ChannelProcessor::new();
+        let mic = ChannelProcessor::new_mic();
+        assert!(mic.is_ok(), "mic ChannelProcessor failed: {:?}", mic.err());
+        assert!(mic.unwrap().rnnoise.is_some());
+
+        let sys = ChannelProcessor::new_system();
         assert!(
-            proc.is_ok(),
-            "ChannelProcessor failed to initialise: {:?}",
-            proc.err()
+            sys.is_ok(),
+            "system ChannelProcessor failed: {:?}",
+            sys.err()
         );
+        assert!(sys.unwrap().rnnoise.is_none());
     }
 
     #[test]
@@ -306,6 +487,80 @@ mod tests {
     }
 
     #[test]
+    fn jaccard_word_overlap_matches_near_duplicate_transcripts() {
+        let a = tokenize_for_echo("Why do you like to work with Fisher Investors?");
+        let b = tokenize_for_echo("Why do you like work with Fisher Investors");
+        assert!(jaccard(&a, &b) >= ECHO_JACCARD_THRESHOLD);
+
+        let c = tokenize_for_echo("Tell me about a time you led a team");
+        assert!(jaccard(&a, &c) < ECHO_JACCARD_THRESHOLD);
+    }
+
+    #[test]
+    fn dedup_suppresses_mic_echo_when_system_spoke_first() {
+        // Interviewer speaks through speakers → mic re-captures it.
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(
+            AudioSource::System,
+            "Why do you like to work with Fisher Investors?",
+            now,
+        );
+
+        assert!(dedup.should_suppress(
+            AudioSource::Microphone,
+            "Why do you like work with Fisher Investors",
+            now + Duration::from_millis(500),
+        ));
+    }
+
+    #[test]
+    fn dedup_suppresses_system_echo_when_mic_spoke_first() {
+        // User answers → conferencing app loops their voice back into the
+        // call mix → SYSTEM channel transcribes the duplicate. The user's
+        // answer must NOT be re-attributed to the interviewer.
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(
+            AudioSource::Microphone,
+            "I am excited about the AI Engineer opportunity at Fisher",
+            now,
+        );
+
+        assert!(dedup.should_suppress(
+            AudioSource::System,
+            "I am excited about the AI Engineer opportunity at Fisher",
+            now + Duration::from_millis(800),
+        ));
+    }
+
+    #[test]
+    fn dedup_does_not_suppress_distinct_content_on_either_channel() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(AudioSource::System, "tell me about a project you led", now);
+
+        assert!(!dedup.should_suppress(
+            AudioSource::Microphone,
+            "I led the fraud detection platform migration last year",
+            now + Duration::from_millis(500),
+        ));
+    }
+
+    #[test]
+    fn dedup_drops_entries_outside_the_window() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(AudioSource::System, "alpha bravo charlie delta", now);
+        let later = now + ECHO_WINDOW + Duration::from_secs(1);
+        assert!(!dedup.should_suppress(
+            AudioSource::Microphone,
+            "alpha bravo charlie delta",
+            later,
+        ));
+    }
+
+    #[test]
     fn pipeline_frame_constants_aligned() {
         // RNNoise frame = 480 samples, VAD frame = 320 samples.
         // Downsampler produces 160 samples per call.
@@ -313,5 +568,52 @@ mod tests {
         use crate::audio::rnnoise::DOWNSAMPLED_FRAME_SIZE;
         assert_eq!(RNNOISE_FRAME_SIZE, 480);
         assert_eq!(DOWNSAMPLED_FRAME_SIZE * 2, VAD_FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn prefix_match_catches_whisper_end_of_utterance_divergence() {
+        // Whisper transcribes the same audio differently on each channel because
+        // room acoustics degrade the mic capture. Jaccard alone misses these
+        // (Jaccard = 0.43 < 0.5), but the first three tokens are identical.
+        let system = tokenize_for_echo("all right lets take our");
+        let mic = tokenize_for_echo("all right lets say guard");
+        assert!(
+            jaccard(&system, &mic) < ECHO_JACCARD_THRESHOLD,
+            "Jaccard should NOT trigger on its own"
+        );
+        assert!(
+            prefix_matches(&system, &mic),
+            "prefix_matches should catch the shared prefix"
+        );
+    }
+
+    #[test]
+    fn dedup_suppresses_acoustic_bleed_via_prefix_match() {
+        // The system channel transcribes the interviewer's question. The mic
+        // picks it up acoustically and Whisper produces a divergent ending.
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(
+            AudioSource::System,
+            "all right lets take our time with this",
+            now,
+        );
+        assert!(
+            dedup.should_suppress(
+                AudioSource::Microphone,
+                "all right lets say guard over here",
+                now + Duration::from_millis(300),
+            ),
+            "prefix-matched acoustic echo should be suppressed"
+        );
+    }
+
+    #[test]
+    fn prefix_match_does_not_suppress_distinct_content_sharing_a_short_preamble() {
+        // Both could start with "so" but diverge quickly — must NOT suppress.
+        let a = tokenize_for_echo("so tell me about your leadership experience");
+        let b = tokenize_for_echo("so the biggest challenge was aligning stakeholders");
+        // Only "so" matches at position 0 — well below ECHO_PREFIX_MATCH_WORDS.
+        assert!(!prefix_matches(&a, &b));
     }
 }

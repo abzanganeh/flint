@@ -45,6 +45,7 @@ export interface Notification {
 }
 
 export interface ClarifyingQuestion {
+  id: string;
   question: string;
   rank: number;
 }
@@ -72,6 +73,16 @@ export interface CostCapState {
   maxCostEstimateUsd: number | null;
 }
 
+/** A completed orchestrator turn archived for panel history. */
+export interface TurnCard {
+  id: string;
+  turn: number;
+  question: string;
+  directional: string;
+  depth: string;
+  confidenceLevel: ConfidenceLevel | null;
+}
+
 export interface UIState {
   panelLayout: PanelLayout;
   layoutMode: "stack" | "grid";
@@ -80,6 +91,10 @@ export interface UIState {
     directional: string;
     depth: string;
   };
+  /** Question heading the answer currently streaming into the buffers. */
+  currentQuestion: string;
+  /** Most recent completed turns, newest first. Capped at TURN_HISTORY_LIMIT. */
+  turnHistory: TurnCard[];
   confidenceLevel: ConfidenceLevel | null;
   depthPrePrepared: boolean;
   digestSummary: string | null;

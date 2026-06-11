@@ -7,20 +7,36 @@ use tracing::info;
 pub type HardwareTier = u8;
 
 /// Recommended Whisper.cpp model for the detected tier.
+///
+/// Variants are ordered from smallest/fastest to largest/most accurate so
+/// the tier mapping can rely on natural ordering when bumped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)]
 pub enum WhisperModel {
     TinyEn,
-    SmallEn,
     BaseEn,
+    SmallEn,
+    MediumEn,
 }
 
 impl WhisperModel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::TinyEn => "tiny.en",
-            Self::SmallEn => "small.en",
             Self::BaseEn => "base.en",
+            Self::SmallEn => "small.en",
+            Self::MediumEn => "medium.en",
+        }
+    }
+
+    /// Resolve a model name (`tiny.en`, `base.en`, ...) to a typed variant.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_lowercase().as_str() {
+            "tiny.en" | "tiny" => Some(Self::TinyEn),
+            "base.en" | "base" => Some(Self::BaseEn),
+            "small.en" | "small" => Some(Self::SmallEn),
+            "medium.en" | "medium" => Some(Self::MediumEn),
+            _ => None,
         }
     }
 }
@@ -144,9 +160,10 @@ fn format_os() -> String {
 
 fn recommended_whisper_model(tier: HardwareTier) -> WhisperModel {
     match tier {
-        1 | 2 => WhisperModel::TinyEn,
+        1 => WhisperModel::TinyEn,
+        2 => WhisperModel::BaseEn,
         3 => WhisperModel::SmallEn,
-        _ => WhisperModel::BaseEn,
+        _ => WhisperModel::SmallEn,
     }
 }
 
@@ -339,9 +356,27 @@ mod tests {
     }
 
     #[test]
-    fn whisper_model_by_tier() {
+    fn whisper_model_by_tier_is_monotonic() {
         assert_eq!(recommended_whisper_model(1), WhisperModel::TinyEn);
+        assert_eq!(recommended_whisper_model(2), WhisperModel::BaseEn);
         assert_eq!(recommended_whisper_model(3), WhisperModel::SmallEn);
-        assert_eq!(recommended_whisper_model(4), WhisperModel::BaseEn);
+        assert_eq!(recommended_whisper_model(4), WhisperModel::SmallEn);
+    }
+
+    #[test]
+    fn whisper_model_from_name_round_trip() {
+        for m in [
+            WhisperModel::TinyEn,
+            WhisperModel::BaseEn,
+            WhisperModel::SmallEn,
+            WhisperModel::MediumEn,
+        ] {
+            assert_eq!(WhisperModel::from_name(m.as_str()), Some(m));
+        }
+        assert_eq!(
+            WhisperModel::from_name("Small"),
+            Some(WhisperModel::SmallEn)
+        );
+        assert!(WhisperModel::from_name("bogus").is_none());
     }
 }

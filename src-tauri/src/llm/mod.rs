@@ -5,5 +5,6 @@
 pub mod failover;
 pub mod groq;
 pub mod ollama;
+pub mod openrouter;
 pub mod provider;
 pub mod rate_limiter;

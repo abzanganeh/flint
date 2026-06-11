@@ -6,11 +6,12 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use tauri::{AppHandle, Runtime};
+use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -67,24 +68,35 @@ pub async fn run_directional<R: Runtime>(
 
     let mut full_response = String::new();
     let mut first_token = true;
+    let stream_deadline = Instant::now() + Duration::from_secs(60);
 
-    while let Some(token_result) = stream.next().await {
+    while Instant::now() < stream_deadline {
         if ctx.turn_cancel.load(Ordering::Acquire) {
             break;
         }
-        let token = token_result.context("directional token error")?;
-
-        if first_token {
-            let ttft_ms = ttft_start.elapsed().as_millis() as u64;
-            log_first_token(ctx.session_id, ttft_ms, &provider_name);
-            if ttft_ms > 900 {
-                log_ttft_breach(ctx.session_id, ttft_ms);
+        match timeout(Duration::from_secs(15), stream.next()).await {
+            Ok(Some(Ok(token))) => {
+                if first_token {
+                    let ttft_ms = ttft_start.elapsed().as_millis() as u64;
+                    log_first_token(ctx.session_id, ttft_ms, &provider_name);
+                    if ttft_ms > 900 {
+                        log_ttft_breach(ctx.session_id, ttft_ms);
+                    }
+                    first_token = false;
+                }
+                full_response.push_str(&token);
+                emit_directional_token(&app, DirectionalTokenPayload { token });
             }
-            first_token = false;
+            Ok(Some(Err(e))) => return Err(e).context("directional token error"),
+            Ok(None) => break,
+            Err(_) => {
+                warn!(
+                    session_id = %ctx.session_id,
+                    "directional stream stalled — returning partial response"
+                );
+                break;
+            }
         }
-
-        full_response.push_str(&token);
-        emit_directional_token(&app, DirectionalTokenPayload { token });
     }
 
     let stream_ms = ttft_start.elapsed().as_millis() as u64;

@@ -199,6 +199,10 @@ impl LLMProvider for OllamaProvider {
         true
     }
 
+    async fn health_check(&self) -> bool {
+        self.check_health().await
+    }
+
     fn context_window(&self) -> usize {
         CONTEXT_WINDOW
     }

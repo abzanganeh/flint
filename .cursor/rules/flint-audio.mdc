@@ -58,7 +58,7 @@ Silence frames are **NEVER** sent to Whisper.
 
 ## System Audio Loopback per Platform
 - **Linux (PipeWire):** loopback module loaded automatically if not present.
-- **Linux (PulseAudio):** `pactl load-module module-loopback` at session start.
+- **Linux (PipeWire):** capture system audio from the default sink's `.monitor` source. Never run bare `pactl load-module module-loopback` — it routes mic to speakers and persists after exit.
 - **Linux (ALSA only):** warn user — loopback requires additional setup.
 - **Windows:** WASAPI loopback capture.
 - **macOS:** BlackHole virtual audio driver.

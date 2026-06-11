@@ -3,10 +3,15 @@ import { useEffect, useState } from "react";
 import OverlayLayout from "../components/OverlayLayout";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
-import { getSessionSnapshot, startSession, stopSession } from "../commands";
+import {
+  getSessionSnapshot,
+  startSession,
+  stopSession,
+} from "../commands";
 import { onSessionStateChange } from "../events";
 import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
+import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import DirectionalPanel from "../panels/DirectionalPanel";
 import DepthPanel from "../panels/DepthPanel";
@@ -32,6 +37,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
 
   useTokenUsage();
   useCostCap();
+  useOrchestratorStreams();
   useHotkeys(sessionId, lastManualQuestion, !starting);
 
   useEffect(() => {
@@ -44,19 +50,25 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       setStarting(false);
     }, START_TIMEOUT_MS);
 
-    void startSession(sessionId)
-      .then(() => {
+    void (async () => {
+      try {
+        const snapshot = await getSessionSnapshot().catch(() => null);
+        if (!active) return;
+        if (snapshot?.state === SessionState.LIVE) {
+          setStarting(false);
+          return;
+        }
+        await startSession(sessionId);
         if (active) setStarting(false);
-      })
-      .catch((e: unknown) => {
+      } catch (e: unknown) {
         if (active) {
           setError(String(e));
           setStarting(false);
         }
-      })
-      .finally(() => {
+      } finally {
         window.clearTimeout(timeoutId);
-      });
+      }
+    })();
 
     return () => {
       active = false;

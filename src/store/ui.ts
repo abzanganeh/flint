@@ -9,8 +9,13 @@ import type {
   PanelLayout,
   RagChunk,
   TokenUsage,
+  TurnCard,
   UIState,
 } from "../types";
+
+/// Completed turns kept for in-panel history. Enough to scroll back over the
+/// last few questions without growing the overlay unbounded mid-interview.
+const TURN_HISTORY_LIMIT = 8;
 
 interface UIStore extends UIState {
   setPanelLayout: (panelLayout: PanelLayout) => void;
@@ -21,11 +26,13 @@ interface UIStore extends UIState {
   appendDirectionalToken: (token: string) => void;
   appendDepthToken: (token: string) => void;
   clearStreamingBuffers: () => void;
+  /** Turn boundary: archive the current card into history and start fresh. */
+  startTurn: (question: string, turn: number) => void;
   setConfidenceLevel: (level: ConfidenceLevel | null) => void;
   setDepthPrePrepared: (depthPrePrepared: boolean) => void;
   setDigestSummary: (digestSummary: string | null) => void;
   setLastManualQuestion: (question: string) => void;
-  addClarifyingQuestion: (q: ClarifyingQuestion) => void;
+  addClarifyingQuestion: (q: Omit<ClarifyingQuestion, "id">) => void;
   clearClarifyingQuestions: () => void;
   setRagChunks: (chunks: RagChunk[]) => void;
   setTokenUsage: (usage: TokenUsage) => void;
@@ -119,6 +126,8 @@ export const useUIStore = create<UIStore>((set) => ({
   layoutMode: readPersistedLayoutMode(),
   focusedPanel: null,
   streamingBuffers: { directional: "", depth: "" },
+  currentQuestion: "",
+  turnHistory: [],
   confidenceLevel: null,
   depthPrePrepared: false,
   digestSummary: null,
@@ -191,6 +200,38 @@ export const useUIStore = create<UIStore>((set) => ({
       depthPrePrepared: false,
     }),
 
+  startTurn: (question, turn) =>
+    set((s) => {
+      const hasContent =
+        s.streamingBuffers.directional.length > 0 ||
+        s.streamingBuffers.depth.length > 0;
+      const archived: TurnCard[] = hasContent
+        ? [
+            {
+              id:
+                typeof crypto !== "undefined" && "randomUUID" in crypto
+                  ? crypto.randomUUID()
+                  : `${Date.now()}-${Math.random()}`,
+              turn: turn - 1,
+              question: s.currentQuestion,
+              directional: s.streamingBuffers.directional,
+              depth: s.streamingBuffers.depth,
+              confidenceLevel: s.confidenceLevel,
+            },
+            ...s.turnHistory,
+          ].slice(0, TURN_HISTORY_LIMIT)
+        : s.turnHistory;
+      return {
+        turnHistory: archived,
+        currentQuestion: question,
+        streamingBuffers: { directional: "", depth: "" },
+        confidenceLevel: null,
+        depthPrePrepared: false,
+        clarifyingQuestions: [],
+        answerNowMode: false,
+      };
+    }),
+
   setConfidenceLevel: (confidenceLevel) => set({ confidenceLevel }),
 
   setDepthPrePrepared: (depthPrePrepared) => set({ depthPrePrepared }),
@@ -200,11 +241,25 @@ export const useUIStore = create<UIStore>((set) => ({
   setLastManualQuestion: (lastManualQuestion) => set({ lastManualQuestion }),
 
   addClarifyingQuestion: (q) =>
-    set((s) => ({
-      clarifyingQuestions: [...s.clarifyingQuestions, q].sort(
-        (a, b) => a.rank - b.rank,
-      ),
-    })),
+    set((s) => {
+      const norm = q.question.trim().toLowerCase();
+      if (
+        s.clarifyingQuestions.some(
+          (existing) => existing.question.trim().toLowerCase() === norm,
+        )
+      ) {
+        return s;
+      }
+      const id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random()}`;
+      return {
+        clarifyingQuestions: [...s.clarifyingQuestions, { ...q, id }].sort(
+          (a, b) => a.rank - b.rank,
+        ),
+      };
+    }),
 
   clearClarifyingQuestions: () => set({ clarifyingQuestions: [] }),
 

@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleRate, StreamConfig};
+use cpal::{Device, StreamConfig};
 use rubato::{FftFixedOut, Resampler};
 use tokio::sync::mpsc;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -304,9 +304,7 @@ impl AudioCapture {
             .context("Failed to start system audio stream")?;
 
         // ── Microphone ────────────────────────────────────────────────────
-        let mic_dev = host
-            .default_input_device()
-            .ok_or_else(|| anyhow!("No default microphone input device found"))?;
+        let mic_dev = find_mic_device(&host)?;
         let (mic_cfg, mic_rate) =
             select_stream_config(&mic_dev).context("Failed to select microphone stream config")?;
         let mic_state = Arc::new(Mutex::new(
@@ -460,6 +458,79 @@ impl AudioCapture {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Microphone device selection
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Choose the microphone input device.
+///
+/// Resolution order:
+///   1. `FLINT_MIC_SOURCE` — device name substring (case-insensitive). Lets
+///      users point directly at a PipeWire AEC virtual source set up by
+///      `scripts/setup-pipewire-aec.sh`, or any other named device.
+///   2. On Linux: auto-detect a running echo-cancel source (PipeWire
+///      `module-echo-cancel`) by scanning for a device whose name contains
+///      "echo" or "cancel". Suppresses speaker bleed at the OS level.
+///   3. System default input device.
+fn find_mic_device(host: &cpal::Host) -> Result<Device> {
+    // ── Explicit override ─────────────────────────────────────────────────
+    if let Ok(target) = std::env::var("FLINT_MIC_SOURCE") {
+        let target = target.trim().to_lowercase();
+        if !target.is_empty() {
+            let devs: Vec<Device> = host
+                .input_devices()
+                .context("Failed to enumerate input devices")?
+                .collect();
+            for dev in &devs {
+                if dev
+                    .name()
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .contains(&target)
+                {
+                    debug!(
+                        device = %dev.name().unwrap_or_default(),
+                        "FLINT_MIC_SOURCE: using named mic device"
+                    );
+                    return Ok(dev.clone());
+                }
+            }
+            error!(
+                target = %target,
+                "FLINT_MIC_SOURCE set but no matching input device found — falling back"
+            );
+        }
+    }
+
+    // ── Linux: prefer PipeWire echo-cancel virtual source ─────────────────
+    #[cfg(target_os = "linux")]
+    if let Some(dev) = find_echo_cancel_device(host) {
+        return Ok(dev);
+    }
+
+    // ── Default ───────────────────────────────────────────────────────────
+    host.default_input_device()
+        .ok_or_else(|| anyhow!("No default microphone input device found"))
+}
+
+/// Scan input devices for a PipeWire echo-cancel virtual source.
+///
+/// When `setup-pipewire-aec.sh` has run, PipeWire exposes a source named
+/// something like `echo-cancel-source` or `easyeffects_source`. We prefer
+/// this over the raw mic so the OS handles AEC before samples reach Flint.
+#[cfg(target_os = "linux")]
+fn find_echo_cancel_device(host: &cpal::Host) -> Option<Device> {
+    let devs = host.input_devices().ok()?;
+    for dev in devs {
+        let name = dev.name().unwrap_or_default().to_lowercase();
+        if name.contains("echo") || name.contains("cancel") || name.contains("aec") {
+            info!(device = %dev.name().unwrap_or_default(), "auto-selected PipeWire echo-cancel mic source");
+            return Some(dev);
+        }
+    }
+    None
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Platform-specific system audio device selection
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -470,21 +541,60 @@ impl AudioCapture {
 /// | Linux    | Enumerate input devices; pick first matching "monitor" or "loopback" (PipeWire) |
 /// | Windows  | Default output device — WASAPI allows loopback capture from output devices |
 /// | macOS    | Enumerate input devices; pick first matching "BlackHole" |
+/// On PipeWire/PulseAudio, monitor sources are visible to `pactl` but not as
+/// ALSA device names containing "monitor". Route the ALSA `pulse`/`pipewire`
+/// plugin to the default sink's `.monitor` source before opening cpal.
+#[cfg(target_os = "linux")]
+fn configure_pipewire_monitor_source() {
+    if std::env::var_os("PULSE_SOURCE").is_some() {
+        return;
+    }
+    let Ok(output) = std::process::Command::new("pactl")
+        .args(["get-default-sink"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let sink = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sink.is_empty() {
+        return;
+    }
+    std::env::set_var("PULSE_SOURCE", format!("{sink}.monitor"));
+    debug!(pulse_source = %format!("{sink}.monitor"), "configured PipeWire monitor source for ALSA capture");
+}
+
 #[cfg(target_os = "linux")]
 fn find_system_device(host: &cpal::Host) -> Result<Device> {
-    let devs = host
+    configure_pipewire_monitor_source();
+
+    let devs: Vec<Device> = host
         .input_devices()
-        .context("Failed to enumerate input devices")?;
-    for dev in devs {
+        .context("Failed to enumerate input devices")?
+        .collect();
+
+    for dev in &devs {
         let name = dev.name().unwrap_or_default().to_lowercase();
         if name.contains("monitor") || name.contains("loopback") {
+            return Ok(dev.clone());
+        }
+    }
+
+    // PipeWire exposes sink monitors through the ALSA pulse/pipewire plugins.
+    for dev in devs {
+        let name = dev.name().unwrap_or_default().to_lowercase();
+        if name == "pipewire" || name == "pulse" {
             return Ok(dev);
         }
     }
+
     Err(anyhow!(
-        "No PipeWire monitor or loopback device found. \
-         Run `pw-loopback` or `pactl load-module module-loopback` \
-         before starting a session."
+        "No PipeWire monitor source found. Set PULSE_SOURCE to your sink monitor \
+         (e.g. `export PULSE_SOURCE=\"$(pactl get-default-sink).monitor\"`) \
+         before starting a session. Do NOT run `pactl load-module module-loopback` \
+         — that routes your microphone to your speakers."
     ))
 }
 
@@ -529,47 +639,25 @@ fn find_system_device(_host: &cpal::Host) -> Result<Device> {
 
 /// Choose the best `StreamConfig` for a device.
 ///
-/// Preference order:
-///   1. A supported config whose sample-rate range covers 16kHz — no software
-///      resampling needed.
-///   2. The device default config — `StreamState` will resample via rubato.
+/// Always uses the device's native sample rate and lets `StreamState` resample
+/// down to 16 kHz via rubato. Forcing 16 kHz on a shared device (PipeWire
+/// monitor on Linux, WASAPI shared mode on Windows) renegotiates the server's
+/// global rate, which glitches concurrent playback and other clients (Zoom,
+/// browsers). Rubato 48 → 16 kHz is < 1 ms per frame, cheaper than the cost
+/// of an audio-server reconfiguration.
 ///
 /// For WASAPI loopback on Windows the device is an output device; we fall back
 /// to querying output configs when input configs are empty.
 fn select_stream_config(device: &Device) -> Result<(StreamConfig, u32)> {
-    let supported_in: Vec<_> = match device.supported_input_configs() {
-        Ok(it) => it.collect(),
-        Err(_) => vec![],
-    };
-
-    let supported: Vec<_> = if supported_in.is_empty() {
-        // Loopback device (e.g. WASAPI output) — query output configs.
-        match device.supported_output_configs() {
-            Ok(it) => it.collect(),
-            Err(_) => vec![],
-        }
-    } else {
-        supported_in
-    };
-
-    let target = SampleRate(TARGET_RATE);
-    for cfg in &supported {
-        if cfg.min_sample_rate() <= target && target <= cfg.max_sample_rate() {
-            let sc = cfg.with_sample_rate(target).config();
-            return Ok((sc, TARGET_RATE));
-        }
-    }
-
-    // No native 16kHz support — use the device default; rubato will resample.
     let default = device
         .default_input_config()
         .or_else(|_| device.default_output_config())
         .context("Cannot determine device default stream config")?;
     let native = default.sample_rate().0;
-    warn!(
+    debug!(
         device = ?device.name().unwrap_or_default(),
         native_rate = native,
-        "Device does not support 16kHz natively — software resampling via rubato enabled"
+        "using device-native rate; rubato handles downsample to 16 kHz"
     );
     Ok((default.config(), native))
 }

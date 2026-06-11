@@ -1,0 +1,42 @@
+{
+  "run_id": "00000000-0000-0000-0000-000000000000",
+  "prompt_version": "baseline-stub-v0",
+  "variants": {
+    "gpt": {
+      "overall": {
+        "questions": 0,
+        "directional_conciseness_pass_rate": 1.0,
+        "mean_relevance": 0.0,
+        "mean_grounding": 0.0,
+        "mean_ttft_ms": 0.0,
+        "mean_stream_ms": 0.0,
+        "errors": 0
+      },
+      "by_domain": {}
+    },
+    "claude": {
+      "overall": {
+        "questions": 0,
+        "directional_conciseness_pass_rate": 1.0,
+        "mean_relevance": 0.0,
+        "mean_grounding": 0.0,
+        "mean_ttft_ms": 0.0,
+        "mean_stream_ms": 0.0,
+        "errors": 0
+      },
+      "by_domain": {}
+    },
+    "llama": {
+      "overall": {
+        "questions": 0,
+        "directional_conciseness_pass_rate": 1.0,
+        "mean_relevance": 0.0,
+        "mean_grounding": 0.0,
+        "mean_ttft_ms": 0.0,
+        "mean_stream_ms": 0.0,
+        "errors": 0
+      },
+      "by_domain": {}
+    }
+  }
+}

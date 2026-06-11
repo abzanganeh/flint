@@ -1,6 +1,5 @@
-import { useEffect } from "react";
+import { useMemo } from "react";
 
-import { onClarifyingQuestion } from "../events";
 import { useUIStore } from "../store/ui";
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -8,30 +7,18 @@ import { useUIStore } from "../store/ui";
 export interface ClarifyingPanelProps {}
 
 const ClarifyingPanel = (_props: ClarifyingPanelProps) => {
-  const { clarifyingQuestions, addClarifyingQuestion } = useUIStore();
+  const clarifyingQuestions = useUIStore((s) => s.clarifyingQuestions);
 
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
-
-    const setup = async () => {
-      const fn = await onClarifyingQuestion(({ question, rank }) => {
-        addClarifyingQuestion({ question, rank });
-      });
-      if (cancelled) {
-        fn();
-      } else {
-        unlisten = fn;
-      }
-    };
-
-    void setup();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Dedupe for display (guards against stale HMR listeners or pre-fix state).
+  const visibleQuestions = useMemo(() => {
+    const seen = new Set<string>();
+    return clarifyingQuestions.filter((q) => {
+      const key = q.question.trim().toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [clarifyingQuestions]);
 
   return (
     <div
@@ -72,7 +59,7 @@ const ClarifyingPanel = (_props: ClarifyingPanelProps) => {
           gap: "2px",
         }}
       >
-        {clarifyingQuestions.length === 0 ? (
+        {visibleQuestions.length === 0 ? (
           <div
             style={{
               color: "#4b5563",
@@ -84,8 +71,12 @@ const ClarifyingPanel = (_props: ClarifyingPanelProps) => {
             No clarifying questions yet.
           </div>
         ) : (
-          clarifyingQuestions.map((q) => (
-            <ClarifyingRow key={`${q.rank}-${q.question}`} question={q.question} rank={q.rank} />
+          visibleQuestions.map((q) => (
+            <ClarifyingRow
+              key={q.id || `${q.rank}-${q.question}`}
+              question={q.question}
+              rank={q.rank}
+            />
           ))
         )}
       </div>

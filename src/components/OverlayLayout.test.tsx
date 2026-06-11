@@ -99,5 +99,7 @@ describe("OverlayLayout viewport rendering", () => {
     });
 
     expect(useUIStore.getState().panelLayout.collapsed.clarifying).toBe(true);
+    // Children stay mounted so orchestrator stream listeners are not dropped.
+    expect(screen.getByTestId("slot-clarifying")).toBeDefined();
   });
 });

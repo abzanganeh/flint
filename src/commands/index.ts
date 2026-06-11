@@ -75,8 +75,29 @@ export const logout = (): Promise<void> => invoke<void>("logout");
 export const getCurrentUser = (): Promise<UserDto> =>
   invoke<UserDto>("get_current_user");
 
-export const startSession = (sessionId: string): Promise<void> =>
-  invoke<void>("start_session", { sessionId });
+const liveStartInflight = new Map<string, Promise<void>>();
+
+/** Dedupe concurrent starts (React StrictMode double-mount in dev). */
+export const startSession = (sessionId: string): Promise<void> => {
+  const existing = liveStartInflight.get(sessionId);
+  if (existing) return existing;
+
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  liveStartInflight.set(sessionId, promise);
+
+  void invoke<void>("start_session", { sessionId })
+    .then(resolve, reject)
+    .finally(() => {
+      liveStartInflight.delete(sessionId);
+    });
+
+  return promise;
+};
 
 export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 
@@ -130,6 +151,9 @@ export const rephraseResponse = (
   question: string,
   sessionId: string,
 ): Promise<void> => triggerResponse(question, sessionId, true);
+
+export const copyTextToClipboard = (text: string): Promise<void> =>
+  invoke<void>("copy_text_to_clipboard", { text });
 
 export const switchProvider = (name: string): Promise<void> =>
   invoke<void>("switch_provider", { name });
@@ -253,6 +277,10 @@ export const confirmDigest = (sessionId: string, digest: DigestDto): Promise<voi
 export const getDigest = (sessionId: string): Promise<DigestDto> =>
   invoke<DigestDto>("get_digest", { sessionId });
 
+/** Re-run digest extraction without re-embedding (DIGEST_REVIEW only). */
+export const reextractDigest = (sessionId: string): Promise<DigestDto> =>
+  invoke<DigestDto>("reextract_digest", { sessionId });
+
 /** Return persisted context text for any session (Past Sessions → Start similar). */
 export const getSessionContext = (sessionId: string): Promise<string> =>
   invoke<string>("get_session_context", { sessionId });
@@ -274,6 +302,12 @@ export interface RecoveryOffer {
   interruptedState: string;
   transcriptChunkCount: number;
   responseCount: number;
+  name: string;
+  sessionType: string;
+  domain: string;
+  createdAt: number;
+  lastChunkTimestampMs: number | null;
+  additionalCrashedCount: number;
 }
 
 export interface SessionSummaryDto {
@@ -500,28 +534,31 @@ export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =
 
 // ── Phase 7.7 — Provider API key management ──────────────────────────────────
 
-export type LlmProvider = "groq" | "openai" | "anthropic";
+export type ApiKeyProvider = "groq" | "openrouter" | "openai" | "anthropic" | "tavily";
+
+/** @deprecated Use ApiKeyProvider */
+export type LlmProvider = Extract<ApiKeyProvider, "groq" | "openai" | "anthropic">;
 
 /**
  * Store an LLM provider API key in the OS keychain. The plaintext value
  * lives in JS for the duration of this call only and is never echoed by
  * the backend.
  */
-export const saveProviderKey = (provider: LlmProvider, key: string): Promise<void> =>
+export const saveProviderKey = (provider: ApiKeyProvider, key: string): Promise<void> =>
   invoke<void>("save_provider_key", { provider, key });
 
 /**
  * Whether a key is currently stored for `provider`. The actual key value
  * is never sent over IPC.
  */
-export const isProviderKeyPresent = (provider: LlmProvider): Promise<boolean> =>
+export const isProviderKeyPresent = (provider: ApiKeyProvider): Promise<boolean> =>
   invoke<boolean>("is_provider_key_present", { provider });
 
 /**
  * Remove `provider`'s key from the OS keychain. Safe to call when no key
  * is stored.
  */
-export const clearProviderKey = (provider: LlmProvider): Promise<void> =>
+export const clearProviderKey = (provider: ApiKeyProvider): Promise<void> =>
   invoke<void>("clear_provider_key", { provider });
 
 // ── Phase 5.5.3 — Question bank ──────────────────────────────────────────────
@@ -539,3 +576,26 @@ export const removeFromQuestionBank = (sessionId: string, question: string): Pro
 
 export const runResearchChat = (sessionId: string, message: string): Promise<void> =>
   invoke<void>("run_research_chat", { sessionId, message });
+
+export interface WebSource {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+export interface AppendResearchResult {
+  chunksAdded: number;
+}
+
+export const appendResearchToContext = (
+  sessionId: string,
+  question: string,
+  answer: string,
+  webSources: WebSource[],
+): Promise<AppendResearchResult> =>
+  invoke<AppendResearchResult>("append_research_to_context", {
+    sessionId,
+    question,
+    answer,
+    webSources,
+  });

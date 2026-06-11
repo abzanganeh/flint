@@ -33,7 +33,8 @@ import Rehearsal from "./screens/Rehearsal";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
-import ProviderSettings from "./screens/ProviderSettings";
+import { SessionSummary } from "./screens/SessionSummary";
+import Settings from "./screens/Settings";
 
 type AppScreen =
   | "loading"
@@ -45,7 +46,8 @@ type AppScreen =
   | "settings"
   | "digest-review"
   | "rehearsal"
-  | "live";
+  | "live"
+  | "session-summary";
 
 // Screens that render inside the standard shell (title bar + top padding).
 // "live" has its own frameless overlay layout.
@@ -58,6 +60,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "settings",
   "digest-review",
   "rehearsal",
+  "session-summary",
 ];
 
 interface ShellProps {
@@ -129,8 +132,22 @@ function App() {
   const [pendingImportToken, setPendingImportToken] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [importLoading, setImportLoading] = useState(false);
+  const [settingsReturnScreen, setSettingsReturnScreen] =
+    useState<AppScreen>("session-design");
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    "api-keys" | "usage-cap" | "privacy"
+  >("api-keys");
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
+
+  const openSettings = (
+    returnTo: AppScreen = screen,
+    initialTab: "api-keys" | "usage-cap" | "privacy" = "api-keys",
+  ) => {
+    setSettingsReturnScreen(returnTo);
+    setSettingsInitialTab(initialTab);
+    setScreen("settings");
+  };
 
   const queueImportToken = (token: string | null) => {
     if (!token) return;
@@ -296,6 +313,40 @@ function App() {
     };
   }, []);
 
+  // If Rust still has a DIGEST_REVIEW draft but the UI landed on session-design
+  // (e.g. Settings → Back used the wrong screen), route back to Digest Review.
+  useEffect(() => {
+    if (screen !== "session-design") return;
+    let cancelled = false;
+    void getSessionSnapshot()
+      .then((snapshot) => {
+        if (cancelled) return;
+        if (
+          snapshot.sessionId &&
+          snapshot.state === SessionState.DIGEST_REVIEW
+        ) {
+          setSessionId(snapshot.sessionId);
+          setScreen("digest-review");
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [screen]);
+
+  const handleEditContextFromDigest = async () => {
+    if (!sessionId) return;
+    try {
+      const snapshot = await returnToSessionDesign(sessionId);
+      setSessionId(snapshot.sessionId);
+      setSessionPreFill(preFillFromSnapshot(snapshot));
+      setScreen("session-design");
+    } catch (err) {
+      setImportError(String(err));
+    }
+  };
+
   const handleReturnToSessionDesign = async () => {
     if (!sessionId) {
       setScreen("session-design");
@@ -345,7 +396,7 @@ function App() {
     },
     {
       label: "Settings",
-      onClick: () => setScreen("settings"),
+      onClick: () => openSettings(screen),
       active: screen === "settings",
     },
   ];
@@ -365,8 +416,7 @@ function App() {
       <LiveOverlay
         sessionId={sessionId}
         onEnded={() => {
-          setSessionId(null);
-          setScreen("session-design");
+          setScreen("session-summary");
         }}
         onReturnToSetup={() => void handleReturnToSessionDesign()}
       />
@@ -427,6 +477,12 @@ function App() {
       <Shell nav={nav}>
         <SessionList
           onBack={() => setScreen("session-design")}
+          activeSessionId={sessionId ?? undefined}
+          onResumeSession={(resumeId, resumeState) => {
+            if (resumeId === sessionId) {
+              setScreen(screenForDraftState(resumeState));
+            }
+          }}
           onStartSimilar={(preFill) => {
             setSessionPreFill(preFill);
             setScreen("session-design");
@@ -439,7 +495,10 @@ function App() {
   if (screen === "settings") {
     return (
       <Shell nav={nav}>
-        <ProviderSettings onBack={() => setScreen("session-design")} />
+        <Settings
+          initialTab={settingsInitialTab}
+          onBack={() => setScreen(settingsReturnScreen)}
+        />
       </Shell>
     );
   }
@@ -481,6 +540,8 @@ function App() {
         <DigestReview
           sessionId={sessionId}
           onComplete={() => setScreen("rehearsal")}
+          onOpenSettings={() => openSettings("digest-review", "api-keys")}
+          onEditContext={() => void handleEditContextFromDigest()}
           onStartOver={() => {
             void abandonSessionDraft()
               .catch(() => undefined)
@@ -501,6 +562,20 @@ function App() {
           sessionId={sessionId}
           onComplete={() => setScreen("live")}
           onReturnToSetup={() => void handleReturnToSessionDesign()}
+          onOpenSettings={() => openSettings("rehearsal", "api-keys")}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "session-summary") {
+    return (
+      <Shell nav={nav}>
+        <SessionSummary
+          onDone={() => {
+            setSessionId(null);
+            setScreen("session-list");
+          }}
         />
       </Shell>
     );

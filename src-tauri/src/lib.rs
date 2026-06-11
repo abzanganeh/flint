@@ -3,7 +3,7 @@ mod auth_session;
 mod commands;
 pub mod confidence;
 pub mod cost;
-mod deep_link;
+pub mod deep_link;
 pub mod digest;
 mod dto;
 mod events;
@@ -16,6 +16,7 @@ mod keychain;
 pub mod llm;
 pub mod orchestrator;
 pub mod rag;
+pub mod research;
 pub mod session;
 pub mod smart_resume;
 mod state;
@@ -164,6 +165,7 @@ pub fn run() {
             commands::abandon_session_draft,
             commands::confirm_digest,
             commands::get_digest,
+            commands::reextract_digest,
             commands::import_from_smart_resume,
             commands::get_pending_import_token,
             commands::get_session_context,
@@ -179,6 +181,7 @@ pub fn run() {
             commands::remove_from_question_bank,
             // Phase 5.5.6 — research chat
             commands::run_research_chat,
+            commands::append_research_to_context,
             // Live session (Phase 3+)
             commands::start_session,
             commands::stop_session,
@@ -204,6 +207,7 @@ pub fn run() {
             // Phase 7.5 — GDPR right-to-deletion + right-to-export
             commands::delete_account,
             commands::export_user_data,
+            commands::copy_text_to_clipboard,
             // Phase 7.6 — feature flags
             commands::is_feature_enabled,
             commands::refresh_feature_flags,

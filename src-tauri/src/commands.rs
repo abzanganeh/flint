@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +12,8 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto, SessionContextFieldsDto,
-    SessionSnapshotDto, SmartResumeImportDto, UserDto,
+    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto,
+    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_session_state_change, emit_token_usage_update, SessionStateChangePayload,
@@ -25,11 +26,16 @@ use crate::keychain;
 use crate::llm::failover::FailoverManager;
 use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
+use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
+use crate::research::{self, tavily, ResearchSource};
+
+/// Approximate base chars added to a research prompt (template + labels).
+const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
 use crate::session::draft;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
@@ -213,17 +219,79 @@ pub async fn run_health_check(
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// LLM for digest extraction: Groq when a key is in the keychain, else stub.
-fn llm_for_digest(state: &AppState) -> Arc<dyn LLMProvider> {
-    match keychain::get_api_key("groq") {
-        Ok(api_key) => match GroqProvider::new(api_key) {
-            Ok(provider) => Arc::new(provider),
-            Err(e) => {
-                warn!(error = %e, "Groq provider init failed for digest — using stub");
-                Arc::clone(&state.llm)
-            }
-        },
-        Err(_) => Arc::clone(&state.llm),
+/// Attempt digest extraction through a provider chain: Groq → OpenRouter → Ollama.
+///
+/// Every provider failure is logged and appended to an accumulated error string so
+/// the final message tells the user exactly what was tried and why each step failed.
+/// The real HTTP/network error is included via `{:#}` (full anyhow chain).
+async fn extract_digest_resilient(
+    context_text: &str,
+    _state: &AppState,
+) -> Result<crate::digest::Digest, String> {
+    let mut failures: Vec<String> = Vec::new();
+
+    // ── 1. Groq ──────────────────────────────────────────────────────────────
+    if let Ok(api_key) = keychain::get_api_key("groq") {
+        match GroqProvider::new(api_key) {
+            Ok(provider) => match extract_digest(context_text, &provider).await {
+                Ok(digest) => return Ok(digest),
+                Err(e) => {
+                    let detail = format!("{e:#}");
+                    warn!(error = %detail, "digest extraction via Groq failed");
+                    failures.push(format!("Groq: {detail}"));
+                }
+            },
+            Err(e) => failures.push(format!("Groq provider init: {e}")),
+        }
     }
+
+    // ── 2. OpenRouter ─────────────────────────────────────────────────────────
+    if let Some(provider) = openrouter::resolve_openrouter() {
+        match extract_digest(context_text, provider.as_ref()).await {
+            Ok(digest) => return Ok(digest),
+            Err(e) => {
+                let detail = format!("{e:#}");
+                warn!(error = %detail, "digest extraction via OpenRouter failed");
+                failures.push(format!("OpenRouter: {detail}"));
+            }
+        }
+    }
+
+    // ── 3. Ollama ─────────────────────────────────────────────────────────────
+    if let Ok(ollama) = OllamaProvider::new() {
+        if ollama.health_check().await {
+            match extract_digest(context_text, &ollama).await {
+                Ok(digest) => return Ok(digest),
+                Err(e) => {
+                    let detail = format!("{e:#}");
+                    warn!(error = %detail, "digest extraction via Ollama failed");
+                    failures.push(format!("Ollama: {detail}"));
+                }
+            }
+        }
+    }
+
+    // ── Build actionable guidance ─────────────────────────────────────────────
+    let detail = failures.join("; ");
+    let guidance = if detail.contains("401")
+        || detail.contains("Unauthorized")
+        || detail.contains("invalid_api_key")
+    {
+        "Your Groq API key appears to be invalid — re-enter it in Settings → API Keys."
+    } else if detail.contains("429") || detail.contains("rate_limit") {
+        "Groq rate limit reached. Wait a moment, or add an OpenRouter key in Settings as a cloud fallback."
+    } else if failures.is_empty() {
+        "No LLM provider is configured. Add a Groq API key in Settings → API Keys."
+    } else {
+        "LLM call failed. Check your API key in Settings → API Keys, or start Ollama on localhost:11434."
+    };
+
+    error!(providers_tried = ?failures, "all digest extraction providers exhausted");
+    Err(if failures.is_empty() {
+        guidance.to_string()
+    } else {
+        format!("{guidance}\n\nDetail: {detail}")
+    })
 }
 
 /// Discard an in-progress session setup and return to IDLE (Start Over).
@@ -426,11 +494,7 @@ pub async fn ingest_context(
             .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
 
         // ── 5. Extract digest via LLM ────────────────────────────────────────
-        let llm = llm_for_digest(&state);
-        let digest = extract_digest(&text, llm.as_ref()).await.map_err(|e| {
-            warn!(error = %e, "digest extraction failed");
-            format!("Digest extraction failed — try rephrasing your context. ({e})")
-        })?;
+        let digest = extract_digest_resilient(&text, &state).await?;
 
         *state.session_digest.write().await = Some(digest.clone());
         if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
@@ -582,11 +646,7 @@ pub async fn ingest_structured_context(
             .map_err(|e| format!("Vector store ingestion failed: {e}"))?;
 
         // ── 3. Extract digest via LLM ─────────────────────────────────────────
-        let llm = llm_for_digest(&state);
-        let digest = extract_digest(&blob, llm.as_ref()).await.map_err(|e| {
-            warn!(error = %e, "digest extraction failed");
-            format!("Digest extraction failed — try rephrasing your context. ({e})")
-        })?;
+        let digest = extract_digest_resilient(&blob, &state).await?;
 
         *state.session_digest.write().await = Some(digest.clone());
         if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
@@ -712,6 +772,31 @@ pub async fn get_session_context(
         .map_err(|e| e.to_string())
 }
 
+/// Load the session digest from memory, falling back to SQLite after restart.
+async fn resolve_session_digest(
+    state: &AppState,
+    sid: Uuid,
+) -> Result<crate::digest::Digest, String> {
+    {
+        let guard = state.session_digest.read().await;
+        if let Some(digest) = guard.as_ref() {
+            return Ok(digest.clone());
+        }
+    }
+
+    match state.persistence.load_session_digest(sid) {
+        Ok(Some(digest)) => {
+            *state.session_digest.write().await = Some(digest.clone());
+            Ok(digest)
+        }
+        Ok(None) => Err("No session digest — complete digest review before rehearsal.".to_string()),
+        Err(e) => {
+            warn!(error = %e, "resolve_session_digest: SQLite fallback failed");
+            Err("No session digest — complete digest review before rehearsal.".to_string())
+        }
+    }
+}
+
 /// Return the current digest for the active session.
 ///
 /// Valid after INGESTING completes (i.e. from DIGEST_REVIEW onward).
@@ -722,11 +807,53 @@ pub async fn get_digest(
 ) -> Result<DigestDto, String> {
     validate_session_id(&state, &session_id).await?;
 
-    let guard = state.session_digest.read().await;
-    match guard.as_ref() {
-        Some(digest) => Ok(DigestDto::from(digest.clone())),
-        None => Err("Digest not yet available. Complete context ingestion first.".to_string()),
+    let sid = Uuid::parse_str(&session_id).map_err(|_| "Invalid session_id format".to_string())?;
+
+    let digest = resolve_session_digest(state.inner(), sid).await?;
+    Ok(DigestDto::from(digest))
+}
+
+/// Re-run digest extraction for the current session without re-embedding.
+///
+/// Valid from `DIGEST_REVIEW` only. Uses the persisted context blob and the
+/// currently configured Groq key. Context fields and Smart Resume handoff data
+/// are untouched.
+#[tauri::command]
+pub async fn reextract_digest(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<DigestDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::DigestReview {
+            return Err(format!(
+                "reextract_digest is only valid from DIGEST_REVIEW (current: {})",
+                machine.current()
+            ));
+        }
     }
+
+    let blob = state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())?;
+    if blob.trim().is_empty() {
+        return Err(
+            "Session context is missing — use Edit context to return to Session Design."
+                .to_string(),
+        );
+    }
+
+    let digest = extract_digest_resilient(&blob, &state).await?;
+
+    *state.session_digest.write().await = Some(digest.clone());
+    if let Err(e) = state.persistence.store_session_digest(sid, &digest) {
+        warn!(session_id = %sid, error = %e, "failed to persist re-extracted digest");
+    }
+
+    Ok(DigestDto::from(digest))
 }
 
 /// Redeem a single-use Smart Resume handoff token and return session pre-fill data.
@@ -846,36 +973,113 @@ fn prompts_base_dir() -> PathBuf {
 
 /// Resolve the ggml model path for the given hardware profile.
 ///
+/// Resolution order:
+///   1. `FLINT_WHISPER_MODEL` — either an absolute path to a ggml file, or
+///      a Whisper model name (`tiny.en`, `base.en`, `small.en`, `medium.en`).
+///   2. The hardware-recommended model from the profile.
+///   3. If the recommended file does not exist, fall back to the largest
+///      installed model in `~/.cache/whisper/` so a missing download cannot
+///      block the session.
+///
 /// Whisper model files are expected at `~/.cache/whisper/ggml-<name>.bin`
-/// (standard whisper.cpp convention). The health check (`checks.rs`) verifies
-/// the file exists before `start_session` is ever called.
+/// (standard whisper.cpp convention).
 fn whisper_model_path(profile: &hardware::HardwareProfile) -> String {
+    if let Ok(raw) = std::env::var("FLINT_WHISPER_MODEL") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let as_path = PathBuf::from(trimmed);
+            if as_path.is_absolute() && as_path.exists() {
+                info!(path = %as_path.display(), "FLINT_WHISPER_MODEL: using explicit path");
+                return as_path.to_string_lossy().into_owned();
+            }
+            if let Some(model) = hardware::WhisperModel::from_name(trimmed) {
+                let path = whisper_cache_path(model.as_str());
+                if PathBuf::from(&path).exists() {
+                    info!(model = %model, "FLINT_WHISPER_MODEL: using named model");
+                    return path;
+                }
+                warn!(
+                    requested = %trimmed,
+                    "FLINT_WHISPER_MODEL points to a missing file; falling back"
+                );
+            } else {
+                warn!(
+                    value = %trimmed,
+                    "FLINT_WHISPER_MODEL is not a known model name or existing path; ignoring"
+                );
+            }
+        }
+    }
+
+    let recommended = profile.recommended_whisper_model.as_str();
+    let recommended_path = whisper_cache_path(recommended);
+    if PathBuf::from(&recommended_path).exists() {
+        return recommended_path;
+    }
+
+    if let Some(fallback) = best_installed_whisper_model() {
+        warn!(
+            recommended = %recommended,
+            fallback = %fallback,
+            "recommended Whisper model not installed; falling back to best installed model"
+        );
+        return whisper_cache_path(&fallback);
+    }
+
+    recommended_path
+}
+
+fn whisper_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let filename = format!("ggml-{}.bin", profile.recommended_whisper_model);
-    PathBuf::from(home)
-        .join(".cache")
-        .join("whisper")
-        .join(filename)
+    PathBuf::from(home).join(".cache").join("whisper")
+}
+
+fn whisper_cache_path(model_name: &str) -> String {
+    whisper_cache_dir()
+        .join(format!("ggml-{model_name}.bin"))
         .to_string_lossy()
         .into_owned()
 }
 
-/// Abort all live tasks and signal the capture thread to stop.
-///
-/// Called on `start_session` failure after tasks have been spawned, to prevent
-/// a hidden audio pipeline from running while the state machine is not LIVE.
-async fn abort_live_tasks(state: &AppState) {
-    if let Some(handles) = state.live_tasks.lock().await.take() {
-        let _ = handles.stop_tx.send(());
-        handles.pipeline.abort();
-        handles.orchestrator.abort();
+/// Return the name of the largest installed Whisper model, if any.
+fn best_installed_whisper_model() -> Option<String> {
+    use hardware::WhisperModel::{BaseEn, MediumEn, SmallEn, TinyEn};
+    let cache = whisper_cache_dir();
+    for model in [MediumEn, SmallEn, BaseEn, TinyEn] {
+        let path = cache.join(format!("ggml-{}.bin", model.as_str()));
+        if path.exists() {
+            return Some(model.as_str().to_string());
+        }
     }
+    None
+}
+
+/// Log the failing `start_session` step at ERROR and return a UI-facing message.
+///
+/// `start_session` runs many short-lived fallible steps before the session
+/// reaches LIVE. When any of them returns `Err`, the Tauri command path
+/// propagates the error to the React toast but nothing reaches `tracing`,
+/// which makes silent startup failures (missing API key, model load, etc.)
+/// invisible from the terminal. Routing every `map_err` through this helper
+/// guarantees the failing step is named in the logs.
+fn start_session_step_err(step: &'static str, err: impl std::fmt::Display) -> String {
+    let msg = err.to_string();
+    error!(step = %step, error = %msg, "start_session step failed");
+    format!("{step}: {msg}")
+}
+
+/// Stop a capture thread and abort pipeline/orchestrator tasks.
+async fn abort_local_live_handles(handles: LiveTaskHandles) {
+    let _ = handles.stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
+    handles.pipeline.abort();
+    handles.orchestrator.abort();
 }
 
 /// Build the failover manager and local LLM provider used by live and rehearsal paths.
 async fn build_failover_stack(
     app: &AppHandle,
-    state: &AppState,
+    _state: &AppState,
 ) -> Result<(Arc<FailoverManager>, Arc<dyn LLMProvider>, usize), String> {
     let (primary_provider, context_window) = match keychain::get_api_key("groq") {
         Ok(api_key) => match GroqProvider::new(api_key) {
@@ -884,17 +1088,18 @@ async fn build_failover_stack(
                 (Arc::new(p) as Arc<dyn LLMProvider>, cw)
             }
             Err(e) => {
-                warn!(error = %e, "Failed to build Groq provider — using stub");
-                let stub = Arc::clone(&state.llm);
-                let cw = stub.context_window();
-                (stub, cw)
+                return Err(format!(
+                    "Groq API key is stored but the provider failed to initialize: {e}. \
+                     Re-enter your key in Settings → API Keys."
+                ));
             }
         },
         Err(_) => {
-            warn!("No Groq API key in keychain — using stub LLM provider");
-            let stub = Arc::clone(&state.llm);
-            let cw = stub.context_window();
-            (stub, cw)
+            return Err(
+                "No Groq API key found. Add your key in Settings → API Keys (Groq) \
+                 before running rehearsal turns."
+                    .to_string(),
+            );
         }
     };
 
@@ -906,8 +1111,18 @@ async fn build_failover_stack(
         primary_provider.rate_limit().requests_per_minute,
         primary_provider.rate_limit().tokens_per_minute,
     ));
-    let mut failover =
-        FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
+    let cloud_fallback = openrouter::resolve_openrouter();
+    if cloud_fallback.is_some() {
+        info!("failover stack: OpenRouter cloud fallback configured");
+    } else {
+        info!("failover stack: no OpenRouter key in Settings — Groq 429 will use Ollama only");
+    }
+    let mut failover = FailoverManager::new(
+        primary_provider,
+        cloud_fallback,
+        Arc::clone(&local_provider),
+        rate_limiter,
+    );
     failover.start_ping_loop(app.clone());
     Ok((Arc::new(failover), local_provider, context_window))
 }
@@ -947,9 +1162,7 @@ pub async fn run_rehearsal_turn(
         }
     }
 
-    let digest = state.session_digest.read().await.clone().ok_or_else(|| {
-        "No session digest — complete digest review before rehearsal.".to_string()
-    })?;
+    let digest = resolve_session_digest(state.inner(), sid).await?;
 
     let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
 
@@ -976,29 +1189,52 @@ pub async fn run_rehearsal_turn(
     };
 
     let turn_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut slot = state.rehearsal_turn_cancel.lock().await;
+        if let Some(prev) = slot.take() {
+            prev.store(true, std::sync::atomic::Ordering::Release);
+        }
+        *slot = Some(Arc::clone(&turn_cancel));
+    }
 
-    dispatch_turn(
-        sid,
-        question_text,
-        turn_number,
-        Arc::new(digest),
-        prompts_base_dir(),
-        failover,
-        state.require_embedder()?,
-        Arc::clone(&state.vector_store),
-        Arc::clone(&state.prewarm_cache),
-        memory,
-        load_compression_prompt(),
-        turn_cancel,
-        local_provider,
-        Arc::clone(&state.persistence),
-        Arc::clone(&state.cost_tracker),
-        app,
+    const REHEARSAL_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+    let cancel_on_timeout = Arc::clone(&turn_cancel);
+    let turn_result = tokio::time::timeout(
+        REHEARSAL_TURN_TIMEOUT,
+        dispatch_turn(
+            sid,
+            question_text,
+            turn_number,
+            Arc::new(digest),
+            prompts_base_dir(),
+            failover,
+            state.wait_for_embedder(Duration::from_secs(45)).await?,
+            Arc::clone(&state.vector_store),
+            Arc::clone(&state.prewarm_cache),
+            memory,
+            load_compression_prompt(),
+            Arc::clone(&turn_cancel),
+            local_provider,
+            Arc::clone(&state.persistence),
+            Arc::clone(&state.cost_tracker),
+            app,
+        ),
     )
-    .await
-    .map_err(|e| format!("Rehearsal turn failed: {e}"))?;
+    .await;
 
-    Ok(())
+    match turn_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Rehearsal turn failed: {e}")),
+        Err(_) => {
+            cancel_on_timeout.store(true, Ordering::Release);
+            Err(
+                "Rehearsal turn timed out after 120 seconds. Common causes: Groq free-tier \
+                 rate limit (429 — wait ~10 minutes and retry), a missing Groq API key in \
+                 Settings → API Keys, or Ollama fallback running without a pulled model."
+                    .to_string(),
+            )
+        }
+    }
 }
 
 /// Complete mandatory rehearsal and transition to READY.
@@ -1012,11 +1248,18 @@ pub async fn complete_rehearsal(
 
     {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Rehearsing {
-            return Err(format!(
-                "complete_rehearsal is only valid from REHEARSING (current: {})",
-                machine.current()
-            ));
+        match *machine.current() {
+            SessionState::Ready => {
+                // Idempotent: rehearsal was already completed (e.g. start_session failed
+                // after REHEARSING → READY but before LIVE).
+                return Ok(());
+            }
+            SessionState::Rehearsing => {}
+            other => {
+                return Err(format!(
+                    "complete_rehearsal is only valid from REHEARSING (current: {other})"
+                ));
+            }
         }
     }
 
@@ -1052,7 +1295,10 @@ pub async fn return_to_session_design(
     };
 
     match current {
-        SessionState::Rehearsing | SessionState::Ready | SessionState::Ended => {
+        SessionState::Rehearsing
+        | SessionState::Ready
+        | SessionState::Ended
+        | SessionState::DigestReview => {
             let mut machine = state.state_machine.lock().await;
             machine
                 .transition(SessionState::Configuring)
@@ -1177,20 +1423,63 @@ pub async fn remove_from_question_bank(
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Phase 5.5.6 — Research chat
+// Phase 5.5.6 / 5.6 — Research chat (RAG + prep web search)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Run a single research chat turn grounded in session RAG context only.
-///
-/// Retrieves the top-8 most relevant chunks for `message`, builds a context
-/// block, sends one non-streaming completion, then emits a `research_token`
-/// event with the answer text and a `research_citation` event with the
-/// source chunk texts. No memory across turns — each call is independent.
-///
-/// Phase 5.5.7 — emits a `token_usage_update` with
-/// `usage_category: "research_chat"` so the per-session widget can show the
-/// breakdown, and records against the Phase 7.4 cost tracker. Suspended
-/// trackers reject the call before any LLM spend.
+fn emit_research_citation(
+    app: &AppHandle,
+    source: ResearchSource,
+    rag_chunks: &[String],
+    web_sources: &[crate::interfaces::web_search::WebSearchResult],
+) {
+    let web_payload: Vec<serde_json::Value> = web_sources
+        .iter()
+        .map(|s| {
+            serde_json::json!({
+                "title": s.title,
+                "url": s.url,
+                "snippet": s.snippet,
+            })
+        })
+        .collect();
+    let can_add = source == ResearchSource::Web || source == ResearchSource::RagAndWeb;
+    let _ = app.emit(
+        "research_citation",
+        serde_json::json!({
+            "chunks": rag_chunks,
+            "webSources": web_payload,
+            "source": source.as_str(),
+            "canAddToContext": can_add,
+        }),
+    );
+}
+
+fn record_research_usage(
+    app: &AppHandle,
+    state: &AppState,
+    prompt_len: usize,
+    response_len: usize,
+) {
+    let input_tokens = (prompt_len as u64 + 500) / 4;
+    let output_tokens = (response_len as u64 + 100) / 4;
+    let cost_estimate = (input_tokens + output_tokens) as f64 * 0.0000002;
+    emit_token_usage_update(
+        app,
+        TokenUsageUpdatePayload {
+            input: input_tokens,
+            output: output_tokens,
+            total: input_tokens + output_tokens,
+            cost_estimate,
+            usage_category: "research_chat".to_string(),
+        },
+    );
+    let _ =
+        state
+            .cost_tracker
+            .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
+}
+
+/// Run a single research chat turn: RAG when sufficient, otherwise web search (Tavily).
 ///
 /// Valid from: `REHEARSING` only.
 #[tauri::command]
@@ -1224,7 +1513,6 @@ pub async fn run_research_chat(
         return Err("Research message must not be empty.".to_string());
     }
 
-    // Embed the question to retrieve relevant chunks.
     let embedder = state
         .wait_for_embedder(std::time::Duration::from_secs(30))
         .await
@@ -1247,92 +1535,145 @@ pub async fn run_research_chat(
         .await
         .map_err(|e| format!("RAG retrieval failed: {e}"))?;
 
-    if chunks.is_empty() {
-        // Emit an honest "not in context" response rather than hallucinating.
-        let canned = "I don't have information about that in the pasted context.";
-        let _ = app.emit("research_token", serde_json::json!({ "token": canned }));
-        let _ = app.emit("research_citation", serde_json::json!({ "chunks": [] }));
-        // Cheap path — record only the embedding spend so the widget shows movement.
-        let input_tokens = (message.len() as u64 + 50) / 4;
-        let output_tokens = (canned.len() as u64) / 4;
-        let cost = (input_tokens + output_tokens) as f64 * 0.0000002;
-        emit_token_usage_update(
-            &app,
-            TokenUsageUpdatePayload {
-                input: input_tokens,
-                output: output_tokens,
-                total: input_tokens + output_tokens,
-                cost_estimate: cost,
-                usage_category: "research_chat".to_string(),
-            },
-        );
-        let _ = state
-            .cost_tracker
-            .record_turn_with_transition(input_tokens, output_tokens, cost);
-        return Ok(());
-    }
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let web = tavily::resolve_tavily();
 
-    let context_block: String = chunks
-        .iter()
-        .enumerate()
-        .map(|(i, c)| format!("[{}] {}", i + 1, c.chunk.text))
-        .collect::<Vec<_>>()
-        .join("\n\n");
-
-    let prompt = format!(
-        "You are a research assistant for interview preparation. \
-        Answer the question using ONLY the pasted context below. \
-        If the answer is not in the context, say so explicitly.\n\n\
-        CONTEXT:\n{context_block}\n\n\
-        QUESTION: {message}\n\n\
-        ANSWER:"
-    );
-
-    let llm = llm_for_digest(&state);
-    let response = llm
-        .complete(
-            prompt.clone(),
-            CompletionConfig {
-                max_tokens: Some(400),
-                temperature: 0.1,
-                stream: false,
-            },
-        )
+    let outcome = research::run_prep_research_turn(&message, chunks, failover, web, app.clone())
         .await
-        .map_err(|e| format!("Research chat LLM call failed: {e}"))?;
+        .map_err(|e| format!("Research turn failed: {e}"))?;
 
-    // Emit response as a single token event (non-streaming for simplicity).
-    let _ = app.emit("research_token", serde_json::json!({ "token": response }));
-
-    // Emit citations so the UI can show which chunks grounded the answer.
-    let citation_texts: Vec<&str> = chunks.iter().map(|c| c.chunk.text.as_str()).collect();
     let _ = app.emit(
-        "research_citation",
-        serde_json::json!({ "chunks": citation_texts }),
+        "research_token",
+        serde_json::json!({ "token": outcome.response }),
     );
 
-    // Phase 5.5.7 + 7.4 — record token spend and surface to the UI / cost cap.
-    // The 4 chars/token heuristic mirrors the orchestrator's accounting in
-    // `run_turn`; the +500 budget covers the system framing in the prompt.
-    let input_tokens = (prompt.len() as u64 + 500) / 4;
-    let output_tokens = (response.len() as u64 + 100) / 4;
-    let cost_estimate = (input_tokens + output_tokens) as f64 * 0.0000002;
-    emit_token_usage_update(
+    emit_research_citation(
         &app,
-        TokenUsageUpdatePayload {
-            input: input_tokens,
-            output: output_tokens,
-            total: input_tokens + output_tokens,
-            cost_estimate,
-            usage_category: "research_chat".to_string(),
-        },
+        outcome.source,
+        &outcome.rag_citations,
+        &outcome.web_sources,
     );
-    let _ =
-        state
-            .cost_tracker
-            .record_turn_with_transition(input_tokens, output_tokens, cost_estimate);
+
+    record_research_usage(
+        &app,
+        &state,
+        message.len() + RESEARCH_PROMPT_OVERHEAD_CHARS,
+        outcome.response.len(),
+    );
 
     Ok(())
+}
+
+/// Append a prep research answer (and optional web sources) into session RAG context.
+///
+/// Adds a labelled block to Technical Prep, re-chunks, embeds, and ingests.
+/// Valid from: `REHEARSING` only.
+#[tauri::command]
+pub async fn append_research_to_context(
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+    answer: String,
+    web_sources: Vec<WebSourceDto>,
+) -> Result<AppendResearchResultDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "append_research_to_context is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let question = question.trim().to_string();
+    let answer = answer.trim().to_string();
+    if question.is_empty() || answer.is_empty() {
+        return Err("Question and answer must not be empty.".to_string());
+    }
+
+    let web_hits: Vec<crate::interfaces::web_search::WebSearchResult> = web_sources
+        .into_iter()
+        .map(|s| crate::interfaces::web_search::WebSearchResult {
+            title: s.title,
+            url: s.url,
+            snippet: s.snippet,
+        })
+        .collect();
+
+    let block = research::format_research_append_block(&question, &answer, &web_hits);
+
+    let mut fields = state
+        .persistence
+        .load_context_fields(sid)
+        .map_err(|e| e.to_string())?;
+
+    if !fields.technical_prep.trim().is_empty() {
+        fields.technical_prep.push_str("\n\n");
+    }
+    fields.technical_prep.push_str(&block);
+    state
+        .persistence
+        .store_context_fields(sid, &fields)
+        .map_err(|e| e.to_string())?;
+
+    let existing_text = state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())?;
+    let merged = if existing_text.trim().is_empty() {
+        format!("[TECHNICAL PREPARATION]\n{block}")
+    } else {
+        format!("{existing_text}\n\n[TECHNICAL PREPARATION — WEB RESEARCH]\n{block}")
+    };
+    state
+        .persistence
+        .store_context_text(sid, &merged)
+        .map_err(|e| e.to_string())?;
+
+    let raw_chunks = chunk_text(&block, 200, 50);
+    if raw_chunks.is_empty() {
+        return Ok(AppendResearchResultDto { chunks_added: 0 });
+    }
+
+    let embedder = state
+        .wait_for_embedder(std::time::Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("Embedding unavailable: {e}"))?;
+
+    let raw_owned = raw_chunks.clone();
+    let embeddings = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = raw_owned.iter().map(|s| s.as_str()).collect();
+        embedder.embed_batch(&refs)
+    })
+    .await
+    .map_err(|e| format!("Embedder task panicked: {e}"))?
+    .map_err(|e| format!("Embedding failed: {e}"))?;
+
+    let ingest_chunks: Vec<Chunk> = raw_chunks
+        .into_iter()
+        .zip(embeddings)
+        .map(|(text, embedding)| Chunk {
+            id: Uuid::new_v4(),
+            text,
+            embedding,
+            session_id: sid,
+        })
+        .collect();
+    let count = ingest_chunks.len();
+
+    state
+        .vector_store
+        .ingest(sid, ingest_chunks)
+        .await
+        .map_err(|e| format!("Failed to ingest research into RAG: {e}"))?;
+
+    info!(session_id = %sid, chunks_added = count, "prep research appended to context");
+    Ok(AppendResearchResultDto {
+        chunks_added: count,
+    })
 }
 
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
@@ -1352,17 +1693,20 @@ pub async fn start_session(
 
     checks::run_stealth_self_test()?;
 
-    {
+    // StrictMode double-mount can fire two concurrent starts; serialize them.
+    let _live_start_guard = state.live_start_lock.lock().await;
+
+    let current = {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Ready {
-            return Err(format!(
-                "start_session requires READY (current: {})",
-                machine.current()
-            ));
-        }
+        *machine.current()
+    };
+    if current == SessionState::Live && state.live_tasks.lock().await.is_some() {
+        return Ok(());
+    }
+    if current != SessionState::Ready {
+        return Err(format!("start_session requires READY (current: {current})"));
     }
 
-    // Refuse to start if a live session is already running.
     if state.live_tasks.lock().await.is_some() {
         return Err("A live session is already running.".to_string());
     }
@@ -1371,10 +1715,12 @@ pub async fn start_session(
     let profile = hardware::assess_hardware();
     let model_path = whisper_model_path(&profile);
 
-    let whisper = Arc::new(
-        WhisperEngine::new(&model_path, profile.tier)
-            .map_err(|e| format!("Failed to load Whisper model ({model_path}): {e}"))?,
-    );
+    let whisper = Arc::new(WhisperEngine::new(&model_path, profile.tier).map_err(|e| {
+        start_session_step_err(
+            "whisper init",
+            format!("model={model_path} tier={} error={e}", profile.tier),
+        )
+    })?);
 
     // ── 2. Question detector ──────────────────────────────────────────────
     let detector = Arc::new(
@@ -1383,12 +1729,17 @@ pub async fn start_session(
             Some(Arc::clone(&state.llm)),
             &prompts_base_dir(),
         )
-        .map_err(|e| format!("Failed to init question detector: {e}"))?,
+        .map_err(|e| start_session_step_err("question detector init", e))?,
     );
 
     // ── 3. Audio channels ─────────────────────────────────────────────────
-    let (system_tx, system_rx) = tokio::sync::mpsc::channel(256);
-    let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(256);
+    //
+    // Capacity sized for ~1 s of audio frames per channel: 480-sample frames
+    // at 48 kHz = 100 frames/s. 1024 absorbs startup transients (capture
+    // emits frames before the pipeline task has been polled) without
+    // dropping. At 4 bytes/sample × 480 × 1024 ≈ 1.9 MB per channel — cheap.
+    let (system_tx, system_rx) = tokio::sync::mpsc::channel(1024);
+    let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(1024);
     let (question_tx, question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (zeroed_tx, zeroed_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1422,13 +1773,20 @@ pub async fn start_session(
     // Wait up to 5 seconds for the capture thread to confirm startup.
     tokio::time::timeout(Duration::from_secs(5), ready_rx)
         .await
-        .map_err(|_| "Audio capture startup timed out.".to_string())?
-        .map_err(|_| "Audio capture thread exited unexpectedly.".to_string())?
-        .map_err(|e| format!("Failed to start audio capture: {e}"))?;
+        .map_err(|_| start_session_step_err("audio capture", "startup timed out after 5s"))?
+        .map_err(|_| {
+            start_session_step_err(
+                "audio capture",
+                "capture thread exited before sending ready signal",
+            )
+        })?
+        .map_err(|e| start_session_step_err("audio capture", e))?;
 
     // ── 5. Build failover manager and conversation memory ─────────────────
 
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state)
+        .await
+        .map_err(|e| start_session_step_err("failover stack", e))?;
 
     let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
         context_window,
@@ -1442,16 +1800,18 @@ pub async fn start_session(
 
     // ── 6. Spawn background tasks ─────────────────────────────────────────
 
-    let digest = state.session_digest.read().await.clone().ok_or_else(|| {
-        "No session digest — run ingest_context before starting a live session.".to_string()
-    })?;
+    let digest = resolve_session_digest(state.inner(), sid)
+        .await
+        .map_err(|e| start_session_step_err("digest resolve", e))?;
 
     let orch_config = OrchestratorConfig {
         session_id: sid,
         digest: Arc::new(digest),
         prompts_dir: prompts_base_dir(),
         failover: Arc::clone(&failover),
-        embedder: state.require_embedder()?,
+        embedder: state
+            .require_embedder()
+            .map_err(|e| start_session_step_err("embedder ready", e))?,
         vector_store: Arc::clone(&state.vector_store),
         prewarm_cache: Arc::clone(&state.prewarm_cache),
         memory,
@@ -1478,25 +1838,40 @@ pub async fn start_session(
         Arc::clone(&state.persistence),
     ));
 
-    *state.live_tasks.lock().await = Some(LiveTaskHandles {
+    let handles = LiveTaskHandles {
         stop_tx,
         zeroed_rx,
         pipeline,
         orchestrator,
         question_tx,
         turn_cancel: turn_cancel_slot,
-    });
+    };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
+    //
+    // Install `live_tasks` only after a successful transition so a concurrent
+    // duplicate `start_session` cannot overwrite the winner's handles. If
+    // another caller already reached LIVE, drop our duplicate tasks quietly.
 
     {
         let mut machine = state.state_machine.lock().await;
-        if let Err(e) = machine.transition(SessionState::Live) {
+        if *machine.current() == SessionState::Live {
             drop(machine);
-            abort_live_tasks(&state).await;
+            abort_local_live_handles(handles).await;
+            return Ok(());
+        }
+        if let Err(e) = machine.transition(SessionState::Live) {
+            let err_msg = e.to_string();
+            drop(machine);
+            abort_local_live_handles(handles).await;
+            if err_msg.contains("LIVE → LIVE") {
+                return Ok(());
+            }
             return Err(session_error(e));
         }
     }
+
+    *state.live_tasks.lock().await = Some(handles);
     emit_state(&app, SessionState::Live);
 
     info!(
@@ -1991,6 +2366,16 @@ pub async fn set_cost_cap(
     max_total_tokens: Option<u64>,
     max_cost_estimate_usd: Option<f64>,
 ) -> Result<CostStatusDto, String> {
+    const MIN_TOKEN_CAP: u64 = 500;
+    if let Some(t) = max_total_tokens {
+        if t > 0 && t < MIN_TOKEN_CAP {
+            return Err(format!(
+                "Token limit must be at least {MIN_TOKEN_CAP} — each question uses \
+                 ~300+ estimated tokens (3 LLM calls). This is a ceiling, not a target."
+            ));
+        }
+    }
+
     let cap = crate::cost::CostCap {
         max_total_tokens,
         max_cost_estimate_usd,
@@ -2096,7 +2481,7 @@ pub async fn delete_account(
         token,
         Arc::clone(&state.persistence),
         Arc::clone(&state.vector_store),
-        Box::new(keychain::clear_all_user_secrets),
+        Box::new(keychain::clear_account_secrets),
     )
     .await;
 
@@ -2131,6 +2516,18 @@ pub async fn delete_account(
 pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, String> {
     let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
+}
+
+/// Copy text to the OS clipboard (native path — reliable in the Tauri WebView).
+#[tauri::command]
+pub fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("Nothing to copy".to_string());
+    }
+    arboard::Clipboard::new()
+        .map_err(|e| format!("Clipboard unavailable: {e}"))?
+        .set_text(text)
+        .map_err(|e| format!("Failed to copy: {e}"))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
