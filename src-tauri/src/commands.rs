@@ -30,7 +30,7 @@ use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
 use crate::mock::coach::run_coach;
-use crate::mock::conductor::{Conductor, ConductorCommand};
+use crate::mock::conductor::{Conductor, ConductorCommand, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
@@ -2642,7 +2642,11 @@ pub async fn get_feature_flags_snapshot(
 
 /// Transition to MOCK_INTERVIEW and start the conductor + mic capture loop.
 ///
-/// Valid from: `REHEARSING`.
+/// Valid from: `REHEARSING` or `READY`.
+///
+/// `READY` is allowed because draft recovery and the Rehearsal screen both
+/// surface mock entry while the persisted state is already READY (user
+/// completed rehearsal but has not gone live yet).
 ///
 /// Steps:
 /// 1. REHEARSING → MOCK_INTERVIEW.
@@ -2652,20 +2656,30 @@ pub async fn get_feature_flags_snapshot(
 /// 5. Start `MicCapture` and `Conductor`.
 /// 6. Store `MockTaskHandles` in AppState.
 #[tauri::command]
-pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn start_mock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    guided: Option<bool>,
+) -> Result<(), String> {
+    let guided = guided.unwrap_or(false);
+    let pace = if guided {
+        MockPace::Guided
+    } else {
+        MockPace::Continuous
+    };
     // Guard: must be in REHEARSING. If we are already in MOCK_INTERVIEW with an
     // active session, treat this as idempotent so React StrictMode double-mounts
     // and re-navigation to the screen do not blow up the conductor.
     {
         let machine = state.state_machine.lock().await;
         match machine.current() {
-            SessionState::Rehearsing => {}
+            SessionState::Rehearsing | SessionState::Ready => {}
             SessionState::MockInterview if state.mock_tasks.lock().await.is_some() => {
                 return Ok(());
             }
             current => {
                 return Err(format!(
-                    "start_mock is only valid from REHEARSING (current: {current})"
+                    "start_mock is only valid from REHEARSING or READY (current: {current})"
                 ));
             }
         }
@@ -2683,6 +2697,11 @@ pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<()
         .clone()
         .ok_or("digest not set — confirm session design first")?;
     let digest = Arc::new(digest);
+    if digest.likely_questions.is_empty() {
+        return Err(
+            "No practice questions in session digest — complete Digest Review first.".to_string(),
+        );
+    }
 
     // Build FailoverManager.
     let (failover, _, _) = build_failover_stack(&app, &state).await?;
@@ -2720,6 +2739,7 @@ pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<()
         audio_dir.clone(),
         Arc::clone(&whisper),
     )
+    .await
     .map_err(|e| e.to_string())?;
 
     let conductor = Conductor::start(
@@ -2730,6 +2750,7 @@ pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<()
         Arc::clone(&state.persistence),
         prompts_base_dir(),
         rag_chunks,
+        pace,
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -2745,10 +2766,27 @@ pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<()
         conductor,
         mic_capture,
         current_turn: 0,
+        guided,
     });
 
-    info!(session_id = %session_id, "mock interview started");
+    info!(session_id = %session_id, guided, "mock interview started");
     Ok(())
+}
+
+/// Ask the conductor to speak the next question (guided mode only).
+#[tauri::command]
+pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
+    if !handles.guided {
+        return Err("ask_mock_question is only valid in guided (step-by-step) mode".to_string());
+    }
+    handles
+        .conductor
+        .cmd_tx
+        .send(ConductorCommand::AskQuestion)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Start recording the user's microphone for the current mock turn.
