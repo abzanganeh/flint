@@ -532,7 +532,7 @@ Prerequisites: Groq API key in Settings; digest confirmed with ≥1 `likely_ques
 
 ### Phase 8 Review Gate
 
-- [x] `cargo test --lib` passes (374 tests incl. mock state, TTS, WAV, coach JSON)
+- [x] `cargo test --lib` passes (380 tests incl. mock state, TTS, WAV, coach JSON, mock-turn persistence race)
 - [x] `cargo clippy -- -D warnings` passes
 - [x] `npx vitest run` passes (31 tests)
 - [ ] Manual checklist above passes on Linux (primary dev platform)

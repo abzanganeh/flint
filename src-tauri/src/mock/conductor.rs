@@ -33,13 +33,17 @@ use super::tts;
 // ── Channel message ───────────────────────────────────────────────────────────
 
 /// Sent from `commands.rs` → `Conductor` to advance the turn machine.
+///
+/// Coach output is intentionally NOT carried here: the coach LLM runs as a
+/// background task spawned by `end_mock_turn` and writes its own columns via
+/// `update_mock_turn_coach`. The conductor only owns the user-facing fields
+/// (transcript, audio path, and the suggested-answer text from its parallel
+/// LLM stream), which it persists via `update_mock_turn_user_answer`.
 pub enum ConductorCommand {
     /// User has finished answering (or pressed Skip).
     TurnComplete {
         user_text: String,
         audio_path: String,
-        coach_json: String,
-        score: u8,
     },
     /// User exits mock mode mid-session.
     Abort,
@@ -158,18 +162,14 @@ async fn conductor_loop<R: Runtime>(
             Some(ConductorCommand::TurnComplete {
                 user_text,
                 audio_path,
-                coach_json,
-                score,
             }) => {
-                if let Err(e) = persistence.update_mock_turn_result(
+                if let Err(e) = persistence.update_mock_turn_user_answer(
                     turn.id,
                     &user_text,
                     &audio_path,
-                    &coach_json,
                     &suggested_text,
-                    score,
                 ) {
-                    warn!(error = %e, "failed to update mock turn result");
+                    warn!(error = %e, "failed to persist mock turn user answer");
                 }
                 turns_completed += 1;
             }

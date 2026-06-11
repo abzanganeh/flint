@@ -2640,17 +2640,6 @@ pub async fn get_feature_flags_snapshot(
 // Phase 8 — Mock Interview commands
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Resolve the prompts directory at runtime.  Same logic used throughout.
-fn prompts_dir() -> PathBuf {
-    std::env::var("FLINT_PROMPTS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("..")
-                .join("prompts")
-        })
-}
-
 /// Transition to MOCK_INTERVIEW and start the conductor + mic capture loop.
 ///
 /// Valid from: `REHEARSING`.
@@ -2664,14 +2653,21 @@ fn prompts_dir() -> PathBuf {
 /// 6. Store `MockTaskHandles` in AppState.
 #[tauri::command]
 pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    // Guard: must be in REHEARSING.
+    // Guard: must be in REHEARSING. If we are already in MOCK_INTERVIEW with an
+    // active session, treat this as idempotent so React StrictMode double-mounts
+    // and re-navigation to the screen do not blow up the conductor.
     {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Rehearsing {
-            return Err(format!(
-                "start_mock is only valid from REHEARSING (current: {})",
-                machine.current()
-            ));
+        match machine.current() {
+            SessionState::Rehearsing => {}
+            SessionState::MockInterview if state.mock_tasks.lock().await.is_some() => {
+                return Ok(());
+            }
+            current => {
+                return Err(format!(
+                    "start_mock is only valid from REHEARSING (current: {current})"
+                ));
+            }
         }
     }
 
@@ -2732,7 +2728,7 @@ pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<()
         Arc::clone(&digest),
         Arc::clone(&failover),
         Arc::clone(&state.persistence),
-        prompts_dir(),
+        prompts_base_dir(),
         rag_chunks,
     );
 
@@ -2777,26 +2773,27 @@ pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
 /// fires when it completes.
 #[tauri::command]
 pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let (turn_n, transcript, audio_path) = {
+    // Pull the turn number and queue the `EndTurn` command while holding the
+    // mock_tasks guard, then drop it before the (potentially long) await on
+    // the reply so concurrent commands like `stop_mock` are not blocked.
+    let (turn_n, reply_rx) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
         let turn_n = handles.current_turn;
-        drop(guard);
-
-        // Give the user up to 120 s to finish answering; in practice they stop
-        // manually well before that.
-        let (text, path) = state
-            .mock_tasks
-            .lock()
-            .await
-            .as_ref()
-            .ok_or("handles disappeared")?
+        let reply_rx = handles
             .mic_capture
-            .end_turn(Duration::from_secs(120))
+            .send_end_turn()
             .await
             .map_err(|e| e.to_string())?;
-        (turn_n, text, path)
+        (turn_n, reply_rx)
     };
+
+    // Give the user up to 120 s to finish answering; in practice they stop
+    // manually well before that.
+    let (transcript, audio_path) =
+        crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
+            .await
+            .map_err(|e| e.to_string())?;
 
     // Kick off coach in the background; it will emit mock_coach_feedback when done.
     let session_id = state
@@ -2829,10 +2826,8 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .map(|t| t.question)
             .unwrap_or_default()
     };
-    let prompts = prompts_dir();
-    let user_text_clone = transcript.clone();
-    let user_text_persist = transcript.clone();
-    let audio_path_clone = audio_path.clone();
+    let prompts = prompts_base_dir();
+    let user_text_for_coach = transcript.clone();
 
     tokio::spawn(async move {
         let (coach_json, score) = run_coach(
@@ -2840,7 +2835,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             session_id,
             turn_n,
             question,
-            user_text_clone,
+            user_text_for_coach,
             rag_chunks,
             failover,
             &prompts,
@@ -2848,22 +2843,24 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .await
         .unwrap_or_default();
 
-        if let Err(e) = persistence.update_mock_turn_result(
-            // The turn row ID was already written by the conductor; look it up.
-            persistence
-                .load_mock_turns(session_id)
-                .unwrap_or_default()
-                .into_iter()
-                .find(|t| t.turn_n == turn_n)
-                .map(|t| t.id)
-                .unwrap_or_default(),
-            &user_text_persist,
-            &audio_path_clone,
-            &coach_json,
-            "",
-            score,
-        ) {
-            warn!(error = %e, "failed to persist mock turn result");
+        // The conductor wrote the turn row (with its own user/audio/suggested
+        // payload); we only update the coach columns here. Writing through
+        // `update_mock_turn_coach` avoids the previous race where this task
+        // wiped the suggested-answer text persisted by the conductor.
+        let turn_id = persistence
+            .load_mock_turns(session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|t| t.turn_n == turn_n)
+            .map(|t| t.id);
+
+        let Some(turn_id) = turn_id else {
+            warn!(turn_n, "coach finished but mock turn row not found");
+            return;
+        };
+
+        if let Err(e) = persistence.update_mock_turn_coach(turn_id, &coach_json, score) {
+            warn!(error = %e, "failed to persist mock turn coach feedback");
         }
     });
 
@@ -2875,8 +2872,6 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .send(ConductorCommand::TurnComplete {
                 user_text: transcript,
                 audio_path,
-                coach_json: String::new(), // Conductor doesn't need the JSON
-                score: 0,
             })
             .await;
     }
@@ -2894,8 +2889,6 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
             .send(ConductorCommand::TurnComplete {
                 user_text: String::new(),
                 audio_path: String::new(),
-                coach_json: String::new(),
-                score: 0,
             })
             .await;
     }

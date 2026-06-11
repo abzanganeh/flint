@@ -54,6 +54,19 @@ pub async fn restore_draft_session(app: &AppHandle, state: &AppState) -> Result<
         {
             warn!(session_id = %session_id, error = %e, "failed to persist PRE_WARMING rollback");
         }
+    } else if restored_state == SessionState::MockInterview {
+        // Mock interview is not resumable — the conductor / mic capture handles
+        // are gone after restart, so step the user back to Rehearsal where they
+        // can re-launch the mock cleanly. Without this the UI screen ends up
+        // in REHEARSING (see `screenForDraftState`) while the state machine
+        // is stuck in MOCK_INTERVIEW, breaking every Rehearsal action.
+        restored_state = SessionState::Rehearsing;
+        if let Err(e) = state
+            .persistence
+            .write_state_transition(session_id, &restored_state)
+        {
+            warn!(session_id = %session_id, error = %e, "failed to persist MOCK_INTERVIEW rollback");
+        }
     }
 
     if !DRAFT_STATES.contains(&restored_state) {

@@ -67,7 +67,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     const setup = async () => {
       const unlisten = await Promise.all([
         onMockQuestionStarted((p) => {
-          setTurn((t) => ({
+          setTurn(() => ({
             ...emptyTurn(),
             turnN: p.turn_n,
             totalQuestions: p.total_questions,
@@ -104,7 +104,19 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           setPhase("reviewing");
         }),
         onMockEnded(() => {
-          onComplete();
+          // The conductor emits `mock_ended` once the question list is
+          // exhausted, but the state machine and mic resources are still on
+          // MOCK_INTERVIEW. Call `stopMock` to transition back to REHEARSING
+          // and shut the mic capture down before navigating away — otherwise
+          // any follow-up Rehearsal action errors out with an invalid
+          // transition.
+          void stopMock()
+            .catch(() => {
+              // Best-effort: backend may already have torn down on abort.
+            })
+            .finally(() => {
+              onComplete();
+            });
         }),
       ]);
       unlisteners.current = unlisten;
