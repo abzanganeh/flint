@@ -93,6 +93,25 @@ pub struct RecoveryData {
     pub responses: Vec<Response>,
 }
 
+/// One turn in a mock interview session.
+#[derive(Debug, Clone)]
+pub struct MockTurn {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub turn_n: u32,
+    pub question: String,
+    /// Speech-to-text transcript of the user's spoken answer.
+    pub user_text: String,
+    /// Absolute local path to the per-turn WAV file. Empty until recording ends.
+    pub audio_path: String,
+    /// Serialised `CoachFeedback` JSON. Empty `{}` until coach completes.
+    pub coach_json: String,
+    /// Full suggested answer text (single merged panel). Empty until LLM responds.
+    pub suggested: String,
+    /// Coach score 0–100. 0 until coach completes.
+    pub score: u8,
+}
+
 /// Lightweight metadata returned alongside the recovery offer so the user
 /// can decide whether to resume or discard.
 #[derive(Debug, Clone)]
@@ -143,7 +162,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -285,6 +304,34 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v7")?;
         info!("sqlite schema migrated to version 7");
+    }
+
+    if current < 8 {
+        // Mock Interview — one row per turn storing the AI question, user's
+        // transcript, path to the per-turn WAV, coach feedback JSON, and the
+        // suggested answer text.  Audio files live outside the DB so they can
+        // be pruned independently; the path is absolute and local.
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS mock_turns (
+                id           TEXT    PRIMARY KEY,
+                session_id   TEXT    NOT NULL,
+                turn_n       INTEGER NOT NULL,
+                question     TEXT    NOT NULL,
+                user_text    TEXT    NOT NULL DEFAULT '',
+                audio_path   TEXT    NOT NULL DEFAULT '',
+                coach_json   TEXT    NOT NULL DEFAULT '{}',
+                suggested    TEXT    NOT NULL DEFAULT '',
+                score        INTEGER NOT NULL DEFAULT 0,
+                created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            );
+            CREATE INDEX IF NOT EXISTS idx_mt_session ON mock_turns(session_id, turn_n);
+
+            PRAGMA user_version = 8;
+            ",
+        )
+        .context("schema migration v8")?;
+        info!("sqlite schema migrated to version 8");
     }
 
     Ok(())
@@ -1053,6 +1100,109 @@ impl SessionPersistence {
         Ok(questions)
     }
 
+    // ── Mock Interview ────────────────────────────────────────────────────
+
+    /// Insert a new mock turn row (call after the AI question is chosen).
+    pub fn write_mock_turn(&self, turn: &MockTurn) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "INSERT OR REPLACE INTO mock_turns
+             (id, session_id, turn_n, question, user_text, audio_path, coach_json, suggested, score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                turn.id.to_string(),
+                turn.session_id.to_string(),
+                turn.turn_n,
+                turn.question,
+                turn.user_text,
+                turn.audio_path,
+                turn.coach_json,
+                turn.suggested,
+                turn.score,
+            ],
+        )
+        .context("write mock turn")?;
+        Ok(())
+    }
+
+    /// Update user transcript, audio path, and coach fields after a turn completes.
+    pub fn update_mock_turn_result(
+        &self,
+        turn_id: Uuid,
+        user_text: &str,
+        audio_path: &str,
+        coach_json: &str,
+        suggested: &str,
+        score: u8,
+    ) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "UPDATE mock_turns
+             SET user_text = ?1, audio_path = ?2, coach_json = ?3,
+                 suggested = ?4, score = ?5
+             WHERE id = ?6",
+            params![
+                user_text,
+                audio_path,
+                coach_json,
+                suggested,
+                score,
+                turn_id.to_string()
+            ],
+        )
+        .context("update mock turn result")?;
+        Ok(())
+    }
+
+    /// Load all turns for a session in order, for replay and summary.
+    pub fn load_mock_turns(&self, session_id: Uuid) -> Result<Vec<MockTurn>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, session_id, turn_n, question, user_text,
+                        audio_path, coach_json, suggested, score
+                 FROM mock_turns WHERE session_id = ?1 ORDER BY turn_n ASC",
+            )
+            .context("prepare load mock turns")?;
+        let rows = stmt
+            .query_map(params![sid], |r| {
+                Ok(MockTurn {
+                    id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+                    session_id: Uuid::parse_str(&r.get::<_, String>(1)?).unwrap_or_default(),
+                    turn_n: r.get(2)?,
+                    question: r.get(3)?,
+                    user_text: r.get(4)?,
+                    audio_path: r.get(5)?,
+                    coach_json: r.get(6)?,
+                    suggested: r.get(7)?,
+                    score: r.get(8)?,
+                })
+            })
+            .context("query mock turns")?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .context("collect mock turns")
+    }
+
+    /// Delete all mock audio files for a session and remove the rows.
+    pub fn delete_mock_turns(&self, session_id: Uuid) -> Result<()> {
+        // Remove audio files first so we don't orphan them if the DELETE fails.
+        if let Ok(turns) = self.load_mock_turns(session_id) {
+            for turn in &turns {
+                if !turn.audio_path.is_empty() {
+                    let _ = std::fs::remove_file(&turn.audio_path);
+                }
+            }
+        }
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "DELETE FROM mock_turns WHERE session_id = ?1",
+            params![session_id.to_string()],
+        )
+        .context("delete mock turns")?;
+        Ok(())
+    }
+
     /// Return the raw context text for a session (empty string if not stored).
     pub fn get_session_context(&self, session_id: Uuid) -> Result<String> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
@@ -1075,7 +1225,7 @@ impl SessionPersistence {
                 "SELECT id FROM sessions
                  WHERE state IN (
                      'CONFIGURING', 'INGESTING', 'DIGEST_REVIEW',
-                     'PRE_WARMING', 'REHEARSING', 'READY'
+                     'PRE_WARMING', 'REHEARSING', 'MOCK_INTERVIEW', 'READY'
                  )
                  ORDER BY updated_at DESC, rowid DESC
                  LIMIT 1",
@@ -1552,6 +1702,7 @@ fn parse_session_state(s: &str) -> Result<SessionState> {
         "DIGEST_REVIEW" => Ok(SessionState::DigestReview),
         "PRE_WARMING" => Ok(SessionState::PreWarming),
         "REHEARSING" => Ok(SessionState::Rehearsing),
+        "MOCK_INTERVIEW" => Ok(SessionState::MockInterview),
         "READY" => Ok(SessionState::Ready),
         "LIVE" => Ok(SessionState::Live),
         "PAUSED" => Ok(SessionState::Paused),

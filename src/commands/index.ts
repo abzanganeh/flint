@@ -599,3 +599,43 @@ export const appendResearchToContext = (
     answer,
     webSources,
   });
+
+// ── Phase 8 — Mock Interview ──────────────────────────────────────────────────
+
+export interface MockTurn {
+  id: string;
+  turn_n: number;
+  question: string;
+  user_text: string;
+  audio_path: string;
+  coach_json: string;
+  suggested: string;
+  score: number;
+}
+
+export interface GrammarIssue {
+  original: string;
+  fix: string;
+  why: string;
+}
+
+export interface CoachFeedback {
+  grammar_issues: GrammarIssue[];
+  tone: { assessment: string; suggestion: string };
+  context_gaps: string[];
+  corrected_answer: string;
+  score: number;
+}
+
+export const startMock = (): Promise<void> => invoke<void>("start_mock");
+
+export const startMockTurn = (): Promise<void> => invoke<void>("start_mock_turn");
+
+export const endMockTurn = (): Promise<void> => invoke<void>("end_mock_turn");
+
+export const skipMockTurn = (): Promise<void> => invoke<void>("skip_mock_turn");
+
+export const stopMock = (): Promise<void> => invoke<void>("stop_mock");
+
+export const getMockTurns = (): Promise<MockTurn[]> =>
+  invoke<MockTurn[]>("get_mock_turns");

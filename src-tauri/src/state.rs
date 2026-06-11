@@ -10,6 +10,9 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::deep_link;
 use tokio::task::JoinHandle;
 
+use crate::mock::conductor::Conductor;
+use crate::mock::mic_capture::MicCapture;
+
 use crate::audio::pipeline::DetectedQuestion;
 
 use crate::auth_session::restore_auth_from_keychain;
@@ -29,10 +32,19 @@ use crate::session::state::SessionStateMachine;
 use crate::supabase::SupabaseAuth;
 
 // ── Live session handles (Phase 3) ───────────────────────────────────────────
-
 /// Per-turn cancellation flag. Set by `cancel_inference`; checked by response
 /// threads between token emissions.
 pub type TurnCancelFlag = Arc<AtomicBool>;
+
+/// Handles for a running mock interview session.
+pub struct MockTaskHandles {
+    /// Conductor loop handle — receives `ConductorCommand` msgs from commands.
+    pub conductor: Conductor,
+    /// Mic capture task — manages cpal stream and VAD+Whisper loop.
+    pub mic_capture: MicCapture,
+    /// Current turn number. Incremented by `start_mock_turn`.
+    pub current_turn: u32,
+}
 
 /// Handles for the running audio capture thread and background tasks.
 ///
@@ -106,6 +118,10 @@ pub struct AppState {
     /// Active rehearsal turn cancellation flag. Replaced on each
     /// `run_rehearsal_turn`; the previous flag is set before replacement.
     pub rehearsal_turn_cancel: Mutex<Option<TurnCancelFlag>>,
+
+    // ── Mock interview (Phase 8) ─────────────────────────────────────────────
+    /// Mock session handles. `Some` only while a mock interview is active.
+    pub mock_tasks: Mutex<Option<MockTaskHandles>>,
 
     /// Phase 7.4 — process-wide cumulative token / cost accounting. Read by
     /// the orchestrator pre-dispatch to enforce the configured cap; mutated
@@ -193,6 +209,7 @@ impl AppState {
             session_memory: Arc::new(Mutex::new(None)),
             rehearsal_turn: Mutex::new(0),
             rehearsal_turn_cancel: Mutex::new(None),
+            mock_tasks: Mutex::new(None),
             cost_tracker: Arc::new(CostTracker::new()),
             feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
             embedder_cache_dir,

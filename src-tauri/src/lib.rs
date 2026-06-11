@@ -14,6 +14,7 @@ mod hotkeys;
 pub mod interfaces;
 mod keychain;
 pub mod llm;
+pub mod mock;
 pub mod orchestrator;
 pub mod rag;
 pub mod research;
@@ -216,6 +217,13 @@ pub fn run() {
             commands::save_provider_key,
             commands::is_provider_key_present,
             commands::clear_provider_key,
+            // Phase 8 — mock interview
+            commands::start_mock,
+            commands::start_mock_turn,
+            commands::end_mock_turn,
+            commands::skip_mock_turn,
+            commands::stop_mock,
+            commands::get_mock_turns,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

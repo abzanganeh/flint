@@ -1916,6 +1916,7 @@ dependencies = [
  "fastembed",
  "flate2",
  "futures",
+ "hound",
  "keyring",
  "nnnoiseless",
  "reqwest 0.12.28",

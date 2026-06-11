@@ -17,6 +17,7 @@ const DRAFT_STATES: &[SessionState] = &[
     SessionState::DigestReview,
     SessionState::PreWarming,
     SessionState::Rehearsing,
+    SessionState::MockInterview,
     SessionState::Ready,
 ];
 
