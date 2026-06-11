@@ -61,7 +61,11 @@ pub struct MicCapture {
 
 impl MicCapture {
     /// Start the mic capture background task.
-    pub fn start<R: Runtime>(
+    ///
+    /// Must be called from within the tokio runtime (i.e. from an async fn).
+    /// The ready-signal is awaited directly rather than via `block_on` to avoid
+    /// the "cannot start a runtime from within a runtime" panic.
+    pub async fn start<R: Runtime>(
         app: AppHandle<R>,
         session_id: Uuid,
         audio_dir: PathBuf,
@@ -81,10 +85,11 @@ impl MicCapture {
             }
         });
 
-        // Block briefly to confirm the stream opened before we store the handle.
-        // We use a blocking recv on a dedicated thread to avoid blocking the
-        // tokio executor.
-        let ready = tauri::async_runtime::block_on(stream_ready_rx)
+        // Await the ready signal directly — we are already inside the tokio
+        // runtime so `block_on` would panic with "cannot start a runtime from
+        // within a runtime".
+        let ready = stream_ready_rx
+            .await
             .unwrap_or(Err(anyhow::anyhow!("cpal thread died before ready")));
         ready.context("mock mic capture stream init")?;
 
