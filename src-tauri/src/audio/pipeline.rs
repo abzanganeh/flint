@@ -79,12 +79,25 @@ pub struct DetectedQuestion {
 // wins" rule, which mislabelled the user's answers as Interviewer whenever
 // the call mix echoed their voice back.
 //
-// Near-duplicate matching uses Jaccard word overlap because Whisper's two
-// passes over the same audio produce slight textual variation.
+// Near-duplicate matching uses two complementary signals:
+//
+//  1. Jaccard word-set overlap (≥ 0.5).  Effective for long utterances where
+//     Whisper's two transcriptions cover the same vocabulary.
+//
+//  2. Ordered prefix match: if the first ⌈N/2⌉ words of both transcriptions
+//     match exactly in order, treat it as an echo.  This catches the common
+//     failure mode where room acoustics cause Whisper to diverge only at the
+//     END of a phrase ("All right, let's take our" vs "All right, let's say
+//     guard") — Jaccard of 0.43 misses it, but the first 3 words agree exactly.
+//
+// Lowering ECHO_JACCARD_THRESHOLD from 0.6 → 0.5 and adding the prefix check
+// substantially reduces bleed-through when the user is not wearing headphones.
 
 const ECHO_WINDOW: Duration = Duration::from_secs(10);
 const ECHO_MIN_WORDS: usize = 3;
-const ECHO_JACCARD_THRESHOLD: f32 = 0.6;
+/// Minimum words that must agree in the ordered prefix check.
+const ECHO_PREFIX_MATCH_WORDS: usize = 3;
+const ECHO_JACCARD_THRESHOLD: f32 = 0.5;
 
 #[derive(Clone)]
 struct DedupEntry {
@@ -111,9 +124,10 @@ impl CrossChannelDedup {
             AudioSource::Microphone => &self.recent_system,
             AudioSource::System => &self.recent_mic,
         };
-        opposite
-            .iter()
-            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
+        opposite.iter().any(|entry| {
+            jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD
+                || prefix_matches(&tokens, &entry.tokens)
+        })
     }
 
     /// Record an accepted transcript so later echoes on the opposite channel
@@ -161,6 +175,27 @@ fn jaccard(a: &[String], b: &[String]) -> f32 {
     } else {
         intersection / union
     }
+}
+
+/// True when both token sequences share at least `ECHO_PREFIX_MATCH_WORDS`
+/// ordered tokens at the start of the shorter sequence.
+///
+/// Jaccard is a bag-of-words metric and misses cases where Whisper diverges
+/// only at the end of a phrase due to different acoustic quality on each
+/// channel.  E.g. "all right lets take our" vs "all right lets say guard"
+/// has Jaccard = 0.43 but the first 3 tokens are identical → echo.
+fn prefix_matches(a: &[String], b: &[String]) -> bool {
+    let check = a.len().min(b.len()).min(ECHO_PREFIX_MATCH_WORDS * 2);
+    if check < ECHO_PREFIX_MATCH_WORDS {
+        return false;
+    }
+    let agree = a
+        .iter()
+        .zip(b.iter())
+        .take(check)
+        .filter(|(x, y)| x == y)
+        .count();
+    agree >= ECHO_PREFIX_MATCH_WORDS
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -433,7 +468,11 @@ mod tests {
         assert!(mic.unwrap().rnnoise.is_some());
 
         let sys = ChannelProcessor::new_system();
-        assert!(sys.is_ok(), "system ChannelProcessor failed: {:?}", sys.err());
+        assert!(
+            sys.is_ok(),
+            "system ChannelProcessor failed: {:?}",
+            sys.err()
+        );
         assert!(sys.unwrap().rnnoise.is_none());
     }
 
@@ -529,5 +568,52 @@ mod tests {
         use crate::audio::rnnoise::DOWNSAMPLED_FRAME_SIZE;
         assert_eq!(RNNOISE_FRAME_SIZE, 480);
         assert_eq!(DOWNSAMPLED_FRAME_SIZE * 2, VAD_FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn prefix_match_catches_whisper_end_of_utterance_divergence() {
+        // Whisper transcribes the same audio differently on each channel because
+        // room acoustics degrade the mic capture. Jaccard alone misses these
+        // (Jaccard = 0.43 < 0.5), but the first three tokens are identical.
+        let system = tokenize_for_echo("all right lets take our");
+        let mic = tokenize_for_echo("all right lets say guard");
+        assert!(
+            jaccard(&system, &mic) < ECHO_JACCARD_THRESHOLD,
+            "Jaccard should NOT trigger on its own"
+        );
+        assert!(
+            prefix_matches(&system, &mic),
+            "prefix_matches should catch the shared prefix"
+        );
+    }
+
+    #[test]
+    fn dedup_suppresses_acoustic_bleed_via_prefix_match() {
+        // The system channel transcribes the interviewer's question. The mic
+        // picks it up acoustically and Whisper produces a divergent ending.
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(
+            AudioSource::System,
+            "all right lets take our time with this",
+            now,
+        );
+        assert!(
+            dedup.should_suppress(
+                AudioSource::Microphone,
+                "all right lets say guard over here",
+                now + Duration::from_millis(300),
+            ),
+            "prefix-matched acoustic echo should be suppressed"
+        );
+    }
+
+    #[test]
+    fn prefix_match_does_not_suppress_distinct_content_sharing_a_short_preamble() {
+        // Both could start with "so" but diverge quickly — must NOT suppress.
+        let a = tokenize_for_echo("so tell me about your leadership experience");
+        let b = tokenize_for_echo("so the biggest challenge was aligning stakeholders");
+        // Only "so" matches at position 0 — well below ECHO_PREFIX_MATCH_WORDS.
+        assert!(!prefix_matches(&a, &b));
     }
 }
