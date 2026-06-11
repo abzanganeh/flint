@@ -86,9 +86,17 @@ jobs:
             ~/.cargo/git
             src-tauri/target
             evals/target
-          key: cargo-${{ matrix.label }}-${{ hashFiles('src-tauri/Cargo.lock', 'evals/Cargo.lock') }}
+          # v2: bust Windows cache after GHA runners moved VS 2022 -> VS 2026.
+          key: cargo-${{ matrix.label }}-v2-${{ hashFiles('src-tauri/Cargo.lock', 'evals/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ matrix.label }}-
+            cargo-${{ matrix.label }}-v2-
+
+      # whisper-rs-sys cmake output is tied to the host VS generator; stale
+      # caches from an older runner image fail with a generator mismatch.
+      - name: Clean stale whisper-rs-sys cmake cache (Windows)
+        if: matrix.install == 'windows'
+        shell: pwsh
+        run: ./scripts/cleanup-whisper-cmake-cache.ps1
 
       # Build everything first so a missing platform-specific symbol shows up
       # as a build failure (per OS) rather than a test failure deep in cargo's
