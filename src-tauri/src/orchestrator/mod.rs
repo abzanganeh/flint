@@ -38,9 +38,9 @@ use crate::digest::Digest;
 use crate::events::{
     emit_confidence_score, emit_context_truncated, emit_cost_cap_status, emit_inference_suspended,
     emit_rag_chunks_update, emit_response_metadata, emit_thread_status, emit_token_usage_update,
-    ConfidenceScorePayload, ContextTruncatedPayload, CostCapStatusPayload,
+    emit_turn_started, ConfidenceScorePayload, ContextTruncatedPayload, CostCapStatusPayload,
     InferenceSuspendedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
-    ThreadStatusPayload, TokenUsageUpdatePayload,
+    ThreadStatusPayload, TokenUsageUpdatePayload, TurnStartedPayload,
 };
 use crate::interfaces::vector::{ScoredChunk, VectorInterface};
 use crate::llm::failover::FailoverManager;
@@ -412,6 +412,17 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
             snap.usage.cost_estimate_usd
         );
     }
+
+    // Turn boundary for the frontend: previous answer cards are archived and
+    // a fresh card headed by this question begins streaming. Emitted after
+    // the cap check so a refused turn does not wipe the previous answer.
+    emit_turn_started(
+        &app,
+        TurnStartedPayload {
+            question: cfg.question_text.clone(),
+            turn: cfg.turn_number,
+        },
+    );
 
     let rag_start = std::time::Instant::now();
     // ── 1. Embed the question ─────────────────────────────────────────────

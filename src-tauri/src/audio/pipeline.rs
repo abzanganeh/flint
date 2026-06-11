@@ -61,18 +61,26 @@ pub struct DetectedQuestion {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Cross-channel echo suppression
+// Cross-channel echo suppression — first-arrival wins
 // ────────────────────────────────────────────────────────────────────────────
 //
-// The dual-channel architecture assumes headphones. When the user has speakers
-// on, the microphone re-captures system audio (YouTube, the interviewer's
-// voice, etc.) and both channels transcribe the same content with slight
-// per-pass variation. We compare normalised word sets via Jaccard overlap
-// and, when the same content is detected on both channels within a sliding
-// window, always drop the MIC copy in favour of SYSTEM (cleaner signal).
+// The dual-channel architecture assumes headphones. Without them, content
+// leaks across channels in BOTH directions:
 //
-// The window is wider than fix 1's old 4 s because Whisper inference on a
-// large chunk can lag the original audio by several seconds.
+//   - Interviewer audio (speakers) → picked up by the mic → duplicate on MIC.
+//   - The user's own voice → looped back in the conferencing app's call mix
+//     (Teams/Zoom sidetone, far-end echo) → duplicate on SYSTEM.
+//
+// Attribution rule: the genuine source always transcribes FIRST — the echo
+// arrives later because it travels through speakers/network/DSP before being
+// re-captured. So whichever channel produced the content first is the true
+// speaker; a near-duplicate arriving on the opposite channel within the
+// window is the echo and is dropped. This replaces the old "SYSTEM always
+// wins" rule, which mislabelled the user's answers as Interviewer whenever
+// the call mix echoed their voice back.
+//
+// Near-duplicate matching uses Jaccard word overlap because Whisper's two
+// passes over the same audio produce slight textual variation.
 
 const ECHO_WINDOW: Duration = Duration::from_secs(10);
 const ECHO_MIN_WORDS: usize = 3;
@@ -86,40 +94,47 @@ struct DedupEntry {
 
 #[derive(Default)]
 struct CrossChannelDedup {
-    // Only SYSTEM entries are stored — MIC is always the suppressed side.
     recent_system: Vec<DedupEntry>,
+    recent_mic: Vec<DedupEntry>,
 }
 
 impl CrossChannelDedup {
-    /// Returns true iff `source` is MIC and its text overlaps a recent SYSTEM entry.
+    /// Returns true iff `text` near-duplicates content recently transcribed on
+    /// the OPPOSITE channel — i.e. this arrival is the echo, not the source.
     fn should_suppress(&mut self, source: AudioSource, text: &str, now: Instant) -> bool {
-        // Only MIC is ever suppressed — SYSTEM is the authoritative channel.
-        if source != AudioSource::Microphone {
-            return false;
-        }
         let tokens = tokenize_for_echo(text);
         if tokens.len() < ECHO_MIN_WORDS {
             return false;
         }
         self.prune(now);
-        self.recent_system
+        let opposite = match source {
+            AudioSource::Microphone => &self.recent_system,
+            AudioSource::System => &self.recent_mic,
+        };
+        opposite
             .iter()
             .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
     }
 
-    /// Record a SYSTEM transcript so future MIC transcripts can be checked against it.
-    fn record_system(&mut self, text: &str, now: Instant) {
+    /// Record an accepted transcript so later echoes on the opposite channel
+    /// can be matched against it.
+    fn record(&mut self, source: AudioSource, text: &str, now: Instant) {
         let tokens = tokenize_for_echo(text);
         if tokens.len() < ECHO_MIN_WORDS {
             return;
         }
-        self.recent_system.push(DedupEntry { tokens, at: now });
+        let entry = DedupEntry { tokens, at: now };
+        match source {
+            AudioSource::System => self.recent_system.push(entry),
+            AudioSource::Microphone => self.recent_mic.push(entry),
+        }
         self.prune(now);
     }
 
     fn prune(&mut self, now: Instant) {
         if let Some(cutoff) = now.checked_sub(ECHO_WINDOW) {
             self.recent_system.retain(|e| e.at >= cutoff);
+            self.recent_mic.retain(|e| e.at >= cutoff);
         }
     }
 }
@@ -303,13 +318,14 @@ async fn process_frame(
             Err(poisoned) => poisoned.into_inner(),
         };
         if guard.should_suppress(source, &result.text, now) {
-            tracing::debug!(text = %result.text, "suppressed mic echo of system audio");
+            tracing::debug!(
+                source = %source,
+                text = %result.text,
+                "suppressed cross-channel echo (first arrival wins)"
+            );
             return Ok(());
         }
-        // Record SYSTEM transcripts so subsequent MIC chunks can be compared.
-        if source == AudioSource::System {
-            guard.record_system(&result.text, now);
-        }
+        guard.record(source, &result.text, now);
     }
 
     // ── Step 4b: emit + persist transcript chunk ──────────────────────────
@@ -442,20 +458,52 @@ mod tests {
     }
 
     #[test]
-    fn dedup_suppresses_only_mic_when_echoing_system() {
+    fn dedup_suppresses_mic_echo_when_system_spoke_first() {
+        // Interviewer speaks through speakers → mic re-captures it.
         let mut dedup = CrossChannelDedup::default();
         let now = Instant::now();
-        dedup.record_system("Why do you like to work with Fisher Investors?", now);
+        dedup.record(
+            AudioSource::System,
+            "Why do you like to work with Fisher Investors?",
+            now,
+        );
 
         assert!(dedup.should_suppress(
             AudioSource::Microphone,
             "Why do you like work with Fisher Investors",
             now + Duration::from_millis(500),
         ));
+    }
+
+    #[test]
+    fn dedup_suppresses_system_echo_when_mic_spoke_first() {
+        // User answers → conferencing app loops their voice back into the
+        // call mix → SYSTEM channel transcribes the duplicate. The user's
+        // answer must NOT be re-attributed to the interviewer.
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(
+            AudioSource::Microphone,
+            "I am excited about the AI Engineer opportunity at Fisher",
+            now,
+        );
+
+        assert!(dedup.should_suppress(
+            AudioSource::System,
+            "I am excited about the AI Engineer opportunity at Fisher",
+            now + Duration::from_millis(800),
+        ));
+    }
+
+    #[test]
+    fn dedup_does_not_suppress_distinct_content_on_either_channel() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(AudioSource::System, "tell me about a project you led", now);
 
         assert!(!dedup.should_suppress(
-            AudioSource::System,
-            "Why do you like work with Fisher Investors",
+            AudioSource::Microphone,
+            "I led the fraud detection platform migration last year",
             now + Duration::from_millis(500),
         ));
     }
@@ -464,7 +512,7 @@ mod tests {
     fn dedup_drops_entries_outside_the_window() {
         let mut dedup = CrossChannelDedup::default();
         let now = Instant::now();
-        dedup.record_system("alpha bravo charlie delta", now);
+        dedup.record(AudioSource::System, "alpha bravo charlie delta", now);
         let later = now + ECHO_WINDOW + Duration::from_secs(1);
         assert!(!dedup.should_suppress(
             AudioSource::Microphone,

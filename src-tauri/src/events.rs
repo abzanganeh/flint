@@ -8,6 +8,15 @@ pub struct TranscriptionChunkPayload {
     pub timestamp: i64,
 }
 
+/// Emitted at the start of every orchestrator turn (live and rehearsal).
+/// The frontend uses this as the turn boundary: archive the previous
+/// answer card and start a fresh one headed by `question`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TurnStartedPayload {
+    pub question: String,
+    pub turn: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DirectionalTokenPayload {
     pub token: String,
@@ -129,6 +138,10 @@ pub fn emit_transcription_chunk<R: Runtime>(
     payload: TranscriptionChunkPayload,
 ) {
     let _ = app.emit("transcription_chunk", payload);
+}
+
+pub fn emit_turn_started<R: Runtime>(app: &AppHandle<R>, payload: TurnStartedPayload) {
+    let _ = app.emit("turn_started", payload);
 }
 
 pub fn emit_directional_token<R: Runtime>(app: &AppHandle<R>, payload: DirectionalTokenPayload) {

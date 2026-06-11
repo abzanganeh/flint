@@ -6,6 +6,7 @@ import {
   onDepthToken,
   onDirectionalToken,
   onResponseMetadata,
+  onTurnStarted,
 } from "../events";
 import { useUIStore } from "../store/ui";
 
@@ -15,6 +16,9 @@ let setupInFlight: Promise<void> | null = null;
 
 async function attachOrchestratorListeners(): Promise<() => void> {
   const unlistenFns = await Promise.all([
+    onTurnStarted(({ question, turn }) => {
+      useUIStore.getState().startTurn(question, turn);
+    }),
     onDirectionalToken(({ token }) => {
       useUIStore.getState().appendDirectionalToken(token);
     }),

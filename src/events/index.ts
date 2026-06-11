@@ -8,6 +8,11 @@ export interface TranscriptionChunkEventPayload {
   timestamp: number;
 }
 
+export interface TurnStartedEventPayload {
+  question: string;
+  turn: number;
+}
+
 export interface DirectionalTokenEventPayload {
   token: string;
 }
@@ -102,6 +107,13 @@ export const onTranscriptionChunk = (
   handler: (payload: TranscriptionChunkEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<TranscriptionChunkEventPayload>("transcription_chunk", (event) =>
+    handler(event.payload),
+  );
+
+export const onTurnStarted = (
+  handler: (payload: TurnStartedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<TurnStartedEventPayload>("turn_started", (event) =>
     handler(event.payload),
   );
 

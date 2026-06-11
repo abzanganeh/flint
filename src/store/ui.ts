@@ -9,8 +9,13 @@ import type {
   PanelLayout,
   RagChunk,
   TokenUsage,
+  TurnCard,
   UIState,
 } from "../types";
+
+/// Completed turns kept for in-panel history. Enough to scroll back over the
+/// last few questions without growing the overlay unbounded mid-interview.
+const TURN_HISTORY_LIMIT = 8;
 
 interface UIStore extends UIState {
   setPanelLayout: (panelLayout: PanelLayout) => void;
@@ -21,6 +26,8 @@ interface UIStore extends UIState {
   appendDirectionalToken: (token: string) => void;
   appendDepthToken: (token: string) => void;
   clearStreamingBuffers: () => void;
+  /** Turn boundary: archive the current card into history and start fresh. */
+  startTurn: (question: string, turn: number) => void;
   setConfidenceLevel: (level: ConfidenceLevel | null) => void;
   setDepthPrePrepared: (depthPrePrepared: boolean) => void;
   setDigestSummary: (digestSummary: string | null) => void;
@@ -119,6 +126,8 @@ export const useUIStore = create<UIStore>((set) => ({
   layoutMode: readPersistedLayoutMode(),
   focusedPanel: null,
   streamingBuffers: { directional: "", depth: "" },
+  currentQuestion: "",
+  turnHistory: [],
   confidenceLevel: null,
   depthPrePrepared: false,
   digestSummary: null,
@@ -189,6 +198,38 @@ export const useUIStore = create<UIStore>((set) => ({
     set({
       streamingBuffers: { directional: "", depth: "" },
       depthPrePrepared: false,
+    }),
+
+  startTurn: (question, turn) =>
+    set((s) => {
+      const hasContent =
+        s.streamingBuffers.directional.length > 0 ||
+        s.streamingBuffers.depth.length > 0;
+      const archived: TurnCard[] = hasContent
+        ? [
+            {
+              id:
+                typeof crypto !== "undefined" && "randomUUID" in crypto
+                  ? crypto.randomUUID()
+                  : `${Date.now()}-${Math.random()}`,
+              turn: turn - 1,
+              question: s.currentQuestion,
+              directional: s.streamingBuffers.directional,
+              depth: s.streamingBuffers.depth,
+              confidenceLevel: s.confidenceLevel,
+            },
+            ...s.turnHistory,
+          ].slice(0, TURN_HISTORY_LIMIT)
+        : s.turnHistory;
+      return {
+        turnHistory: archived,
+        currentQuestion: question,
+        streamingBuffers: { directional: "", depth: "" },
+        confidenceLevel: null,
+        depthPrePrepared: false,
+        clarifyingQuestions: [],
+        answerNowMode: false,
+      };
     }),
 
   setConfidenceLevel: (confidenceLevel) => set({ confidenceLevel }),

@@ -63,7 +63,6 @@ const P95_REENABLE_THRESHOLD_MS: u128 = 120;
 const QUESTION_PREFIXES: &[&str] = &[
     "what ",
     "what's ",
-    "what's ",
     "how ",
     "why ",
     "when ",
@@ -77,6 +76,7 @@ const QUESTION_PREFIXES: &[&str] = &[
     "would you ",
     "should you ",
     "tell me ",
+    "tell us ",
     "walk me ",
     "walk us ",
     "describe ",
@@ -84,6 +84,44 @@ const QUESTION_PREFIXES: &[&str] = &[
     "help me understand ",
     "give me ",
     "give us ",
+    "share with ",
+    "talk to me about ",
+    "let's talk about ",
+    "let's chat about ",
+    "let's discuss ",
+    "maybe we can ",
+    "i'd love to hear ",
+    "i would love to hear ",
+    "i'd like to hear ",
+    "i'd like to know ",
+    "i'm curious ",
+    "i am curious ",
+    "we'd like to know ",
+];
+
+/// Mid-utterance phrases that signal a conversational invitation even when
+/// the utterance does not OPEN with a question pattern. Interviewers often
+/// soften asks with filler: "So, um, maybe we can chat a bit about what you
+/// enjoy most in your work." These run only on the SYSTEM (interviewer)
+/// channel, so the false-positive cost is an extra suggestion — far cheaper
+/// than silently dropping a real question.
+const INVITATION_PHRASES: &[&str] = &[
+    "chat a bit about",
+    "chat about what",
+    "talk a bit about",
+    "talk about what",
+    "tell me about",
+    "tell us about",
+    "hear about your",
+    "hear more about",
+    "curious about",
+    "love to hear",
+    "like to know",
+    "like to hear",
+    "interested to hear",
+    "interested in hearing",
+    "walk me through",
+    "walk us through",
 ];
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -280,7 +318,8 @@ impl QuestionDetector {
 /// Decision tree:
 /// 1. Ends with `?` → `Question`
 /// 2. Starts with a known question prefix → `Question`
-/// 3. Otherwise → `Ambiguous`
+/// 3. Contains a conversational invitation phrase → `Question`
+/// 4. Otherwise → `Ambiguous`
 ///
 /// This pass never returns `NotAQuestion` — the rule set covers known-question
 /// patterns but cannot rule out statement-form questions, so unknown cases are
@@ -292,6 +331,12 @@ fn pass1(normalized: &str) -> DetectionResult {
 
     for prefix in QUESTION_PREFIXES {
         if normalized.starts_with(prefix) {
+            return DetectionResult::Question;
+        }
+    }
+
+    for phrase in INVITATION_PHRASES {
+        if normalized.contains(phrase) {
             return DetectionResult::Question;
         }
     }
@@ -399,6 +444,50 @@ mod tests {
         assert_eq!(pass1("that is interesting"), DetectionResult::Ambiguous);
         assert_eq!(pass1("i see, go on"), DetectionResult::Ambiguous);
         assert_eq!(pass1("okay"), DetectionResult::Ambiguous);
+    }
+
+    // ── Pass 1 — conversational invitations ──────────────────────────────
+
+    #[test]
+    fn invitation_maybe_we_can_chat_detected() {
+        // Real missed question from a live session.
+        assert_eq!(
+            pass1(
+                "maybe we can chat a bit about what you enjoy most in your \
+                 work and what keeps you motivated day to day"
+            ),
+            DetectionResult::Question
+        );
+    }
+
+    #[test]
+    fn invitation_with_leading_filler_detected() {
+        // Filler before the invitation defeats prefix matching; the
+        // contains-based pass must still catch it.
+        assert_eq!(
+            pass1("so, um, i'd be interested to hear about your last project"),
+            DetectionResult::Question
+        );
+        assert_eq!(
+            pass1("great, now tell me about a time you failed"),
+            DetectionResult::Question
+        );
+    }
+
+    #[test]
+    fn invitation_prefixes_detected() {
+        assert_eq!(
+            pass1("let's talk about your leadership style"),
+            DetectionResult::Question
+        );
+        assert_eq!(
+            pass1("i'm curious how you handle conflict"),
+            DetectionResult::Question
+        );
+        assert_eq!(
+            pass1("share with us an example of a difficult decision"),
+            DetectionResult::Question
+        );
     }
 
     // ── Tier 1 — ambiguous resolves to false ─────────────────────────────
