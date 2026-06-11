@@ -175,7 +175,11 @@ impl FailoverManager {
                     }
                     self.rate_limiter.set_retry_after(secs).await;
                     self.rate_limiter.acquire(estimated_tokens).await;
-                    match self.primary.complete_stream(prompt.clone(), config.clone()).await {
+                    match self
+                        .primary
+                        .complete_stream(prompt.clone(), config.clone())
+                        .await
+                    {
                         Ok(stream) => return Ok(stream),
                         Err(ref retry_err) => match classify_error(retry_err) {
                             CallError::RateLimit(retry_secs) => {

@@ -361,7 +361,11 @@ mod tests {
         // When LLM returns more than 5 questions, all must be preserved.
         let mut qs: Vec<String> = (0..15).map(|i| format!("Question {i}")).collect();
         pad_likely_questions(&mut qs);
-        assert_eq!(qs.len(), 15, "pad must not truncate questions above the floor");
+        assert_eq!(
+            qs.len(),
+            15,
+            "pad must not truncate questions above the floor"
+        );
     }
 
     #[test]

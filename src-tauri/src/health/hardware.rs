@@ -373,7 +373,10 @@ mod tests {
         ] {
             assert_eq!(WhisperModel::from_name(m.as_str()), Some(m));
         }
-        assert_eq!(WhisperModel::from_name("Small"), Some(WhisperModel::SmallEn));
+        assert_eq!(
+            WhisperModel::from_name("Small"),
+            Some(WhisperModel::SmallEn)
+        );
         assert!(WhisperModel::from_name("bogus").is_none());
     }
 }

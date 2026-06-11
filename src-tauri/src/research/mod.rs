@@ -102,7 +102,8 @@ pub fn rag_is_sufficient(chunks: &[ScoredChunk]) -> bool {
     max_score >= RAG_SUFFICIENCY_THRESHOLD
 }
 
-const NO_TAVILY_MESSAGE: &str = "I don't have enough information in your pasted context to answer that. \
+const NO_TAVILY_MESSAGE: &str =
+    "I don't have enough information in your pasted context to answer that. \
     Add a Tavily API key in Settings → API Keys to search the web during rehearsal prep.";
 
 /// Questions that need live/public facts (AUM, CEO, news) — not answerable from pasted JD alone.

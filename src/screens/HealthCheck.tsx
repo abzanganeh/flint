@@ -10,7 +10,8 @@ import {
 import "./HealthCheck.css";
 
 const BLACKHOLE_URL = "https://existential.audio/blackhole/";
-const PIPEWIRE_LOOPBACK_CMD = "pactl load-module module-loopback latency_msec=1";
+const PIPEWIRE_CLEANUP_CMD =
+  "pactl unload-module module-loopback";
 
 const CHECK_LABELS: Record<HealthCheckName, string> = {
   microphone_access: "Microphone access",
@@ -73,8 +74,12 @@ function PlatformAudioGuidance({ profile }: { profile: HardwareProfileDto }) {
   if (family === "linux") {
     return (
       <div className="platform-banner info" role="note">
-        PipeWire loopback is required. Run:{" "}
-        <code>{PIPEWIRE_LOOPBACK_CMD}</code>
+        PipeWire exposes system audio via each sink&apos;s{" "}
+        <code>.monitor</code> source — Flint uses that automatically.{" "}
+        <strong>Do not</strong> run{" "}
+        <code>pactl load-module module-loopback</code>; it routes your mic to
+        your speakers and persists after Flint exits. If you already ran it,
+        undo with: <code>{PIPEWIRE_CLEANUP_CMD}</code>
       </div>
     );
   }

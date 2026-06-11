@@ -163,7 +163,7 @@ fn check_system_audio_loopback_linux() -> HealthCheckResult {
         return warn(
             HealthCheck::SystemAudioLoopback,
             "System audio loopback may work, but stealth mode requires Wayland.",
-            "PipeWire loopback required. Run: pactl load-module module-loopback latency_msec=1 (PipeWire) or install PipeWire with the loopback module.",
+            "PipeWire is required. Flint captures system audio from your default sink's .monitor source — do NOT run `pactl load-module module-loopback` (that routes your mic to your speakers).",
         );
     }
 
@@ -178,7 +178,7 @@ fn check_system_audio_loopback_linux() -> HealthCheckResult {
         return warn(
             HealthCheck::SystemAudioLoopback,
             "PulseAudio detected; PipeWire is recommended for loopback.",
-            "PipeWire loopback required. Run: pactl load-module module-loopback latency_msec=1 — or migrate to PipeWire for reliable capture.",
+            "Migrate to PipeWire for reliable system-audio capture. Do NOT run `pactl load-module module-loopback` — it routes your mic to your speakers.",
         );
     }
 

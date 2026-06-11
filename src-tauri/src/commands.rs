@@ -789,14 +789,10 @@ async fn resolve_session_digest(
             *state.session_digest.write().await = Some(digest.clone());
             Ok(digest)
         }
-        Ok(None) => Err(
-            "No session digest — complete digest review before rehearsal.".to_string(),
-        ),
+        Ok(None) => Err("No session digest — complete digest review before rehearsal.".to_string()),
         Err(e) => {
             warn!(error = %e, "resolve_session_digest: SQLite fallback failed");
-            Err(
-                "No session digest — complete digest review before rehearsal.".to_string(),
-            )
+            Err("No session digest — complete digest review before rehearsal.".to_string())
         }
     }
 }
@@ -1119,9 +1115,7 @@ async fn build_failover_stack(
     if cloud_fallback.is_some() {
         info!("failover stack: OpenRouter cloud fallback configured");
     } else {
-        info!(
-            "failover stack: no OpenRouter key in Settings — Groq 429 will use Ollama only"
-        );
+        info!("failover stack: no OpenRouter key in Settings — Groq 429 will use Ollama only");
     }
     let mut failover = FailoverManager::new(
         primary_provider,
@@ -1214,9 +1208,7 @@ pub async fn run_rehearsal_turn(
             Arc::new(digest),
             prompts_base_dir(),
             failover,
-            state
-                .wait_for_embedder(Duration::from_secs(45))
-                .await?,
+            state.wait_for_embedder(Duration::from_secs(45)).await?,
             Arc::clone(&state.vector_store),
             Arc::clone(&state.prewarm_cache),
             memory,
@@ -1782,7 +1774,12 @@ pub async fn start_session(
     tokio::time::timeout(Duration::from_secs(5), ready_rx)
         .await
         .map_err(|_| start_session_step_err("audio capture", "startup timed out after 5s"))?
-        .map_err(|_| start_session_step_err("audio capture", "capture thread exited before sending ready signal"))?
+        .map_err(|_| {
+            start_session_step_err(
+                "audio capture",
+                "capture thread exited before sending ready signal",
+            )
+        })?
         .map_err(|e| start_session_step_err("audio capture", e))?;
 
     // ── 5. Build failover manager and conversation memory ─────────────────

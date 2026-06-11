@@ -591,11 +591,10 @@ fn find_system_device(host: &cpal::Host) -> Result<Device> {
     }
 
     Err(anyhow!(
-        "No PipeWire monitor or loopback device found. \
-         Run `pactl load-module module-loopback latency_msec=1` \
-         or set PULSE_SOURCE to your sink monitor (e.g. \
-         `export PULSE_SOURCE=\"$(pactl get-default-sink).monitor\"`) \
-         before starting a session."
+        "No PipeWire monitor source found. Set PULSE_SOURCE to your sink monitor \
+         (e.g. `export PULSE_SOURCE=\"$(pactl get-default-sink).monitor\"`) \
+         before starting a session. Do NOT run `pactl load-module module-loopback` \
+         — that routes your microphone to your speakers."
     ))
 }
 

@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use tokio::time::timeout;
 use tauri::{AppHandle, Runtime};
+use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
