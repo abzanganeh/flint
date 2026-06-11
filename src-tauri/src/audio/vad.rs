@@ -49,6 +49,22 @@ const MIN_SPEECH_FRAMES: u32 = MIN_SPEECH_MS / FRAME_MS; // = 10
 const MAX_SILENCE_GAP_MS: u32 = 600;
 const MAX_SILENCE_FRAMES: u32 = MAX_SILENCE_GAP_MS / FRAME_MS; // = 30
 
+/// Maximum speech chunk duration before a mid-speech flush is forced.
+///
+/// When two speakers talk continuously (or one person gives a long answer) with
+/// no 600ms pause, the VAD accumulates all samples in `speech_buf` and only
+/// emits when silence finally arrives. That produces a single huge chunk that
+/// takes Whisper several seconds to transcribe and causes multiple lines of
+/// text to appear at once. Enforcing a ceiling here means long utterances are
+/// split into ≤30-second pieces, each transcribed independently, which keeps
+/// the transcript rolling even during uninterrupted speech.
+///
+/// The value is a compromise: long enough that a single complete answer fits in
+/// one chunk most of the time, short enough that Whisper latency stays under
+/// ~3 seconds on Tier-1 hardware.
+const MAX_CHUNK_DURATION_MS: u32 = 30_000;
+const MAX_CHUNK_FRAMES: u32 = MAX_CHUNK_DURATION_MS / FRAME_MS; // = 1500
+
 /// Below this energy level the frame is definitely silence — skip VAD.
 const ENERGY_FLOOR_DBFS: f32 = -60.0;
 
@@ -180,6 +196,14 @@ impl VadChunker {
                 if is_speech {
                     self.speech_frames += 1;
                     self.speech_buf.extend_from_slice(frame);
+
+                    // Force-flush when the segment reaches the maximum chunk
+                    // duration. Speech is still active so we stay in Collecting
+                    // and start a fresh buffer immediately — no transition to Idle.
+                    if self.speech_frames >= MAX_CHUNK_FRAMES {
+                        return self.flush_and_continue();
+                    }
+
                     None
                 } else {
                     // First silence after speech — start the silence countdown.
@@ -234,6 +258,37 @@ impl VadChunker {
         }
 
         let duration_ms = (speech_buf.len() as u32 * 1000) / VAD_SAMPLE_RATE;
+        Some(VadChunk {
+            samples: speech_buf,
+            source,
+            duration_ms,
+        })
+    }
+
+    /// Flush the current speech buffer mid-utterance and immediately restart
+    /// collection (do NOT transition to Idle).
+    ///
+    /// Called when `MAX_CHUNK_FRAMES` is reached. The caller must emit the
+    /// returned chunk to Whisper; the next frame continues filling a fresh
+    /// buffer in the `Collecting` state so there is no audio gap.
+    fn flush_and_continue(&mut self) -> Option<VadChunk> {
+        let speech_buf = std::mem::take(&mut self.speech_buf);
+        let speech_frames = self.speech_frames;
+        let source = self.current_source;
+
+        // Reset counters but stay in Collecting — speech is still live.
+        self.speech_frames = 0;
+
+        if speech_frames < MIN_SPEECH_FRAMES {
+            return None;
+        }
+
+        let duration_ms = (speech_buf.len() as u32 * 1000) / VAD_SAMPLE_RATE;
+        tracing::debug!(
+            duration_ms,
+            max_chunk_frames = MAX_CHUNK_FRAMES,
+            "VAD max-chunk flush — splitting long utterance"
+        );
         Some(VadChunk {
             samples: speech_buf,
             source,
@@ -511,5 +566,65 @@ mod tests {
         // Second half — now a full VAD frame is available; state machine runs.
         let _ = chunker.process_frame(&half, AudioSource::System);
         assert_eq!(chunker.frame_buf.len(), 0);
+    }
+
+    /// Continuous speech exceeding MAX_CHUNK_DURATION_MS must produce multiple
+    /// chunks without waiting for silence, and must not drop any audio.
+    #[test]
+    fn test_max_chunk_flush_splits_long_utterance() {
+        let mut chunker = VadChunker::new_for_testing().unwrap();
+        let mut chunks: Vec<VadChunk> = Vec::new();
+
+        // Feed MAX_CHUNK_FRAMES + 100 speech frames — enough to trigger at least
+        // one mid-speech flush plus a residual segment.
+        let total_frames = (MAX_CHUNK_FRAMES as usize) + 100;
+        let speech: Vec<Vec<f32>> = (0..total_frames).map(speech_frame).collect();
+        run_frames(&mut chunker, &speech, AudioSource::System, &mut chunks);
+
+        // At least one mid-speech flush must have fired by now.
+        assert!(
+            !chunks.is_empty(),
+            "expected at least one chunk after {} frames of continuous speech",
+            total_frames
+        );
+
+        // Every emitted chunk must be attributed to the correct channel.
+        for chunk in &chunks {
+            assert_eq!(chunk.source, AudioSource::System);
+        }
+    }
+
+    /// After a mid-speech flush the chunker continues collecting; a subsequent
+    /// silence gap finalises the residual segment normally.
+    #[test]
+    fn test_max_chunk_flush_followed_by_silence_emits_residual() {
+        let mut chunker = VadChunker::new_for_testing().unwrap();
+        let mut chunks: Vec<VadChunk> = Vec::new();
+
+        // Feed MAX_CHUNK_FRAMES + enough residual to exceed MIN_SPEECH_FRAMES so
+        // the residual segment is not discarded as a noise artefact.
+        let residual_frames = MIN_SPEECH_FRAMES as usize + 5;
+        let flush_frames = (MAX_CHUNK_FRAMES as usize) + residual_frames;
+        let speech: Vec<Vec<f32>> = (0..flush_frames).map(speech_frame).collect();
+        run_frames(&mut chunker, &speech, AudioSource::Microphone, &mut chunks);
+
+        let after_flush = chunks.len();
+        assert!(
+            after_flush >= 1,
+            "flush should have emitted at least one chunk"
+        );
+
+        // Now silence — should emit the residual speech that accumulated after
+        // the flush.
+        let silence: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS).map(|_| silence_frame()).collect();
+        run_frames(&mut chunker, &silence, AudioSource::Microphone, &mut chunks);
+
+        assert!(
+            chunks.len() > after_flush,
+            "silence after flush should emit a residual chunk"
+        );
+        for chunk in &chunks {
+            assert_eq!(chunk.source, AudioSource::Microphone);
+        }
     }
 }
