@@ -148,18 +148,20 @@ fn collect_thread_text<R: Runtime>(
     session_id: Uuid,
     thread: &str,
     app: &AppHandle<R>,
-) -> String {
+) -> (String, Option<String>) {
     match result {
-        Ok(Ok(text)) => text,
+        Ok(Ok(text)) => (text, None),
         Ok(Err(e)) => {
+            let detail = format!("{e:#}");
             log_thread_failed(session_id, thread, &e);
             emit_thread_error(app, thread);
-            String::new()
+            (String::new(), Some(detail))
         }
         Err(join_err) => {
+            let detail = format!("task panicked: {join_err}");
             log_thread_panicked(session_id, thread, &join_err);
             emit_thread_error(app, thread);
-            String::new()
+            (String::new(), Some(detail))
         }
     }
 }
@@ -298,6 +300,9 @@ pub async fn run_orchestrator<R: Runtime>(
         let turn_cancel = Arc::new(AtomicBool::new(false));
         {
             let mut slot = config.turn_cancel_slot.lock().await;
+            if let Some(prev) = slot.take() {
+                prev.store(true, Ordering::Release);
+            }
             *slot = Some(Arc::clone(&turn_cancel));
         }
 
@@ -400,7 +405,12 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
                 cost_estimate_usd: snap.usage.cost_estimate_usd,
             },
         );
-        return Ok(());
+        anyhow::bail!(
+            "Inference blocked — usage limit reached ({} tokens, ${:.4}). \
+             Open Settings → Usage limits → Reset counters or raise the cap.",
+            snap.usage.total_tokens,
+            snap.usage.cost_estimate_usd
+        );
     }
 
     let rag_start = std::time::Instant::now();
@@ -539,9 +549,21 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // Collect results — one thread failing never crashes the others.
     let (dir_result, dep_result, _cla_result) = tokio::join!(dir_task, dep_task, cla_task);
 
-    let directional_text = collect_thread_text(dir_result, cfg.session_id, "directional", &app);
-    let depth_text = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
+    let (directional_text, dir_err) =
+        collect_thread_text(dir_result, cfg.session_id, "directional", &app);
+    let (depth_text, dep_err) = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
     let clarifying_emitted = collect_clarifying(_cla_result, cfg.session_id);
+
+    if directional_text.trim().is_empty() {
+        let detail = dir_err
+            .or(dep_err)
+            .unwrap_or_else(|| "unknown inference failure".to_string());
+        anyhow::bail!(
+            "No directional answer was generated. Groq may be rate-limited (free tier: ~3 \
+             parallel calls per question). Add an OpenRouter key in Settings → API Keys for cloud \
+             fallback, or run `ollama serve` and `ollama pull llama3.1:8b`. Detail: {detail}"
+        );
+    }
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
     if clarifying_emitted {

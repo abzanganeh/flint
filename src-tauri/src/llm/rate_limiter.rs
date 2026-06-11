@@ -61,6 +61,10 @@ impl Bucket {
         if self.tokens >= amount {
             return 0.0;
         }
+        // Zero-capacity bucket (e.g. stub provider rpm=0) must not divide by zero.
+        if self.refill_rate <= f64::EPSILON {
+            return 0.0;
+        }
         (amount - self.tokens) / self.refill_rate
     }
 }
@@ -69,11 +73,16 @@ impl Bucket {
 // RateLimiter
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Groq free-tier Retry-After can exceed 10 minutes; never block a turn longer than this.
+pub const MAX_RETRY_AFTER_HONOR_SECS: u64 = 45;
+
 /// Per-provider rate limiter.
 ///
 /// Wrap in `Arc<RateLimiter>` and share across orchestrator threads.
 pub struct RateLimiter {
     provider_name: String,
+    /// When true, `acquire` is a no-op (stub provider with rpm/tpm = 0).
+    disabled: bool,
     request_bucket: Arc<Mutex<Bucket>>,
     token_bucket: Arc<Mutex<Bucket>>,
     /// Hard-stop override: when `Some(deadline)`, all calls sleep until
@@ -85,8 +94,9 @@ impl RateLimiter {
     pub fn new(provider_name: impl Into<String>, rpm: u32, tpm: u32) -> Self {
         Self {
             provider_name: provider_name.into(),
-            request_bucket: Arc::new(Mutex::new(Bucket::new(rpm))),
-            token_bucket: Arc::new(Mutex::new(Bucket::new(tpm))),
+            disabled: rpm == 0 && tpm == 0,
+            request_bucket: Arc::new(Mutex::new(Bucket::new(rpm.max(1)))),
+            token_bucket: Arc::new(Mutex::new(Bucket::new(tpm.max(1)))),
             retry_after: Arc::new(Mutex::new(None)),
         }
     }
@@ -97,6 +107,10 @@ impl RateLimiter {
     /// switch to a fallback provider — that decision belongs to the
     /// `FailoverManager`.
     pub async fn acquire(&self, estimated_tokens: u32) {
+        if self.disabled {
+            return;
+        }
+
         // 1. Honour any active Retry-After window first.
         let deadline_opt = *self.retry_after.lock().await;
         if let Some(deadline) = deadline_opt {
@@ -146,11 +160,13 @@ impl RateLimiter {
     ///
     /// All subsequent `acquire()` calls will sleep until the deadline.
     pub async fn set_retry_after(&self, secs: u64) {
-        let deadline = Instant::now() + Duration::from_secs(secs);
+        let capped = secs.min(MAX_RETRY_AFTER_HONOR_SECS);
+        let deadline = Instant::now() + Duration::from_secs(capped);
         *self.retry_after.lock().await = Some(deadline);
         warn!(
             provider = %self.provider_name,
             retry_after_secs = secs,
+            honored_secs = capped,
             "rate limit (429) — Retry-After set"
         );
     }
@@ -191,6 +207,17 @@ mod tests {
         let mut b = Bucket::new(10);
         assert!(b.try_consume(10.0));
         assert!(!b.try_consume(1.0));
+    }
+
+    #[tokio::test]
+    async fn acquire_noop_when_disabled() {
+        let limiter = RateLimiter::new("stub", 0, 0);
+        let start = Instant::now();
+        limiter.acquire(5000).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(50),
+            "disabled limiter should not block"
+        );
     }
 
     #[tokio::test]

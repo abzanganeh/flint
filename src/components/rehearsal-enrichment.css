@@ -516,6 +516,84 @@
   font-weight: 600;
 }
 
+/* ── StoryEditor (Rehearsal Stories tab) ──────────────────────────────── */
+.story-editor__hint {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.5;
+}
+.story-editor__label {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+.story-editor__input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 10px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #e5e7eb;
+  background: #1a1d26;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  font-family: inherit;
+}
+.story-editor__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 8px;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e5e7eb;
+  background: #1a1d26;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  font-family: inherit;
+  resize: vertical;
+}
+.story-editor__error {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #ef4444;
+}
+.story-editor__success {
+  margin: 0 0 8px;
+  font-size: 11px;
+  color: #22c55e;
+  font-weight: 600;
+}
+.story-editor__actions {
+  display: flex;
+  gap: 8px;
+}
+.story-editor__save-btn {
+  flex: 1;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #7c3aed;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.story-editor__save-btn--secondary {
+  color: #e5e7eb;
+  background: #1e2028;
+  border: 1px solid #374151;
+}
+.story-editor__save-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* ── UsageWidget (5.5.7) ───────────────────────────────────────────────── */
 .usage-widget {
   display: flex;

@@ -477,6 +477,12 @@ function App() {
       <Shell nav={nav}>
         <SessionList
           onBack={() => setScreen("session-design")}
+          activeSessionId={sessionId ?? undefined}
+          onResumeSession={(resumeId, resumeState) => {
+            if (resumeId === sessionId) {
+              setScreen(screenForDraftState(resumeState));
+            }
+          }}
           onStartSimilar={(preFill) => {
             setSessionPreFill(preFill);
             setScreen("session-design");
@@ -556,6 +562,7 @@ function App() {
           sessionId={sessionId}
           onComplete={() => setScreen("live")}
           onReturnToSetup={() => void handleReturnToSessionDesign()}
+          onOpenSettings={() => openSettings("rehearsal", "api-keys")}
         />
       </Shell>
     );

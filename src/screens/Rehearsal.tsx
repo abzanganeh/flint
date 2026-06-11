@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import FirstRunRehearsalModal, {
   isFirstRunModalDismissed,
 } from "../components/FirstRunRehearsalModal";
+import AddContextPanel from "../components/AddContextPanel";
+import StoryEditor from "../components/StoryEditor";
 import OverlayLayout from "../components/OverlayLayout";
 import PrepChecklist from "../components/PrepChecklist";
 import QuestionBank from "../components/QuestionBank";
@@ -11,13 +13,17 @@ import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import UsageWidget from "../components/UsageWidget";
 import {
   completeRehearsal,
+  getCostStatus,
   getSessionContextFields,
   runRehearsalTurn,
   type SessionContextFields,
 } from "../commands";
 import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
+import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
+import { useRagChunks } from "../hooks/useRagChunks";
 import { useTokenUsage } from "../hooks/useTokenUsage";
+import { needsUserContext } from "../lib/contextQuality";
 import DirectionalPanel from "../panels/DirectionalPanel";
 import DepthPanel from "../panels/DepthPanel";
 import ClarifyingPanel from "../panels/ClarifyingPanel";
@@ -29,9 +35,10 @@ export interface RehearsalProps {
   sessionId: string;
   onComplete: () => void;
   onReturnToSetup?: () => void;
+  onOpenSettings?: () => void;
 }
 
-type SideTab = "checklist" | "questions" | "research";
+type SideTab = "checklist" | "questions" | "research" | "stories";
 
 const emptyFields: SessionContextFields = {
   jobDescription: "",
@@ -43,7 +50,7 @@ const emptyFields: SessionContextFields = {
   strategyNotes: "",
 };
 
-const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) => {
+const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings }: RehearsalProps) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,11 +66,24 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
     clearStreamingBuffers,
     clearClarifyingQuestions,
     setLastManualQuestion,
+    setConfidenceLevel,
+    ragChunks,
+    confidenceLevel,
+    clarifyingQuestions,
+    lastManualQuestion,
   } = useUIStore();
+
+  const [lastAskedQuestion, setLastAskedQuestion] = useState("");
+  const [weakContext, setWeakContext] = useState(false);
+  const [costBlocked, setCostBlocked] = useState<string | null>(null);
+
+  const costCap = useUIStore((s) => s.costCap);
 
   useTokenUsage();
   useCostCap();
-  useHotkeys(sessionId, question, asking);
+  useHotkeys(sessionId, lastManualQuestion || question, asking);
+  useRagChunks(sessionId);
+  useOrchestratorStreams();
 
   const loadFields = useCallback(async () => {
     try {
@@ -78,38 +98,96 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
     void loadFields();
   }, [loadFields]);
 
+  useEffect(() => {
+    void getCostStatus()
+      .then((s) => {
+        if (s.suspended) {
+          setCostBlocked(
+            `Usage limit reached (${s.totalTokens.toLocaleString()} tokens). ` +
+              "Open Settings → Usage limits → Reset counters or raise the cap.",
+          );
+        } else {
+          setCostBlocked(null);
+        }
+      })
+      .catch(() => {
+        // Non-fatal — rehearsal still works without cap snapshot.
+      });
+  }, [costCap.suspended]);
+
+  // After a turn completes, use orchestrator confidence (not RAG score alone).
+  useEffect(() => {
+    if (asking) return;
+    setWeakContext(
+      needsUserContext(
+        confidenceLevel,
+        ragChunks,
+        streamingBuffers.directional,
+      ),
+    );
+  }, [
+    asking,
+    confidenceLevel,
+    ragChunks,
+    clarifyingQuestions.length,
+    streamingBuffers.directional,
+  ]);
+
+  const fireQuestion = useCallback(
+    async (q: string) => {
+      setError(null);
+      try {
+        const cap = await getCostStatus();
+        if (cap.suspended) {
+          setCostBlocked(
+            `Usage limit reached (${cap.totalTokens.toLocaleString()} tokens). ` +
+              "Open Settings → Usage limits → Reset counters or raise the cap.",
+          );
+          return;
+        }
+        setCostBlocked(null);
+      } catch {
+        // Proceed — backend will enforce the cap if needed.
+      }
+      clearStreamingBuffers();
+      clearClarifyingQuestions();
+      setConfidenceLevel(null);
+      setLastManualQuestion(q);
+      setLastAskedQuestion(q);
+      setWeakContext(false);
+      setAsking(true);
+      try {
+        await runRehearsalTurn(sessionId, q);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setAsking(false);
+      }
+    },
+    [
+      sessionId,
+      clearStreamingBuffers,
+      clearClarifyingQuestions,
+      setConfidenceLevel,
+      setLastManualQuestion,
+    ],
+  );
+
   const hasResponse =
     streamingBuffers.directional.length > 0 ||
     streamingBuffers.depth.length > 0;
 
   const handleSubmit = async () => {
     if (!question.trim() || asking) return;
-    setError(null);
-    clearStreamingBuffers();
-    clearClarifyingQuestions();
-    setLastManualQuestion(question.trim());
-    setAsking(true);
-
-    try {
-      await runRehearsalTurn(sessionId, question.trim());
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setAsking(false);
-    }
+    await fireQuestion(question.trim());
   };
 
   const handleBankAsk = useCallback(
     (q: string) => {
       setQuestion(q);
-      clearStreamingBuffers();
-      clearClarifyingQuestions();
-      setLastManualQuestion(q);
-      setAsking(true);
-
-      void runRehearsalTurn(sessionId, q).finally(() => setAsking(false));
+      void fireQuestion(q);
     },
-    [sessionId, clearStreamingBuffers, clearClarifyingQuestions, setLastManualQuestion],
+    [fireQuestion],
   );
 
   const handleComplete = async () => {
@@ -176,11 +254,38 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
 
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
             <UsageWidget />
+            {onOpenSettings && (
+              <button
+                type="button"
+                onClick={onOpenSettings}
+                title="Open API Keys settings"
+                style={{
+                  padding: "4px 10px",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  borderRadius: 4,
+                  border: "1px solid #374151",
+                  backgroundColor: "transparent",
+                  color: "#9ca3af",
+                  cursor: "pointer",
+                }}
+              >
+                API Keys
+              </button>
+            )}
             {onReturnToSetup && (
               <button
                 type="button"
                 data-testid="rehearsal-back-to-setup-button"
-                onClick={onReturnToSetup}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Return to Session Design?\n\nThis will pause your rehearsal and take you back to re-ingest context. Your question bank and pasted text will be preserved, but you will need to run Extract & Continue again before returning to Rehearsal.",
+                    )
+                  ) {
+                    onReturnToSetup();
+                  }
+                }}
                 style={{
                   padding: "4px 10px",
                   fontSize: "11px",
@@ -268,14 +373,48 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
           </div>
         )}
 
+        {costBlocked && !error && (
+          <div
+            style={{
+              padding: "8px 16px",
+              color: "#f59e0b",
+              fontSize: "12px",
+              borderBottom: "1px solid #1e2028",
+              flexShrink: 0,
+            }}
+          >
+            {costBlocked}
+          </div>
+        )}
+
+        {/* Weak-context warning — shown after a turn with no/weak RAG hits */}
+        {!asking && weakContext && hasResponse && lastAskedQuestion && (
+          <div style={{ padding: "8px 16px", flexShrink: 0 }}>
+            <AddContextPanel
+              sessionId={sessionId}
+              question={lastAskedQuestion}
+              onSaved={(chunksAdded, reask) => {
+                void loadFields();
+                if (reask && chunksAdded > 0) {
+                  void fireQuestion(lastAskedQuestion);
+                } else if (chunksAdded > 0) {
+                  setWeakContext(false);
+                }
+              }}
+            />
+          </div>
+        )}
+
         {/* Main content: panels + sidebar */}
         <div style={{ flex: 1, overflow: "hidden", minHeight: 0, display: "flex" }}>
           {/* Overlay panels */}
           <div style={{ flex: 1, overflow: "hidden" }}>
             <OverlayLayout
               transcript={<TranscriptPanel />}
-              directional={<DirectionalPanel sessionId={sessionId} />}
-              depth={<DepthPanel />}
+              directional={
+                <DirectionalPanel sessionId={sessionId} isGenerating={asking} />
+              }
+              depth={<DepthPanel isGenerating={asking} />}
               clarifying={<ClarifyingPanel />}
               context={<ContextPanel sessionId={sessionId} />}
             />
@@ -326,7 +465,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
                     flexShrink: 0,
                   }}
                 >
-                  {(["checklist", "questions", "research"] as SideTab[]).map((t) => (
+                  {(["checklist", "questions", "research", "stories"] as SideTab[]).map((t) => (
                     <button
                       key={t}
                       onClick={() => setSideTab(t)}
@@ -344,7 +483,13 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
                         letterSpacing: "0.04em",
                       }}
                     >
-                      {t === "checklist" ? "Prep" : t === "questions" ? "Qs" : "Chat"}
+                      {t === "checklist"
+                        ? "Prep"
+                        : t === "questions"
+                          ? "Qs"
+                          : t === "research"
+                            ? "Chat"
+                            : "Stories"}
                     </button>
                   ))}
                 </div>
@@ -363,6 +508,19 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup }: RehearsalProps) =
                   )}
                   {sideTab === "research" && (
                     <ResearchChat sessionId={sessionId} />
+                  )}
+                  {sideTab === "stories" && (
+                    <StoryEditor
+                      key={lastAskedQuestion}
+                      sessionId={sessionId}
+                      defaultQuestion={lastAskedQuestion || question}
+                      onSaved={(chunksAdded, reask) => {
+                        void loadFields();
+                        if (reask && chunksAdded > 0 && lastAskedQuestion) {
+                          void fireQuestion(lastAskedQuestion);
+                        }
+                      }}
+                    />
                   )}
                 </div>
               </>

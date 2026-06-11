@@ -21,6 +21,15 @@ const LLM_PROVIDERS: ProviderRow[] = [
     label: "Groq",
     placeholder: "gsk_…",
     helpUrl: "https://console.groq.com/keys",
+    description: "Primary LLM for rehearsal answers and digest extraction.",
+  },
+  {
+    provider: "openrouter",
+    label: "OpenRouter (fallback)",
+    placeholder: "sk-or-…",
+    helpUrl: "https://openrouter.ai/keys",
+    description:
+      "Used automatically when Groq is rate-limited or unavailable. Same Llama 3.3 70B model.",
   },
   {
     provider: "openai",
@@ -202,7 +211,8 @@ export default function ProviderSettings({ onBack }: ProviderSettingsProps) {
         <h2 className="provider-settings__title">API Keys</h2>
         <p className="provider-settings__subtitle">
           Keys are stored in your OS keychain — never in plain text or uploaded anywhere.
-          Groq is required for digest extraction. Tavily enables web research during rehearsal prep.
+          Groq is required for digest extraction. OpenRouter is used as fallback when Groq
+          is rate-limited. Tavily enables web research during rehearsal prep.
         </p>
       </div>
 

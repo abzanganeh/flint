@@ -21,7 +21,7 @@ const REHEARSAL_COMPLETED_ENTRY: &str = "rehearsal_completed";
 /// Every LLM provider that may have an API key stored under
 /// `api_key_{provider}`. Kept in sync with the providers Flint can connect
 /// to so [`clear_all_user_secrets`] never leaves orphan entries behind.
-pub const KNOWN_API_PROVIDERS: &[&str] = &["groq", "openai", "anthropic", "tavily"];
+pub const KNOWN_API_PROVIDERS: &[&str] = &["groq", "openrouter", "openai", "anthropic", "tavily"];
 
 const READ_CREDENTIALS_MSG: &str = "Could not read credentials. Please log in again.";
 const SAVE_CREDENTIALS_MSG: &str = "Could not save credentials. Please try again.";

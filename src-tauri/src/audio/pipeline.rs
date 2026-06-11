@@ -30,8 +30,8 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::AppHandle;
@@ -61,20 +61,119 @@ pub struct DetectedQuestion {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Cross-channel echo suppression
+// ────────────────────────────────────────────────────────────────────────────
+//
+// The dual-channel architecture assumes headphones. When the user has speakers
+// on, the microphone re-captures system audio (YouTube, the interviewer's
+// voice, etc.) and both channels transcribe the same content with slight
+// per-pass variation. We compare normalised word sets via Jaccard overlap
+// and, when the same content is detected on both channels within a sliding
+// window, always drop the MIC copy in favour of SYSTEM (cleaner signal).
+//
+// The window is wider than fix 1's old 4 s because Whisper inference on a
+// large chunk can lag the original audio by several seconds.
+
+const ECHO_WINDOW: Duration = Duration::from_secs(10);
+const ECHO_MIN_WORDS: usize = 3;
+const ECHO_JACCARD_THRESHOLD: f32 = 0.6;
+
+#[derive(Clone)]
+struct DedupEntry {
+    tokens: Vec<String>,
+    at: Instant,
+}
+
+#[derive(Default)]
+struct CrossChannelDedup {
+    // Only SYSTEM entries are stored — MIC is always the suppressed side.
+    recent_system: Vec<DedupEntry>,
+}
+
+impl CrossChannelDedup {
+    /// Returns true iff `source` is MIC and its text overlaps a recent SYSTEM entry.
+    fn should_suppress(&mut self, source: AudioSource, text: &str, now: Instant) -> bool {
+        // Only MIC is ever suppressed — SYSTEM is the authoritative channel.
+        if source != AudioSource::Microphone {
+            return false;
+        }
+        let tokens = tokenize_for_echo(text);
+        if tokens.len() < ECHO_MIN_WORDS {
+            return false;
+        }
+        self.prune(now);
+        self.recent_system
+            .iter()
+            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
+    }
+
+    /// Record a SYSTEM transcript so future MIC transcripts can be checked against it.
+    fn record_system(&mut self, text: &str, now: Instant) {
+        let tokens = tokenize_for_echo(text);
+        if tokens.len() < ECHO_MIN_WORDS {
+            return;
+        }
+        self.recent_system.push(DedupEntry { tokens, at: now });
+        self.prune(now);
+    }
+
+    fn prune(&mut self, now: Instant) {
+        if let Some(cutoff) = now.checked_sub(ECHO_WINDOW) {
+            self.recent_system.retain(|e| e.at >= cutoff);
+        }
+    }
+}
+
+fn tokenize_for_echo(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn jaccard(a: &[String], b: &[String]) -> f32 {
+    use std::collections::HashSet;
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let set_a: HashSet<&String> = a.iter().collect();
+    let set_b: HashSet<&String> = b.iter().collect();
+    let intersection = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Per-channel processing state
 // ────────────────────────────────────────────────────────────────────────────
 
 /// All stateful processors that run sequentially on one audio channel.
+///
+/// `rnnoise` is `None` for the SYSTEM channel — the digital loopback signal
+/// should not be run through the speech-trained denoiser.
 struct ChannelProcessor {
-    rnnoise: RNNoiseProcessor,
+    rnnoise: Option<RNNoiseProcessor>,
     downsampler: Downsampler,
     vad: VadChunker,
 }
 
 impl ChannelProcessor {
-    fn new() -> Result<Self> {
+    fn new_mic() -> Result<Self> {
         Ok(Self {
-            rnnoise: RNNoiseProcessor::new()?,
+            rnnoise: Some(RNNoiseProcessor::new()?),
+            downsampler: Downsampler::new()?,
+            vad: VadChunker::new()?,
+        })
+    }
+
+    fn new_system() -> Result<Self> {
+        Ok(Self {
+            rnnoise: None,
             downsampler: Downsampler::new()?,
             vad: VadChunker::new()?,
         })
@@ -107,12 +206,14 @@ pub async fn run_audio_pipeline(
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
 ) -> Result<()> {
-    let mut sys_proc = ChannelProcessor::new()?;
-    let mut mic_proc = ChannelProcessor::new()?;
+    let mut sys_proc = ChannelProcessor::new_system()?;
+    let mut mic_proc = ChannelProcessor::new_mic()?;
+    let dedup = Mutex::new(CrossChannelDedup::default());
 
     loop {
+        // No `biased` — fair scheduling prevents MIC starvation under heavy
+        // SYSTEM load (e.g. continuous YouTube audio).
         let frame = tokio::select! {
-            biased;
             f = system_rx.recv() => match f {
                 Some(frame) => frame,
                 None => break,
@@ -137,6 +238,7 @@ pub async fn run_audio_pipeline(
             &detector,
             &question_tx,
             &persistence,
+            &dedup,
         )
         .await
         {
@@ -162,11 +264,19 @@ async fn process_frame(
     detector: &Arc<QuestionDetector>,
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
+    dedup: &Mutex<CrossChannelDedup>,
 ) -> Result<()> {
     let source = frame.source;
 
     // ── Step 1: RNNoise ───────────────────────────────────────────────────
-    proc.rnnoise.process_frame(&mut frame.samples)?;
+    //
+    // Only the MIC channel has RNNoise allocated (ChannelProcessor::new_mic).
+    // SYSTEM is a clean digital loopback — running it through the speech-
+    // trained denoiser damages non-speech spectra (music, multi-speaker
+    // dialogue) and degrades Whisper accuracy on that channel.
+    if let Some(rnn) = &mut proc.rnnoise {
+        rnn.process_frame(&mut frame.samples)?;
+    }
 
     // ── Step 2: Downsample 48kHz → 16kHz ─────────────────────────────────
     let downsampled = proc.downsampler.process(&frame.samples)?;
@@ -185,6 +295,22 @@ async fn process_frame(
     let Some(result) = transcription else {
         return Ok(()); // silence or hallucination — discarded by engine
     };
+
+    let now = Instant::now();
+    {
+        let mut guard = match dedup.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if guard.should_suppress(source, &result.text, now) {
+            tracing::debug!(text = %result.text, "suppressed mic echo of system audio");
+            return Ok(());
+        }
+        // Record SYSTEM transcripts so subsequent MIC chunks can be compared.
+        if source == AudioSource::System {
+            guard.record_system(&result.text, now);
+        }
+    }
 
     // ── Step 4b: emit + persist transcript chunk ──────────────────────────
     let speaker = match source {
@@ -286,13 +412,13 @@ mod tests {
 
     #[test]
     fn channel_processor_initialises() {
-        // Verify all three processors can be constructed on the test host.
-        let proc = ChannelProcessor::new();
-        assert!(
-            proc.is_ok(),
-            "ChannelProcessor failed to initialise: {:?}",
-            proc.err()
-        );
+        let mic = ChannelProcessor::new_mic();
+        assert!(mic.is_ok(), "mic ChannelProcessor failed: {:?}", mic.err());
+        assert!(mic.unwrap().rnnoise.is_some());
+
+        let sys = ChannelProcessor::new_system();
+        assert!(sys.is_ok(), "system ChannelProcessor failed: {:?}", sys.err());
+        assert!(sys.unwrap().rnnoise.is_none());
     }
 
     #[test]
@@ -303,6 +429,48 @@ mod tests {
             detected_at: Instant::now(),
         };
         assert!(!q.text.is_empty());
+    }
+
+    #[test]
+    fn jaccard_word_overlap_matches_near_duplicate_transcripts() {
+        let a = tokenize_for_echo("Why do you like to work with Fisher Investors?");
+        let b = tokenize_for_echo("Why do you like work with Fisher Investors");
+        assert!(jaccard(&a, &b) >= ECHO_JACCARD_THRESHOLD);
+
+        let c = tokenize_for_echo("Tell me about a time you led a team");
+        assert!(jaccard(&a, &c) < ECHO_JACCARD_THRESHOLD);
+    }
+
+    #[test]
+    fn dedup_suppresses_only_mic_when_echoing_system() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record_system("Why do you like to work with Fisher Investors?", now);
+
+        assert!(dedup.should_suppress(
+            AudioSource::Microphone,
+            "Why do you like work with Fisher Investors",
+            now + Duration::from_millis(500),
+        ));
+
+        assert!(!dedup.should_suppress(
+            AudioSource::System,
+            "Why do you like work with Fisher Investors",
+            now + Duration::from_millis(500),
+        ));
+    }
+
+    #[test]
+    fn dedup_drops_entries_outside_the_window() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record_system("alpha bravo charlie delta", now);
+        let later = now + ECHO_WINDOW + Duration::from_secs(1);
+        assert!(!dedup.should_suppress(
+            AudioSource::Microphone,
+            "alpha bravo charlie delta",
+            later,
+        ));
     }
 
     #[test]

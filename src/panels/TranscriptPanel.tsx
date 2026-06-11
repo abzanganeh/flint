@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { onTranscriptionChunk } from "../events";
+import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
 import type { Speaker } from "../types";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -49,30 +49,16 @@ const TranscriptPanel = (_props: TranscriptPanelProps) => {
   const lineIdRef = useRef(0);
   const nextId = () => ++lineIdRef.current;
 
-  // Subscribe to Tauri transcription_chunk events.
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | null = null;
+  const onChunk = useCallback(
+    (line: { text: string; speaker: Speaker; timestamp: number }) => {
+      setLines((prev) =>
+        appendLine(prev, line.text, line.speaker, line.timestamp, nextId),
+      );
+    },
+    [],
+  );
 
-    const setup = async () => {
-      const fn = await onTranscriptionChunk(({ text, speaker, timestamp }) => {
-        setLines((prev) => appendLine(prev, text, speaker, timestamp, nextId));
-      });
-      if (cancelled) {
-        // Component unmounted while the listener was being registered.
-        fn();
-      } else {
-        unlisten = fn;
-      }
-    };
-
-    void setup();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useTranscriptionStream(onChunk);
 
   // Snap to bottom on every update. Using "instant" instead of "smooth"
   // because live transcripts receive bursts of chunks — smooth animations

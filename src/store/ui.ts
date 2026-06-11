@@ -25,7 +25,7 @@ interface UIStore extends UIState {
   setDepthPrePrepared: (depthPrePrepared: boolean) => void;
   setDigestSummary: (digestSummary: string | null) => void;
   setLastManualQuestion: (question: string) => void;
-  addClarifyingQuestion: (q: ClarifyingQuestion) => void;
+  addClarifyingQuestion: (q: Omit<ClarifyingQuestion, "id">) => void;
   clearClarifyingQuestions: () => void;
   setRagChunks: (chunks: RagChunk[]) => void;
   setTokenUsage: (usage: TokenUsage) => void;
@@ -200,11 +200,25 @@ export const useUIStore = create<UIStore>((set) => ({
   setLastManualQuestion: (lastManualQuestion) => set({ lastManualQuestion }),
 
   addClarifyingQuestion: (q) =>
-    set((s) => ({
-      clarifyingQuestions: [...s.clarifyingQuestions, q].sort(
-        (a, b) => a.rank - b.rank,
-      ),
-    })),
+    set((s) => {
+      const norm = q.question.trim().toLowerCase();
+      if (
+        s.clarifyingQuestions.some(
+          (existing) => existing.question.trim().toLowerCase() === norm,
+        )
+      ) {
+        return s;
+      }
+      const id =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random()}`;
+      return {
+        clarifyingQuestions: [...s.clarifyingQuestions, { ...q, id }].sort(
+          (a, b) => a.rank - b.rank,
+        ),
+      };
+    }),
 
   clearClarifyingQuestions: () => set({ clarifyingQuestions: [] }),
 

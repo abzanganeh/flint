@@ -45,6 +45,7 @@ export interface Notification {
 }
 
 export interface ClarifyingQuestion {
+  id: string;
   question: string;
   rank: number;
 }

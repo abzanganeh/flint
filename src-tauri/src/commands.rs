@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +26,7 @@ use crate::keychain;
 use crate::llm::failover::FailoverManager;
 use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
+use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
@@ -716,6 +718,35 @@ pub async fn get_session_context(
         .map_err(|e| e.to_string())
 }
 
+/// Load the session digest from memory, falling back to SQLite after restart.
+async fn resolve_session_digest(
+    state: &AppState,
+    sid: Uuid,
+) -> Result<crate::digest::Digest, String> {
+    {
+        let guard = state.session_digest.read().await;
+        if let Some(digest) = guard.as_ref() {
+            return Ok(digest.clone());
+        }
+    }
+
+    match state.persistence.load_session_digest(sid) {
+        Ok(Some(digest)) => {
+            *state.session_digest.write().await = Some(digest.clone());
+            Ok(digest)
+        }
+        Ok(None) => Err(
+            "No session digest — complete digest review before rehearsal.".to_string(),
+        ),
+        Err(e) => {
+            warn!(error = %e, "resolve_session_digest: SQLite fallback failed");
+            Err(
+                "No session digest — complete digest review before rehearsal.".to_string(),
+            )
+        }
+    }
+}
+
 /// Return the current digest for the active session.
 ///
 /// Valid after INGESTING completes (i.e. from DIGEST_REVIEW onward).
@@ -728,27 +759,8 @@ pub async fn get_digest(
 
     let sid = Uuid::parse_str(&session_id).map_err(|_| "Invalid session_id format".to_string())?;
 
-    // Fast path: digest is still warm in memory.
-    {
-        let guard = state.session_digest.read().await;
-        if let Some(digest) = guard.as_ref() {
-            return Ok(DigestDto::from(digest.clone()));
-        }
-    }
-
-    // Cold path: app restarted since digest was generated — load from SQLite
-    // and repopulate the in-memory cache so subsequent calls are free.
-    match state.persistence.load_session_digest(sid) {
-        Ok(Some(digest)) => {
-            *state.session_digest.write().await = Some(digest.clone());
-            Ok(DigestDto::from(digest))
-        }
-        Ok(None) => Err("Digest not yet available. Complete context ingestion first.".to_string()),
-        Err(e) => {
-            tracing::warn!(error = %e, "get_digest: SQLite fallback failed");
-            Err("Digest not yet available. Complete context ingestion first.".to_string())
-        }
-    }
+    let digest = resolve_session_digest(state.inner(), sid).await?;
+    Ok(DigestDto::from(digest))
 }
 
 /// Re-run digest extraction for the current session without re-embedding.
@@ -921,36 +933,113 @@ fn prompts_base_dir() -> PathBuf {
 
 /// Resolve the ggml model path for the given hardware profile.
 ///
+/// Resolution order:
+///   1. `FLINT_WHISPER_MODEL` — either an absolute path to a ggml file, or
+///      a Whisper model name (`tiny.en`, `base.en`, `small.en`, `medium.en`).
+///   2. The hardware-recommended model from the profile.
+///   3. If the recommended file does not exist, fall back to the largest
+///      installed model in `~/.cache/whisper/` so a missing download cannot
+///      block the session.
+///
 /// Whisper model files are expected at `~/.cache/whisper/ggml-<name>.bin`
-/// (standard whisper.cpp convention). The health check (`checks.rs`) verifies
-/// the file exists before `start_session` is ever called.
+/// (standard whisper.cpp convention).
 fn whisper_model_path(profile: &hardware::HardwareProfile) -> String {
+    if let Ok(raw) = std::env::var("FLINT_WHISPER_MODEL") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            let as_path = PathBuf::from(trimmed);
+            if as_path.is_absolute() && as_path.exists() {
+                info!(path = %as_path.display(), "FLINT_WHISPER_MODEL: using explicit path");
+                return as_path.to_string_lossy().into_owned();
+            }
+            if let Some(model) = hardware::WhisperModel::from_name(trimmed) {
+                let path = whisper_cache_path(model.as_str());
+                if PathBuf::from(&path).exists() {
+                    info!(model = %model, "FLINT_WHISPER_MODEL: using named model");
+                    return path;
+                }
+                warn!(
+                    requested = %trimmed,
+                    "FLINT_WHISPER_MODEL points to a missing file; falling back"
+                );
+            } else {
+                warn!(
+                    value = %trimmed,
+                    "FLINT_WHISPER_MODEL is not a known model name or existing path; ignoring"
+                );
+            }
+        }
+    }
+
+    let recommended = profile.recommended_whisper_model.as_str();
+    let recommended_path = whisper_cache_path(recommended);
+    if PathBuf::from(&recommended_path).exists() {
+        return recommended_path;
+    }
+
+    if let Some(fallback) = best_installed_whisper_model() {
+        warn!(
+            recommended = %recommended,
+            fallback = %fallback,
+            "recommended Whisper model not installed; falling back to best installed model"
+        );
+        return whisper_cache_path(&fallback);
+    }
+
+    recommended_path
+}
+
+fn whisper_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let filename = format!("ggml-{}.bin", profile.recommended_whisper_model);
-    PathBuf::from(home)
-        .join(".cache")
-        .join("whisper")
-        .join(filename)
+    PathBuf::from(home).join(".cache").join("whisper")
+}
+
+fn whisper_cache_path(model_name: &str) -> String {
+    whisper_cache_dir()
+        .join(format!("ggml-{model_name}.bin"))
         .to_string_lossy()
         .into_owned()
 }
 
-/// Abort all live tasks and signal the capture thread to stop.
-///
-/// Called on `start_session` failure after tasks have been spawned, to prevent
-/// a hidden audio pipeline from running while the state machine is not LIVE.
-async fn abort_live_tasks(state: &AppState) {
-    if let Some(handles) = state.live_tasks.lock().await.take() {
-        let _ = handles.stop_tx.send(());
-        handles.pipeline.abort();
-        handles.orchestrator.abort();
+/// Return the name of the largest installed Whisper model, if any.
+fn best_installed_whisper_model() -> Option<String> {
+    use hardware::WhisperModel::{BaseEn, MediumEn, SmallEn, TinyEn};
+    let cache = whisper_cache_dir();
+    for model in [MediumEn, SmallEn, BaseEn, TinyEn] {
+        let path = cache.join(format!("ggml-{}.bin", model.as_str()));
+        if path.exists() {
+            return Some(model.as_str().to_string());
+        }
     }
+    None
+}
+
+/// Log the failing `start_session` step at ERROR and return a UI-facing message.
+///
+/// `start_session` runs many short-lived fallible steps before the session
+/// reaches LIVE. When any of them returns `Err`, the Tauri command path
+/// propagates the error to the React toast but nothing reaches `tracing`,
+/// which makes silent startup failures (missing API key, model load, etc.)
+/// invisible from the terminal. Routing every `map_err` through this helper
+/// guarantees the failing step is named in the logs.
+fn start_session_step_err(step: &'static str, err: impl std::fmt::Display) -> String {
+    let msg = err.to_string();
+    error!(step = %step, error = %msg, "start_session step failed");
+    format!("{step}: {msg}")
+}
+
+/// Stop a capture thread and abort pipeline/orchestrator tasks.
+async fn abort_local_live_handles(handles: LiveTaskHandles) {
+    let _ = handles.stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
+    handles.pipeline.abort();
+    handles.orchestrator.abort();
 }
 
 /// Build the failover manager and local LLM provider used by live and rehearsal paths.
 async fn build_failover_stack(
     app: &AppHandle,
-    state: &AppState,
+    _state: &AppState,
 ) -> Result<(Arc<FailoverManager>, Arc<dyn LLMProvider>, usize), String> {
     let (primary_provider, context_window) = match keychain::get_api_key("groq") {
         Ok(api_key) => match GroqProvider::new(api_key) {
@@ -959,17 +1048,18 @@ async fn build_failover_stack(
                 (Arc::new(p) as Arc<dyn LLMProvider>, cw)
             }
             Err(e) => {
-                warn!(error = %e, "Failed to build Groq provider — using stub");
-                let stub = Arc::clone(&state.llm);
-                let cw = stub.context_window();
-                (stub, cw)
+                return Err(format!(
+                    "Groq API key is stored but the provider failed to initialize: {e}. \
+                     Re-enter your key in Settings → API Keys."
+                ));
             }
         },
         Err(_) => {
-            warn!("No Groq API key in keychain — using stub LLM provider");
-            let stub = Arc::clone(&state.llm);
-            let cw = stub.context_window();
-            (stub, cw)
+            return Err(
+                "No Groq API key found. Add your key in Settings → API Keys (Groq) \
+                 before running rehearsal turns."
+                    .to_string(),
+            );
         }
     };
 
@@ -981,8 +1071,20 @@ async fn build_failover_stack(
         primary_provider.rate_limit().requests_per_minute,
         primary_provider.rate_limit().tokens_per_minute,
     ));
-    let mut failover =
-        FailoverManager::new(primary_provider, Arc::clone(&local_provider), rate_limiter);
+    let cloud_fallback = openrouter::resolve_openrouter();
+    if cloud_fallback.is_some() {
+        info!("failover stack: OpenRouter cloud fallback configured");
+    } else {
+        info!(
+            "failover stack: no OpenRouter key in Settings — Groq 429 will use Ollama only"
+        );
+    }
+    let mut failover = FailoverManager::new(
+        primary_provider,
+        cloud_fallback,
+        Arc::clone(&local_provider),
+        rate_limiter,
+    );
     failover.start_ping_loop(app.clone());
     Ok((Arc::new(failover), local_provider, context_window))
 }
@@ -1022,9 +1124,7 @@ pub async fn run_rehearsal_turn(
         }
     }
 
-    let digest = state.session_digest.read().await.clone().ok_or_else(|| {
-        "No session digest — complete digest review before rehearsal.".to_string()
-    })?;
+    let digest = resolve_session_digest(state.inner(), sid).await?;
 
     let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
 
@@ -1051,29 +1151,54 @@ pub async fn run_rehearsal_turn(
     };
 
     let turn_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let mut slot = state.rehearsal_turn_cancel.lock().await;
+        if let Some(prev) = slot.take() {
+            prev.store(true, std::sync::atomic::Ordering::Release);
+        }
+        *slot = Some(Arc::clone(&turn_cancel));
+    }
 
-    dispatch_turn(
-        sid,
-        question_text,
-        turn_number,
-        Arc::new(digest),
-        prompts_base_dir(),
-        failover,
-        state.require_embedder()?,
-        Arc::clone(&state.vector_store),
-        Arc::clone(&state.prewarm_cache),
-        memory,
-        load_compression_prompt(),
-        turn_cancel,
-        local_provider,
-        Arc::clone(&state.persistence),
-        Arc::clone(&state.cost_tracker),
-        app,
+    const REHEARSAL_TURN_TIMEOUT: Duration = Duration::from_secs(120);
+    let cancel_on_timeout = Arc::clone(&turn_cancel);
+    let turn_result = tokio::time::timeout(
+        REHEARSAL_TURN_TIMEOUT,
+        dispatch_turn(
+            sid,
+            question_text,
+            turn_number,
+            Arc::new(digest),
+            prompts_base_dir(),
+            failover,
+            state
+                .wait_for_embedder(Duration::from_secs(45))
+                .await?,
+            Arc::clone(&state.vector_store),
+            Arc::clone(&state.prewarm_cache),
+            memory,
+            load_compression_prompt(),
+            Arc::clone(&turn_cancel),
+            local_provider,
+            Arc::clone(&state.persistence),
+            Arc::clone(&state.cost_tracker),
+            app,
+        ),
     )
-    .await
-    .map_err(|e| format!("Rehearsal turn failed: {e}"))?;
+    .await;
 
-    Ok(())
+    match turn_result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("Rehearsal turn failed: {e}")),
+        Err(_) => {
+            cancel_on_timeout.store(true, Ordering::Release);
+            Err(
+                "Rehearsal turn timed out after 120 seconds. Common causes: Groq free-tier \
+                 rate limit (429 — wait ~10 minutes and retry), a missing Groq API key in \
+                 Settings → API Keys, or Ollama fallback running without a pulled model."
+                    .to_string(),
+            )
+        }
+    }
 }
 
 /// Complete mandatory rehearsal and transition to READY.
@@ -1087,11 +1212,18 @@ pub async fn complete_rehearsal(
 
     {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Rehearsing {
-            return Err(format!(
-                "complete_rehearsal is only valid from REHEARSING (current: {})",
-                machine.current()
-            ));
+        match *machine.current() {
+            SessionState::Ready => {
+                // Idempotent: rehearsal was already completed (e.g. start_session failed
+                // after REHEARSING → READY but before LIVE).
+                return Ok(());
+            }
+            SessionState::Rehearsing => {}
+            other => {
+                return Err(format!(
+                    "complete_rehearsal is only valid from REHEARSING (current: {other})"
+                ));
+            }
         }
     }
 
@@ -1367,10 +1499,10 @@ pub async fn run_research_chat(
         .await
         .map_err(|e| format!("RAG retrieval failed: {e}"))?;
 
-    let llm = llm_for_digest(&state);
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
     let web = tavily::resolve_tavily();
 
-    let outcome = research::run_prep_research_turn(&message, chunks, llm, web)
+    let outcome = research::run_prep_research_turn(&message, chunks, failover, web, app.clone())
         .await
         .map_err(|e| format!("Research turn failed: {e}"))?;
 
@@ -1525,17 +1657,20 @@ pub async fn start_session(
 
     checks::run_stealth_self_test()?;
 
-    {
+    // StrictMode double-mount can fire two concurrent starts; serialize them.
+    let _live_start_guard = state.live_start_lock.lock().await;
+
+    let current = {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Ready {
-            return Err(format!(
-                "start_session requires READY (current: {})",
-                machine.current()
-            ));
-        }
+        *machine.current()
+    };
+    if current == SessionState::Live && state.live_tasks.lock().await.is_some() {
+        return Ok(());
+    }
+    if current != SessionState::Ready {
+        return Err(format!("start_session requires READY (current: {current})"));
     }
 
-    // Refuse to start if a live session is already running.
     if state.live_tasks.lock().await.is_some() {
         return Err("A live session is already running.".to_string());
     }
@@ -1544,10 +1679,12 @@ pub async fn start_session(
     let profile = hardware::assess_hardware();
     let model_path = whisper_model_path(&profile);
 
-    let whisper = Arc::new(
-        WhisperEngine::new(&model_path, profile.tier)
-            .map_err(|e| format!("Failed to load Whisper model ({model_path}): {e}"))?,
-    );
+    let whisper = Arc::new(WhisperEngine::new(&model_path, profile.tier).map_err(|e| {
+        start_session_step_err(
+            "whisper init",
+            format!("model={model_path} tier={} error={e}", profile.tier),
+        )
+    })?);
 
     // ── 2. Question detector ──────────────────────────────────────────────
     let detector = Arc::new(
@@ -1556,12 +1693,17 @@ pub async fn start_session(
             Some(Arc::clone(&state.llm)),
             &prompts_base_dir(),
         )
-        .map_err(|e| format!("Failed to init question detector: {e}"))?,
+        .map_err(|e| start_session_step_err("question detector init", e))?,
     );
 
     // ── 3. Audio channels ─────────────────────────────────────────────────
-    let (system_tx, system_rx) = tokio::sync::mpsc::channel(256);
-    let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(256);
+    //
+    // Capacity sized for ~1 s of audio frames per channel: 480-sample frames
+    // at 48 kHz = 100 frames/s. 1024 absorbs startup transients (capture
+    // emits frames before the pipeline task has been polled) without
+    // dropping. At 4 bytes/sample × 480 × 1024 ≈ 1.9 MB per channel — cheap.
+    let (system_tx, system_rx) = tokio::sync::mpsc::channel(1024);
+    let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(1024);
     let (question_tx, question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let (zeroed_tx, zeroed_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1595,13 +1737,15 @@ pub async fn start_session(
     // Wait up to 5 seconds for the capture thread to confirm startup.
     tokio::time::timeout(Duration::from_secs(5), ready_rx)
         .await
-        .map_err(|_| "Audio capture startup timed out.".to_string())?
-        .map_err(|_| "Audio capture thread exited unexpectedly.".to_string())?
-        .map_err(|e| format!("Failed to start audio capture: {e}"))?;
+        .map_err(|_| start_session_step_err("audio capture", "startup timed out after 5s"))?
+        .map_err(|_| start_session_step_err("audio capture", "capture thread exited before sending ready signal"))?
+        .map_err(|e| start_session_step_err("audio capture", e))?;
 
     // ── 5. Build failover manager and conversation memory ─────────────────
 
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state)
+        .await
+        .map_err(|e| start_session_step_err("failover stack", e))?;
 
     let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
         context_window,
@@ -1615,16 +1759,18 @@ pub async fn start_session(
 
     // ── 6. Spawn background tasks ─────────────────────────────────────────
 
-    let digest = state.session_digest.read().await.clone().ok_or_else(|| {
-        "No session digest — run ingest_context before starting a live session.".to_string()
-    })?;
+    let digest = resolve_session_digest(state.inner(), sid)
+        .await
+        .map_err(|e| start_session_step_err("digest resolve", e))?;
 
     let orch_config = OrchestratorConfig {
         session_id: sid,
         digest: Arc::new(digest),
         prompts_dir: prompts_base_dir(),
         failover: Arc::clone(&failover),
-        embedder: state.require_embedder()?,
+        embedder: state
+            .require_embedder()
+            .map_err(|e| start_session_step_err("embedder ready", e))?,
         vector_store: Arc::clone(&state.vector_store),
         prewarm_cache: Arc::clone(&state.prewarm_cache),
         memory,
@@ -1651,25 +1797,40 @@ pub async fn start_session(
         Arc::clone(&state.persistence),
     ));
 
-    *state.live_tasks.lock().await = Some(LiveTaskHandles {
+    let handles = LiveTaskHandles {
         stop_tx,
         zeroed_rx,
         pipeline,
         orchestrator,
         question_tx,
         turn_cancel: turn_cancel_slot,
-    });
+    };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
+    //
+    // Install `live_tasks` only after a successful transition so a concurrent
+    // duplicate `start_session` cannot overwrite the winner's handles. If
+    // another caller already reached LIVE, drop our duplicate tasks quietly.
 
     {
         let mut machine = state.state_machine.lock().await;
-        if let Err(e) = machine.transition(SessionState::Live) {
+        if *machine.current() == SessionState::Live {
             drop(machine);
-            abort_live_tasks(&state).await;
+            abort_local_live_handles(handles).await;
+            return Ok(());
+        }
+        if let Err(e) = machine.transition(SessionState::Live) {
+            let err_msg = e.to_string();
+            drop(machine);
+            abort_local_live_handles(handles).await;
+            if err_msg.contains("LIVE → LIVE") {
+                return Ok(());
+            }
             return Err(session_error(e));
         }
     }
+
+    *state.live_tasks.lock().await = Some(handles);
     emit_state(&app, SessionState::Live);
 
     info!(
@@ -2164,6 +2325,16 @@ pub async fn set_cost_cap(
     max_total_tokens: Option<u64>,
     max_cost_estimate_usd: Option<f64>,
 ) -> Result<CostStatusDto, String> {
+    const MIN_TOKEN_CAP: u64 = 500;
+    if let Some(t) = max_total_tokens {
+        if t > 0 && t < MIN_TOKEN_CAP {
+            return Err(format!(
+                "Token limit must be at least {MIN_TOKEN_CAP} — each question uses \
+                 ~300+ estimated tokens (3 LLM calls). This is a ceiling, not a target."
+            ));
+        }
+    }
+
     let cap = crate::cost::CostCap {
         max_total_tokens,
         max_cost_estimate_usd,
@@ -2304,6 +2475,18 @@ pub async fn delete_account(
 pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, String> {
     let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
+}
+
+/// Copy text to the OS clipboard (native path — reliable in the Tauri WebView).
+#[tauri::command]
+pub fn copy_text_to_clipboard(text: String) -> Result<(), String> {
+    if text.is_empty() {
+        return Err("Nothing to copy".to_string());
+    }
+    arboard::Clipboard::new()
+        .map_err(|e| format!("Clipboard unavailable: {e}"))?
+        .set_text(text)
+        .map_err(|e| format!("Failed to copy: {e}"))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

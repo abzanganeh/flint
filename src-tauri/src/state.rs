@@ -96,11 +96,16 @@ pub struct AppState {
     /// Audio capture thread stop signal + background task handles. `Some`
     /// only while the session is LIVE. Cleared on `stop_session`.
     pub live_tasks: Mutex<Option<LiveTaskHandles>>,
+    /// Serializes `start_session` — React StrictMode can invoke it twice in dev.
+    pub live_start_lock: Mutex<()>,
     /// Shared orchestrator conversation memory. Same `Arc` as passed to
     /// `OrchestratorConfig` — not a duplicate instance.
     pub session_memory: Arc<Mutex<Option<Arc<Mutex<ConversationMemory>>>>>,
     /// Turn counter for rehearsal-mode orchestrator dispatches.
     pub rehearsal_turn: Mutex<usize>,
+    /// Active rehearsal turn cancellation flag. Replaced on each
+    /// `run_rehearsal_turn`; the previous flag is set before replacement.
+    pub rehearsal_turn_cancel: Mutex<Option<TurnCancelFlag>>,
 
     /// Phase 7.4 — process-wide cumulative token / cost accounting. Read by
     /// the orchestrator pre-dispatch to enforce the configured cap; mutated
@@ -184,8 +189,10 @@ impl AppState {
             vector_store,
             llm: Arc::new(StubLLMProvider),
             live_tasks: Mutex::new(None),
+            live_start_lock: Mutex::new(()),
             session_memory: Arc::new(Mutex::new(None)),
             rehearsal_turn: Mutex::new(0),
+            rehearsal_turn_cancel: Mutex::new(None),
             cost_tracker: Arc::new(CostTracker::new()),
             feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
             embedder_cache_dir,

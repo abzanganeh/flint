@@ -7,8 +7,9 @@
 //!   4. Background task pings primary every 30 seconds
 //!   5. On recovery → emit `primary_restored`
 //!
-//! 429 rate-limit path is separate: honour `Retry-After`, queue under the
-//! rate-limiter, do NOT failover on the first 429.
+//! 429 rate-limit path:
+//!   - Short Retry-After (≤ `RATE_LIMIT_SHORT_RETRY_SECS`): honour capped wait, retry Groq once.
+//!   - Long Retry-After (> threshold): failover to OpenRouter (if configured), then Ollama.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::Stream;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Runtime};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -34,6 +35,20 @@ use crate::llm::rate_limiter::RateLimiter;
 
 const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(100);
 const PRIMARY_PING_INTERVAL: Duration = Duration::from_secs(30);
+/// Groq Retry-After above this skips long sleeps — try OpenRouter then Ollama.
+const RATE_LIMIT_CLOUD_FAILOVER_SECS: u64 = 10;
+
+const TIER_PRIMARY: u8 = 0;
+const TIER_CLOUD: u8 = 1;
+const TIER_LOCAL: u8 = 2;
+
+fn rate_limit_without_fallback_message(retry_after_secs: u64) -> String {
+    let mins = retry_after_secs.div_ceil(60);
+    format!(
+        "Groq rate limit exceeded (retry in ~{mins} min). Add an OpenRouter key in Settings \
+         (fallback when Groq is exhausted) or start Ollama on localhost:11434."
+    )
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Error classification
@@ -60,32 +75,30 @@ fn classify_error(err: &anyhow::Error) -> CallError {
 // FailoverManager
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Manages the primary→Ollama failover cycle for a single provider.
-///
-/// Wrap in `Arc` and share across orchestrator threads.
+/// Manages the primary → OpenRouter → Ollama failover cycle.
 pub struct FailoverManager {
     primary: Arc<dyn LLMProvider>,
+    cloud_fallback: Option<Arc<dyn LLMProvider>>,
     local: Arc<dyn LLMProvider>,
     rate_limiter: Arc<RateLimiter>,
-    /// `true` when the local Ollama fallback is currently active.
-    using_local: Arc<AtomicBool>,
-    /// Background task handle — kept alive for the session duration.
+    /// `0` primary, `1` cloud (OpenRouter), `2` local (Ollama).
+    active_tier: Arc<std::sync::atomic::AtomicU8>,
     _ping_task: Option<JoinHandle<()>>,
 }
 
 impl FailoverManager {
-    /// Create a new manager. Call `start_ping_loop` after construction to
-    /// begin monitoring the primary.
     pub fn new(
         primary: Arc<dyn LLMProvider>,
+        cloud_fallback: Option<Arc<dyn LLMProvider>>,
         local: Arc<dyn LLMProvider>,
         rate_limiter: Arc<RateLimiter>,
     ) -> Self {
         Self {
             primary,
+            cloud_fallback,
             local,
             rate_limiter,
-            using_local: Arc::new(AtomicBool::new(false)),
+            active_tier: Arc::new(std::sync::atomic::AtomicU8::new(TIER_PRIMARY)),
             _ping_task: None,
         }
     }
@@ -93,12 +106,12 @@ impl FailoverManager {
     /// Spawn the background ping loop. Must be called once from an async context.
     pub fn start_ping_loop<R: Runtime>(&mut self, app: AppHandle<R>) {
         let primary = Arc::clone(&self.primary);
-        let using_local = Arc::clone(&self.using_local);
+        let active_tier = Arc::clone(&self.active_tier);
 
         let handle = tokio::spawn(async move {
             loop {
                 tokio::time::sleep(PRIMARY_PING_INTERVAL).await;
-                probe_primary_once(&primary, &using_local, &app).await;
+                probe_primary_once(&primary, &active_tier, &app).await;
             }
         });
 
@@ -110,7 +123,8 @@ impl FailoverManager {
     /// - Acquires a rate-limit slot for the primary.
     /// - Calls primary; on hard failure retries once after 100ms.
     /// - On second failure, routes to local Ollama and emits `failover_triggered`.
-    /// - On 429: parks at the rate-limiter backoff without routing to Ollama.
+    /// - On 429 with short Retry-After: capped wait, one Groq retry.
+    /// - On 429 with long Retry-After: immediate Ollama failover (live-safe).
     pub async fn complete_stream<R: Runtime>(
         &self,
         prompt: String,
@@ -118,11 +132,26 @@ impl FailoverManager {
         app: &AppHandle<R>,
         estimated_tokens: u32,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        if self.using_local.load(Ordering::Acquire) {
+        let tier = self.active_tier.load(Ordering::Acquire);
+        if tier == TIER_LOCAL {
             return self.local.complete_stream(prompt, config).await;
         }
+        if tier == TIER_CLOUD {
+            if let Some(cloud) = &self.cloud_fallback {
+                match cloud.complete_stream(prompt.clone(), config.clone()).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) => {
+                        warn!(
+                            provider = %cloud.name(),
+                            error = %e,
+                            "cloud tier stream failed — falling back to Ollama"
+                        );
+                        return self.failover_to_local(prompt, config, app, None).await;
+                    }
+                }
+            }
+        }
 
-        // Acquire rate-limit slot before calling primary.
         self.rate_limiter.acquire(estimated_tokens).await;
 
         let first_result = self
@@ -134,10 +163,35 @@ impl FailoverManager {
             Ok(stream) => return Ok(stream),
             Err(ref e) => match classify_error(e) {
                 CallError::RateLimit(secs) => {
+                    if secs > RATE_LIMIT_CLOUD_FAILOVER_SECS {
+                        warn!(
+                            retry_after_secs = secs,
+                            provider = %self.primary.name(),
+                            "Groq quota backoff — failing over to cloud/local"
+                        );
+                        return self
+                            .failover_from_primary(prompt, config, app, Some(secs))
+                            .await;
+                    }
                     self.rate_limiter.set_retry_after(secs).await;
-                    // Re-acquire with the updated Retry-After then retry once.
                     self.rate_limiter.acquire(estimated_tokens).await;
-                    return self.primary.complete_stream(prompt, config).await;
+                    match self.primary.complete_stream(prompt.clone(), config.clone()).await {
+                        Ok(stream) => return Ok(stream),
+                        Err(ref retry_err) => match classify_error(retry_err) {
+                            CallError::RateLimit(retry_secs) => {
+                                warn!(
+                                    retry_after_secs = retry_secs,
+                                    "Groq still rate-limited after short wait — failing over"
+                                );
+                                return self
+                                    .failover_from_primary(prompt, config, app, Some(retry_secs))
+                                    .await;
+                            }
+                            CallError::Hard => {
+                                return Err(anyhow::anyhow!("{retry_err}"));
+                            }
+                        },
+                    }
                 }
                 CallError::Hard => {
                     log_primary_call_failed(self.primary.name(), e);
@@ -145,7 +199,6 @@ impl FailoverManager {
             },
         }
 
-        // One immediate retry.
         tokio::time::sleep(INITIAL_RETRY_DELAY).await;
         let retry_result = self
             .primary
@@ -157,8 +210,95 @@ impl FailoverManager {
             Err(ref e) => log_primary_retry_failed(self.primary.name(), e),
         }
 
-        // Failover to local Ollama.
-        self.using_local.store(true, Ordering::Release);
+        self.failover_from_primary(prompt, config, app, None).await
+    }
+
+    /// Collect a full non-streaming completion (used by prep research chat).
+    pub async fn complete<R: Runtime>(
+        &self,
+        prompt: String,
+        config: CompletionConfig,
+        app: &AppHandle<R>,
+        estimated_tokens: u32,
+    ) -> Result<String> {
+        use futures::StreamExt;
+        let mut stream = self
+            .complete_stream(
+                prompt,
+                CompletionConfig {
+                    stream: false,
+                    ..config
+                },
+                app,
+                estimated_tokens,
+            )
+            .await?;
+        let mut out = String::new();
+        while let Some(token) = stream.next().await {
+            out.push_str(&token?);
+        }
+        Ok(out)
+    }
+
+    async fn failover_from_primary<R: Runtime>(
+        &self,
+        prompt: String,
+        config: CompletionConfig,
+        app: &AppHandle<R>,
+        rate_limit_retry_secs: Option<u64>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        if let Some(cloud) = &self.cloud_fallback {
+            if cloud.health_check().await {
+                self.active_tier.store(TIER_CLOUD, Ordering::Release);
+                emit_failover_triggered(
+                    app,
+                    FailoverTriggeredPayload {
+                        from: self.primary.name().to_string(),
+                        to: cloud.name().to_string(),
+                    },
+                );
+                info!(
+                    provider = %cloud.name(),
+                    "Groq unavailable — routing inference to cloud fallback"
+                );
+                match cloud.complete_stream(prompt.clone(), config.clone()).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(e) => {
+                        warn!(
+                            provider = %cloud.name(),
+                            error = %e,
+                            "cloud fallback request failed — trying Ollama"
+                        );
+                    }
+                }
+            } else {
+                warn!("OpenRouter key missing or unavailable — skipping cloud fallback");
+            }
+        }
+
+        self.failover_to_local(prompt, config, app, rate_limit_retry_secs)
+            .await
+    }
+
+    async fn failover_to_local<R: Runtime>(
+        &self,
+        prompt: String,
+        config: CompletionConfig,
+        app: &AppHandle<R>,
+        rate_limit_retry_secs: Option<u64>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+        if !self.local.health_check().await {
+            if let Some(secs) = rate_limit_retry_secs {
+                return Err(anyhow::anyhow!(rate_limit_without_fallback_message(secs)));
+            }
+            return Err(anyhow::anyhow!(
+                "Primary LLM ({}) failed. Add an OpenRouter key in Settings for cloud fallback, \
+                 or start Ollama on localhost:11434.",
+                self.primary.name()
+            ));
+        }
+
+        self.active_tier.store(TIER_LOCAL, Ordering::Release);
         emit_failover_triggered(
             app,
             FailoverTriggeredPayload {
@@ -172,15 +312,23 @@ impl FailoverManager {
 
     /// Whether the local Ollama fallback is currently active.
     pub fn is_using_local(&self) -> bool {
-        self.using_local.load(Ordering::Acquire)
+        self.active_tier.load(Ordering::Acquire) == TIER_LOCAL
     }
 
-    /// Provider name string — primary when healthy, "ollama" during fallback.
+    #[cfg(test)]
+    fn force_tier(&self, tier: u8) {
+        self.active_tier.store(tier, Ordering::Release);
+    }
+
     pub fn active_provider_name(&self) -> &str {
-        if self.is_using_local() {
-            self.local.name()
-        } else {
-            self.primary.name()
+        match self.active_tier.load(Ordering::Acquire) {
+            TIER_LOCAL => self.local.name(),
+            TIER_CLOUD => self
+                .cloud_fallback
+                .as_ref()
+                .map(|p| p.name())
+                .unwrap_or_else(|| self.local.name()),
+            _ => self.primary.name(),
         }
     }
 }
@@ -213,10 +361,10 @@ fn log_primary_retry_failed(provider: &str, err: &anyhow::Error) {
 /// flag and emits `primary_restored`; on error it logs and leaves the flag.
 async fn probe_primary_once<R: Runtime>(
     primary: &Arc<dyn LLMProvider>,
-    using_local: &Arc<AtomicBool>,
+    active_tier: &Arc<std::sync::atomic::AtomicU8>,
     app: &AppHandle<R>,
 ) {
-    if !using_local.load(Ordering::Relaxed) {
+    if active_tier.load(Ordering::Relaxed) == TIER_PRIMARY {
         return;
     }
 
@@ -227,7 +375,7 @@ async fn probe_primary_once<R: Runtime>(
     };
     match primary.complete("ping".to_string(), probe_cfg).await {
         Ok(_) => {
-            using_local.store(false, Ordering::Release);
+            active_tier.store(TIER_PRIMARY, Ordering::Release);
             info!(provider = %primary.name(), "primary LLM restored");
             emit_primary_restored(
                 app,
@@ -275,7 +423,7 @@ mod tests {
         local: Arc<dyn LLMProvider>,
     ) -> FailoverManager {
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-        FailoverManager::new(primary, local, rl)
+        FailoverManager::new(primary, None, local, rl)
     }
 
     #[test]
@@ -408,6 +556,173 @@ mod tests {
         assert_eq!(token, "ok");
     }
 
+    #[tokio::test]
+    async fn cloud_failure_cascades_to_local() {
+        struct AlwaysRateLimited {
+            provider_name: String,
+        }
+
+        #[async_trait::async_trait]
+        impl LLMProvider for AlwaysRateLimited {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+                Err(anyhow::anyhow!("rate_limit:600"))
+            }
+            fn name(&self) -> &str {
+                &self.provider_name
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> crate::llm::provider::RateLimit {
+                crate::llm::provider::RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 6_000,
+                }
+            }
+        }
+
+        struct FailingCloud {
+            provider_name: String,
+        }
+
+        #[async_trait::async_trait]
+        impl LLMProvider for FailingCloud {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+                Err(anyhow::anyhow!("OpenRouter API error 401: invalid key"))
+            }
+            fn name(&self) -> &str {
+                &self.provider_name
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> crate::llm::provider::RateLimit {
+                crate::llm::provider::RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 6_000,
+                }
+            }
+        }
+
+        let primary: Arc<dyn LLMProvider> = Arc::new(AlwaysRateLimited {
+            provider_name: "groq".to_string(),
+        });
+        let cloud: Arc<dyn LLMProvider> = Arc::new(FailingCloud {
+            provider_name: "openrouter".to_string(),
+        });
+        let local: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "local after cloud fail".to_string(),
+            provider_name: "ollama".to_string(),
+        });
+        let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
+        let manager = FailoverManager::new(primary, Some(cloud), local, rl);
+        let app = mock_app_handle();
+
+        let mut stream = manager
+            .complete_stream(
+                "test".to_string(),
+                CompletionConfig {
+                    max_tokens: Some(50),
+                    temperature: 0.0,
+                    stream: true,
+                },
+                &app,
+                100,
+            )
+            .await
+            .expect("cloud failure must cascade to Ollama");
+
+        assert!(manager.is_using_local());
+        let token = stream.next().await.unwrap().unwrap();
+        assert_eq!(token, "local after cloud fail");
+    }
+
+    #[tokio::test]
+    async fn long_rate_limit_failover_to_ollama_without_minute_long_sleep() {
+        struct AlwaysRateLimited {
+            provider_name: String,
+        }
+
+        #[async_trait::async_trait]
+        impl LLMProvider for AlwaysRateLimited {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+                Err(anyhow::anyhow!("rate_limit:600"))
+            }
+            fn name(&self) -> &str {
+                &self.provider_name
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> crate::llm::provider::RateLimit {
+                crate::llm::provider::RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 6_000,
+                }
+            }
+        }
+
+        let primary: Arc<dyn LLMProvider> = Arc::new(AlwaysRateLimited {
+            provider_name: "groq".to_string(),
+        });
+        let local: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "local fallback answer".to_string(),
+            provider_name: "ollama".to_string(),
+        });
+        let manager = make_failover(primary, local);
+        let app = mock_app_handle();
+
+        let start = std::time::Instant::now();
+        let result = manager
+            .complete_stream(
+                "test".to_string(),
+                CompletionConfig {
+                    max_tokens: Some(50),
+                    temperature: 0.0,
+                    stream: true,
+                },
+                &app,
+                100,
+            )
+            .await;
+        assert!(result.is_ok(), "long 429 must failover to Ollama");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must not sleep for Retry-After minutes"
+        );
+        assert!(manager.is_using_local());
+        let mut stream = result.unwrap();
+        let token = stream.next().await.unwrap().unwrap();
+        assert_eq!(token, "local fallback answer");
+    }
+
     /// When `using_local` is already set, `complete_stream` must short-circuit
     /// to the local provider without touching the rate limiter or primary.
     #[tokio::test]
@@ -421,8 +736,7 @@ mod tests {
             provider_name: "ollama".to_string(),
         });
         let manager = make_failover(Arc::clone(&primary), Arc::clone(&local));
-        // Force the manager into fallback mode without going through the retry.
-        manager.using_local.store(true, Ordering::Release);
+        manager.force_tier(TIER_LOCAL);
         assert_eq!(manager.active_provider_name(), "ollama");
 
         let app = mock_app_handle();
@@ -542,16 +856,16 @@ mod tests {
 
     /// `probe_primary_once`: success case — primary recovers, flag flips back.
     #[tokio::test]
-    async fn probe_primary_once_flips_using_local_on_success() {
+    async fn probe_primary_once_flips_active_tier_on_success() {
         let primary: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
             response: "pong".to_string(),
             provider_name: "groq".to_string(),
         });
-        let using_local = Arc::new(AtomicBool::new(true));
+        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(TIER_CLOUD));
         let app = mock_app_handle();
 
-        probe_primary_once(&primary, &using_local, &app).await;
-        assert!(!using_local.load(Ordering::Acquire));
+        probe_primary_once(&primary, &active_tier, &app).await;
+        assert_eq!(active_tier.load(Ordering::Acquire), TIER_PRIMARY);
     }
 
     /// `probe_primary_once`: skip path when not in fallback mode (no-op).
@@ -561,12 +875,11 @@ mod tests {
             provider_name: "groq".to_string(),
             error_message: "should never be called".to_string(),
         });
-        let using_local = Arc::new(AtomicBool::new(false));
+        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(TIER_PRIMARY));
         let app = mock_app_handle();
 
-        probe_primary_once(&primary, &using_local, &app).await;
-        // Still false; primary was never probed.
-        assert!(!using_local.load(Ordering::Acquire));
+        probe_primary_once(&primary, &active_tier, &app).await;
+        assert_eq!(active_tier.load(Ordering::Acquire), TIER_PRIMARY);
     }
 
     /// `probe_primary_once`: error case — primary still failing, flag stays true.
@@ -576,11 +889,11 @@ mod tests {
             provider_name: "groq".to_string(),
             error_message: "still down".to_string(),
         });
-        let using_local = Arc::new(AtomicBool::new(true));
+        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(TIER_LOCAL));
         let app = mock_app_handle();
 
-        probe_primary_once(&primary, &using_local, &app).await;
-        assert!(using_local.load(Ordering::Acquire));
+        probe_primary_once(&primary, &active_tier, &app).await;
+        assert_eq!(active_tier.load(Ordering::Acquire), TIER_LOCAL);
     }
 
     #[test]

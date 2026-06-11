@@ -26,6 +26,7 @@ use crate::session::state::{SessionState, SessionStateMachine};
 
 /// Summary of an incomplete session offered to the user on startup.
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RecoveryOffer {
     pub session_id: String,
     pub interrupted_state: String,

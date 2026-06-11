@@ -1,12 +1,16 @@
-import { useDepthStream } from "../hooks/useDepthStream";
+import { useState } from "react";
+
+import { copyTextToClipboard } from "../commands";
 import { useUIStore } from "../store/ui";
 
-export interface DepthPanelProps {}
+export interface DepthPanelProps {
+  isGenerating?: boolean;
+}
 
-const DepthPanel = (_props: DepthPanelProps) => {
-  useDepthStream();
-
+const DepthPanel = ({ isGenerating = false }: DepthPanelProps) => {
   const { streamingBuffers, depthPrePrepared } = useUIStore();
+  const pushNotification = useUIStore((s) => s.pushNotification);
+  const [copied, setCopied] = useState(false);
   const text = streamingBuffers.depth;
 
   const sections = text
@@ -14,9 +18,20 @@ const DepthPanel = (_props: DepthPanelProps) => {
     .map((s) => s.trim())
     .filter(Boolean);
 
-  const handleCopy = () => {
+  const handleUseAnswer = () => {
     if (text.length === 0) return;
-    void navigator.clipboard.writeText(text);
+    void copyTextToClipboard(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch((err: unknown) => {
+        pushNotification({
+          id: crypto.randomUUID(),
+          message: `Copy failed: ${String(err)}`,
+          level: "error",
+        });
+      });
   };
 
   return (
@@ -79,7 +94,9 @@ const DepthPanel = (_props: DepthPanelProps) => {
           <span
             style={{ color: "#4b5563", fontStyle: "italic", fontSize: "12px" }}
           >
-            Waiting for depth response…
+            {isGenerating
+              ? "Generating depth response…"
+              : "Waiting for depth response…"}
           </span>
         ) : sections.length > 1 ? (
           sections.map((section, i) => (
@@ -116,7 +133,9 @@ const DepthPanel = (_props: DepthPanelProps) => {
           }}
         >
           <button
-            onClick={handleCopy}
+            type="button"
+            onClick={handleUseAnswer}
+            title="Copy the full depth answer to your clipboard"
             style={{
               padding: "4px 10px",
               fontSize: "11px",
@@ -128,7 +147,7 @@ const DepthPanel = (_props: DepthPanelProps) => {
               cursor: "pointer",
             }}
           >
-            Use This Answer
+            {copied ? "Copied!" : "Use This Answer"}
           </button>
         </div>
       )}

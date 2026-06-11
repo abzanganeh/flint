@@ -6,10 +6,11 @@
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Error, Result};
 use futures::StreamExt;
+use tokio::time::timeout;
 use tauri::{AppHandle, Runtime};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -87,14 +88,27 @@ async fn run_fresh_depth<R: Runtime>(
         .context("depth stream failed")?;
 
     let mut full_response = String::new();
+    let stream_deadline = Instant::now() + Duration::from_secs(60);
 
-    while let Some(token_result) = stream.next().await {
+    while Instant::now() < stream_deadline {
         if ctx.turn_cancel.load(Ordering::Acquire) {
             break;
         }
-        let token = token_result.context("depth token error")?;
-        full_response.push_str(&token);
-        emit_depth_token(app, DepthTokenPayload { token });
+        match timeout(Duration::from_secs(15), stream.next()).await {
+            Ok(Some(Ok(token))) => {
+                full_response.push_str(&token);
+                emit_depth_token(app, DepthTokenPayload { token });
+            }
+            Ok(Some(Err(e))) => return Err(e).context("depth token error"),
+            Ok(None) => break,
+            Err(_) => {
+                warn!(
+                    session_id = %ctx.session_id,
+                    "depth stream stalled — returning partial response"
+                );
+                break;
+            }
+        }
     }
 
     let stream_ms = start.elapsed().as_millis() as u64;

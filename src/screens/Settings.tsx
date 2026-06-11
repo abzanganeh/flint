@@ -84,8 +84,9 @@ function CostCapTab() {
     <div className="settings-tab">
       <h3 className="settings-tab__heading">Usage limits</h3>
       <p className="settings-tab__description">
-        Flint suspends inference when either limit is reached. Leave blank to
-        remove that dimension.
+        These are spending ceilings — not targets. Each rehearsal question
+        uses ~300+ estimated tokens (3 LLM calls). Token limit must be at
+        least 500 if set. Leave blank to remove that dimension.
       </p>
 
       {status?.suspended && (

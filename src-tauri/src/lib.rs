@@ -207,6 +207,7 @@ pub fn run() {
             // Phase 7.5 — GDPR right-to-deletion + right-to-export
             commands::delete_account,
             commands::export_user_data,
+            commands::copy_text_to_clipboard,
             // Phase 7.6 — feature flags
             commands::is_feature_enabled,
             commands::refresh_feature_flags,

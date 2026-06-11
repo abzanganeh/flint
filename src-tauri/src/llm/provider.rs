@@ -90,8 +90,13 @@ pub trait LLMProvider: Send + Sync {
     /// Identifier used for prompt file lookup (`prompts/{module}/{name}.txt`).
     fn name(&self) -> &str;
 
-    /// Whether this provider is reachable right now (used by health check).
+    /// Whether this provider is configured (used by health check).
     fn is_available(&self) -> bool;
+
+    /// Async reachability probe — used before routing to a local fallback.
+    async fn health_check(&self) -> bool {
+        self.is_available()
+    }
 
     /// Approximate context window in tokens.
     fn context_window(&self) -> usize;

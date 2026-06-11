@@ -120,7 +120,7 @@ fn make_failover(response: &str) -> Arc<FailoverManager> {
         provider_name: "ollama".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-    Arc::new(FailoverManager::new(primary, local, rl))
+    Arc::new(FailoverManager::new(primary, None, local, rl))
 }
 
 #[tokio::test]
@@ -194,7 +194,7 @@ fn fast_failover(response: &str, name: &str) -> Arc<FailoverManager> {
         provider_name: "ollama".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
-    Arc::new(FailoverManager::new(primary, local, rl))
+    Arc::new(FailoverManager::new(primary, None, local, rl))
 }
 
 /// Smoke-test the full per-turn pipeline end-to-end with all dependencies
@@ -289,7 +289,7 @@ async fn dispatch_turn_survives_primary_llm_failure() {
         error_message: "local also down".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
-    let failover = Arc::new(FailoverManager::new(primary, local, rl));
+    let failover = Arc::new(FailoverManager::new(primary, None, local, rl));
 
     let local_llm: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
         response: "summary".to_string(),
@@ -368,7 +368,7 @@ async fn dispatch_turn_serves_prewarm_cache_hit() {
         provider_name: "ollama".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
-    let failover = Arc::new(FailoverManager::new(primary, local, rl));
+    let failover = Arc::new(FailoverManager::new(primary, None, local, rl));
 
     let local_llm: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
         response: "summary".to_string(),
@@ -551,7 +551,7 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
         provider_name: "ollama".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
-    let failover = Arc::new(FailoverManager::new(primary, local, rl));
+    let failover = Arc::new(FailoverManager::new(primary, None, local, rl));
 
     // Force failover to "using local" by triggering a primary call that fails.
     // After this, `is_using_local()` is true and compression uses the local LLM.
@@ -674,7 +674,7 @@ async fn dispatch_turn_recovers_from_panicking_llm_provider() {
         provider_name: "ollama".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
-    let failover = Arc::new(FailoverManager::new(primary, local, rl));
+    let failover = Arc::new(FailoverManager::new(primary, None, local, rl));
 
     let local_llm: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
         response: "ok".to_string(),
@@ -887,7 +887,7 @@ async fn dispatch_turn_short_circuits_when_cost_tracker_is_suspended() {
         error_message: "MUST NOT BE CALLED — cap should short-circuit".to_string(),
     });
     let rl = Arc::new(RateLimiter::new("mock", 60_000, 60_000));
-    let blocked_failover = Arc::new(FailoverManager::new(primary, local, rl));
+    let blocked_failover = Arc::new(FailoverManager::new(primary, None, local, rl));
 
     let result_blocked = dispatch_turn(
         session_id,
@@ -912,8 +912,8 @@ async fn dispatch_turn_short_circuits_when_cost_tracker_is_suspended() {
     )
     .await;
     assert!(
-        result_blocked.is_ok(),
-        "suspended dispatch must return Ok(()) without calling the LLM: {result_blocked:?}"
+        result_blocked.is_err(),
+        "suspended dispatch must return Err without calling the LLM: {result_blocked:?}"
     );
     assert!(
         tracker.is_suspended(),

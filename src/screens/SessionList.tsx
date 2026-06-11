@@ -15,6 +15,10 @@ interface Props {
   onBack: () => void;
   /** Called when the user wants to start a new session cloned from a past one. */
   onStartSimilar?: (preFill: SessionPreFill) => void;
+  /** The session currently loaded in Rust (if any). Shown with a Resume button. */
+  activeSessionId?: string;
+  /** Called when user clicks Resume for the active in-progress session. */
+  onResumeSession?: (sessionId: string, sessionState: string) => void;
 }
 
 function digestToContextText(digest: DigestDto): string {
@@ -64,7 +68,21 @@ function expiryClass(expiresInSecs: number, promoted: boolean): string {
   return "sl-expiry--normal";
 }
 
-export const SessionList: React.FC<Props> = ({ onBack, onStartSimilar }) => {
+const IN_PROGRESS_STATES = new Set([
+  "CONFIGURING",
+  "INGESTING",
+  "DIGEST_REVIEW",
+  "PRE_WARMING",
+  "REHEARSING",
+  "READY",
+]);
+
+export const SessionList: React.FC<Props> = ({
+  onBack,
+  onStartSimilar,
+  activeSessionId,
+  onResumeSession,
+}) => {
   const [sessions, setSessions] = useState<SessionSummaryDto[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -222,6 +240,17 @@ export const SessionList: React.FC<Props> = ({ onBack, onStartSimilar }) => {
                 </div>
 
                 <div className="sl-actions" onClick={(e) => e.stopPropagation()}>
+                  {isSelected && onResumeSession && activeSessionId === session.id && IN_PROGRESS_STATES.has(session.state) && (
+                    <button
+                      className="sl-action-btn sl-action-btn--resume"
+                      onClick={() => onResumeSession(session.id, session.state)}
+                      disabled={busy}
+                      type="button"
+                      title="Return to your current in-progress session"
+                    >
+                      Resume
+                    </button>
+                  )}
                   {isSelected && onStartSimilar && (
                     <button
                       className="sl-action-btn sl-action-btn--clone"

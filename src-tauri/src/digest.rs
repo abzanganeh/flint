@@ -203,9 +203,11 @@ fn strip_markdown_fences(s: &str) -> &str {
 
 /// Ensure `likely_questions` contains at least 5 entries by appending
 /// universal question bank items that are not already present.
+const MIN_QUESTION_BANK_SIZE: usize = 5;
+
 fn pad_likely_questions(questions: &mut Vec<String>) {
     for &fallback in UNIVERSAL_QUESTION_BANK {
-        if questions.len() >= 5 {
+        if questions.len() >= MIN_QUESTION_BANK_SIZE {
             break;
         }
         let already_present = questions
@@ -352,6 +354,14 @@ mod tests {
         pad_likely_questions(&mut qs);
         assert_eq!(qs.len(), 5);
         assert_eq!(qs[0], "Tell me about yourself");
+    }
+
+    #[test]
+    fn test_pad_likely_questions_does_not_cap_above_five() {
+        // When LLM returns more than 5 questions, all must be preserved.
+        let mut qs: Vec<String> = (0..15).map(|i| format!("Question {i}")).collect();
+        pad_likely_questions(&mut qs);
+        assert_eq!(qs.len(), 15, "pad must not truncate questions above the floor");
     }
 
     #[test]

@@ -66,9 +66,18 @@ const PanelSlot = ({ id, children }: PanelSlotProps) => {
         {collapsed ? PANEL_LABELS[id] : "◀"}
       </button>
 
-      {!collapsed && (
-        <div style={{ flex: 1, overflow: "hidden" }}>{children}</div>
-      )}
+      {/* Keep children mounted when collapsed so stream listeners stay active. */}
+      <div
+        style={{
+          flex: collapsed ? "0 0 0" : 1,
+          overflow: "hidden",
+          visibility: collapsed ? "hidden" : "visible",
+          minHeight: collapsed ? 0 : undefined,
+        }}
+        aria-hidden={collapsed}
+      >
+        {children}
+      </div>
     </div>
   );
 };
@@ -241,9 +250,18 @@ const StackPanelSlot = ({ id, children }: StackPanelSlotProps) => {
         <span>{collapsed ? "▼" : "▲"}</span>
       </button>
 
-      {!collapsed && (
-        <div style={{ flex: 1, overflow: "hidden" }}>{children}</div>
-      )}
+      {/* Keep children mounted when collapsed so stream listeners stay active. */}
+      <div
+        style={{
+          flex: collapsed ? "0 0 0" : 1,
+          overflow: "hidden",
+          visibility: collapsed ? "hidden" : "visible",
+          minHeight: collapsed ? 0 : undefined,
+        }}
+        aria-hidden={collapsed}
+      >
+        {children}
+      </div>
     </div>
   );
 };

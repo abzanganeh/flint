@@ -75,8 +75,29 @@ export const logout = (): Promise<void> => invoke<void>("logout");
 export const getCurrentUser = (): Promise<UserDto> =>
   invoke<UserDto>("get_current_user");
 
-export const startSession = (sessionId: string): Promise<void> =>
-  invoke<void>("start_session", { sessionId });
+const liveStartInflight = new Map<string, Promise<void>>();
+
+/** Dedupe concurrent starts (React StrictMode double-mount in dev). */
+export const startSession = (sessionId: string): Promise<void> => {
+  const existing = liveStartInflight.get(sessionId);
+  if (existing) return existing;
+
+  let resolve!: () => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  liveStartInflight.set(sessionId, promise);
+
+  void invoke<void>("start_session", { sessionId })
+    .then(resolve, reject)
+    .finally(() => {
+      liveStartInflight.delete(sessionId);
+    });
+
+  return promise;
+};
 
 export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 
@@ -130,6 +151,9 @@ export const rephraseResponse = (
   question: string,
   sessionId: string,
 ): Promise<void> => triggerResponse(question, sessionId, true);
+
+export const copyTextToClipboard = (text: string): Promise<void> =>
+  invoke<void>("copy_text_to_clipboard", { text });
 
 export const switchProvider = (name: string): Promise<void> =>
   invoke<void>("switch_provider", { name });
@@ -278,6 +302,12 @@ export interface RecoveryOffer {
   interruptedState: string;
   transcriptChunkCount: number;
   responseCount: number;
+  name: string;
+  sessionType: string;
+  domain: string;
+  createdAt: number;
+  lastChunkTimestampMs: number | null;
+  additionalCrashedCount: number;
 }
 
 export interface SessionSummaryDto {
@@ -504,7 +534,7 @@ export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =
 
 // ── Phase 7.7 — Provider API key management ──────────────────────────────────
 
-export type ApiKeyProvider = "groq" | "openai" | "anthropic" | "tavily";
+export type ApiKeyProvider = "groq" | "openrouter" | "openai" | "anthropic" | "tavily";
 
 /** @deprecated Use ApiKeyProvider */
 export type LlmProvider = Extract<ApiKeyProvider, "groq" | "openai" | "anthropic">;
