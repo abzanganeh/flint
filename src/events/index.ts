@@ -266,3 +266,67 @@ export const onResearchCitation = (
   listen<ResearchCitationEventPayload>("research_citation", (event) =>
     handler(event.payload),
   );
+
+// ── Mock Interview events ─────────────────────────────────────────────────────
+
+export interface MockQuestionStartedEventPayload {
+  question: string;
+  turn_n: number;
+  total_questions: number;
+}
+
+export interface MockUserTranscribedEventPayload {
+  turn_n: number;
+  text: string;
+  audio_path: string;
+}
+
+export interface MockSuggestedTokenEventPayload {
+  token: string;
+}
+
+export interface MockCoachFeedbackEventPayload {
+  turn_n: number;
+  coach_json: string;
+  score: number;
+}
+
+export interface MockEndedEventPayload {
+  session_id: string;
+  turns_completed: number;
+}
+
+export const onMockQuestionStarted = (
+  handler: (payload: MockQuestionStartedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockQuestionStartedEventPayload>("mock_question_started", (event) =>
+    handler(event.payload),
+  );
+
+export const onMockUserTranscribed = (
+  handler: (payload: MockUserTranscribedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockUserTranscribedEventPayload>("mock_user_transcribed", (event) =>
+    handler(event.payload),
+  );
+
+export const onMockSuggestedToken = (
+  handler: (payload: MockSuggestedTokenEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockSuggestedTokenEventPayload>("mock_suggested_token", (event) =>
+    handler(event.payload),
+  );
+
+export const onMockCoachFeedback = (
+  handler: (payload: MockCoachFeedbackEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockCoachFeedbackEventPayload>("mock_coach_feedback", (event) =>
+    handler(event.payload),
+  );
+
+export const onMockEnded = (
+  handler: (payload: MockEndedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockEndedEventPayload>("mock_ended", (event) =>
+    handler(event.payload),
+  );

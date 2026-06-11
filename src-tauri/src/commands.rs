@@ -29,6 +29,9 @@ use crate::llm::ollama::OllamaProvider;
 use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
+use crate::mock::coach::run_coach;
+use crate::mock::conductor::{Conductor, ConductorCommand};
+use crate::mock::mic_capture::MicCapture;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
@@ -41,7 +44,7 @@ use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
-use crate::state::{AppState, LiveTaskHandles};
+use crate::state::{AppState, LiveTaskHandles, MockTaskHandles};
 use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
 
@@ -2631,4 +2634,338 @@ pub async fn get_feature_flags_snapshot(
     state: State<'_, AppState>,
 ) -> Result<crate::flags::ClientSnapshot, String> {
     Ok(state.feature_flags.snapshot())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 8 — Mock Interview commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Resolve the prompts directory at runtime.  Same logic used throughout.
+fn prompts_dir() -> PathBuf {
+    std::env::var("FLINT_PROMPTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("prompts")
+        })
+}
+
+/// Transition to MOCK_INTERVIEW and start the conductor + mic capture loop.
+///
+/// Valid from: `REHEARSING`.
+///
+/// Steps:
+/// 1. REHEARSING → MOCK_INTERVIEW.
+/// 2. Build (or reuse) FailoverManager.
+/// 3. Retrieve session digest (must be confirmed before calling this).
+/// 4. Retrieve RAG chunks for the question bank.
+/// 5. Start `MicCapture` and `Conductor`.
+/// 6. Store `MockTaskHandles` in AppState.
+#[tauri::command]
+pub async fn start_mock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Guard: must be in REHEARSING.
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "start_mock is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let session_id = {
+        let machine = state.state_machine.lock().await;
+        machine.session_id().ok_or("no active session")?
+    };
+
+    let digest = state
+        .session_digest
+        .read()
+        .await
+        .clone()
+        .ok_or("digest not set — confirm session design first")?;
+    let digest = Arc::new(digest);
+
+    // Build FailoverManager.
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+
+    // Retrieve RAG chunks by querying the first likely question as the seed.
+    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
+        let seed = digest.likely_questions.first().cloned().unwrap_or_default();
+        let query_vec = embedder.embed_one(&seed).unwrap_or_default();
+        state
+            .vector_store
+            .query(session_id, &query_vec, 10)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    // Create audio directory.
+    let audio_dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("mock_audio"))
+        .unwrap_or_else(|_| PathBuf::from("mock_audio"));
+    std::fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
+
+    // Initialise WhisperEngine.
+    let profile = hardware::assess_hardware();
+    let model_path = whisper_model_path(&profile);
+    let whisper =
+        Arc::new(WhisperEngine::new(&model_path, profile.tier).map_err(|e| e.to_string())?);
+
+    let mic_capture = MicCapture::start(
+        app.clone(),
+        session_id,
+        audio_dir.clone(),
+        Arc::clone(&whisper),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let conductor = Conductor::start(
+        app.clone(),
+        session_id,
+        Arc::clone(&digest),
+        Arc::clone(&failover),
+        Arc::clone(&state.persistence),
+        prompts_dir(),
+        rag_chunks,
+    );
+
+    // REHEARSING → MOCK_INTERVIEW.
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::MockInterview)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::MockInterview);
+
+    *state.mock_tasks.lock().await = Some(MockTaskHandles {
+        conductor,
+        mic_capture,
+        current_turn: 0,
+    });
+
+    info!(session_id = %session_id, "mock interview started");
+    Ok(())
+}
+
+/// Start recording the user's microphone for the current mock turn.
+///
+/// Call after the frontend has confirmed the AI question has been spoken.
+#[tauri::command]
+pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.mock_tasks.lock().await;
+    let handles = guard.as_mut().ok_or("no active mock session")?;
+    handles.current_turn += 1;
+    let turn_n = handles.current_turn;
+    handles
+        .mic_capture
+        .start_turn(turn_n)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Stop recording, run coach LLM, persist results, and signal the conductor.
+///
+/// The coach runs async in the background — the `mock_coach_feedback` event
+/// fires when it completes.
+#[tauri::command]
+pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    let (turn_n, transcript, audio_path) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let turn_n = handles.current_turn;
+        drop(guard);
+
+        // Give the user up to 120 s to finish answering; in practice they stop
+        // manually well before that.
+        let (text, path) = state
+            .mock_tasks
+            .lock()
+            .await
+            .as_ref()
+            .ok_or("handles disappeared")?
+            .mic_capture
+            .end_turn(Duration::from_secs(120))
+            .await
+            .map_err(|e| e.to_string())?;
+        (turn_n, text, path)
+    };
+
+    // Kick off coach in the background; it will emit mock_coach_feedback when done.
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
+        let q = transcript.clone();
+        let vec = embedder.embed_one(&q).unwrap_or_default();
+        state
+            .vector_store
+            .query(session_id, &vec, 8)
+            .await
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+    let persistence = Arc::clone(&state.persistence);
+    let question = {
+        let _guard = state.mock_tasks.lock().await;
+        // The conductor already stored the question in the DB; fetch it back.
+        persistence
+            .load_mock_turns(session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|t| t.turn_n == turn_n)
+            .map(|t| t.question)
+            .unwrap_or_default()
+    };
+    let prompts = prompts_dir();
+    let user_text_clone = transcript.clone();
+    let user_text_persist = transcript.clone();
+    let audio_path_clone = audio_path.clone();
+
+    tokio::spawn(async move {
+        let (coach_json, score) = run_coach(
+            app,
+            session_id,
+            turn_n,
+            question,
+            user_text_clone,
+            rag_chunks,
+            failover,
+            &prompts,
+        )
+        .await
+        .unwrap_or_default();
+
+        if let Err(e) = persistence.update_mock_turn_result(
+            // The turn row ID was already written by the conductor; look it up.
+            persistence
+                .load_mock_turns(session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|t| t.turn_n == turn_n)
+                .map(|t| t.id)
+                .unwrap_or_default(),
+            &user_text_persist,
+            &audio_path_clone,
+            &coach_json,
+            "",
+            score,
+        ) {
+            warn!(error = %e, "failed to persist mock turn result");
+        }
+    });
+
+    // Signal the conductor to advance to the next question.
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles
+            .conductor
+            .cmd_tx
+            .send(ConductorCommand::TurnComplete {
+                user_text: transcript,
+                audio_path,
+                coach_json: String::new(), // Conductor doesn't need the JSON
+                score: 0,
+            })
+            .await;
+    }
+
+    Ok(())
+}
+
+/// Skip the current mock turn without recording an answer.
+#[tauri::command]
+pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles
+            .conductor
+            .cmd_tx
+            .send(ConductorCommand::TurnComplete {
+                user_text: String::new(),
+                audio_path: String::new(),
+                coach_json: String::new(),
+                score: 0,
+            })
+            .await;
+    }
+    Ok(())
+}
+
+/// Abort the mock interview and transition to REHEARSING.
+///
+/// Valid from: `MOCK_INTERVIEW`.
+#[tauri::command]
+pub async fn stop_mock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Signal conductor to stop.
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles.conductor.cmd_tx.send(ConductorCommand::Abort).await;
+    }
+
+    // Shutdown mic capture.
+    if let Some(handles) = state.mock_tasks.lock().await.take() {
+        handles.mic_capture.shutdown().await;
+    }
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        if *machine.current() == SessionState::MockInterview {
+            machine
+                .transition(SessionState::Rehearsing)
+                .map_err(session_error)?;
+        }
+    }
+    emit_state(&app, SessionState::Rehearsing);
+
+    Ok(())
+}
+
+/// Return all completed mock turns for the session (used by Summary screen).
+#[tauri::command]
+pub async fn get_mock_turns(state: State<'_, AppState>) -> Result<Vec<MockTurnDto>, String> {
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+    let turns = state
+        .persistence
+        .load_mock_turns(session_id)
+        .map_err(|e| e.to_string())?;
+    Ok(turns
+        .into_iter()
+        .map(|t| MockTurnDto {
+            id: t.id.to_string(),
+            turn_n: t.turn_n,
+            question: t.question,
+            user_text: t.user_text,
+            audio_path: t.audio_path,
+            coach_json: t.coach_json,
+            suggested: t.suggested,
+            score: t.score,
+        })
+        .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct MockTurnDto {
+    pub id: String,
+    pub turn_n: u32,
+    pub question: String,
+    pub user_text: String,
+    pub audio_path: String,
+    pub coach_json: String,
+    pub suggested: String,
+    pub score: u8,
 }

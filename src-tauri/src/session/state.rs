@@ -38,6 +38,7 @@ pub enum SessionState {
     DigestReview,
     PreWarming,
     Rehearsing,
+    MockInterview,
     Ready,
     Live,
     Paused,
@@ -58,6 +59,7 @@ impl SessionState {
             SessionState::DigestReview => "DIGEST_REVIEW",
             SessionState::PreWarming => "PRE_WARMING",
             SessionState::Rehearsing => "REHEARSING",
+            SessionState::MockInterview => "MOCK_INTERVIEW",
             SessionState::Ready => "READY",
             SessionState::Live => "LIVE",
             SessionState::Paused => "PAUSED",
@@ -289,7 +291,11 @@ const fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
             | (PreWarming, Rehearsing)
             | (PreWarming, Ready)
             | (Rehearsing, Ready)
+            | (Rehearsing, MockInterview) // user starts mock interview from rehearsal
             | (Rehearsing, Configuring) // user returns to edit pasted context
+            | (MockInterview, Ready) // mock complete — move to live ready
+            | (MockInterview, Rehearsing) // user returns to rehearsal mid-mock
+            | (MockInterview, Configuring) // user restarts from session design
             | (Ready, Configuring) // user returns to edit pasted context before live
             | (Ready, Live)
             | (Live, Paused)
@@ -1148,5 +1154,69 @@ mod tests {
         assert_eq!(session_id_for_log(None), "");
         let id = Uuid::new_v4();
         assert_eq!(session_id_for_log(Some(id)), id.to_string());
+    }
+
+    // ── Mock Interview transitions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_rehearsing_to_mock_interview() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Rehearsing,
+        ]);
+        assert!(sm.transition(SessionState::MockInterview).is_ok());
+        assert_eq!(*sm.current(), SessionState::MockInterview);
+    }
+
+    #[test]
+    fn test_mock_interview_to_ready() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Rehearsing,
+            SessionState::MockInterview,
+        ]);
+        assert!(sm.transition(SessionState::Ready).is_ok());
+        assert_eq!(*sm.current(), SessionState::Ready);
+    }
+
+    #[test]
+    fn test_mock_interview_to_rehearsing() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Rehearsing,
+            SessionState::MockInterview,
+        ]);
+        assert!(sm.transition(SessionState::Rehearsing).is_ok());
+        assert_eq!(*sm.current(), SessionState::Rehearsing);
+    }
+
+    #[test]
+    fn test_mock_interview_to_configuring() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Rehearsing,
+            SessionState::MockInterview,
+        ]);
+        assert!(sm.transition(SessionState::Configuring).is_ok());
+        assert_eq!(*sm.current(), SessionState::Configuring);
+    }
+
+    #[test]
+    fn test_idle_to_mock_interview_is_rejected() {
+        let mut sm = SessionStateMachine::new();
+        assert!(sm.transition(SessionState::MockInterview).is_err());
+        assert_eq!(*sm.current(), SessionState::Idle);
     }
 }

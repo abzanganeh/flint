@@ -216,3 +216,74 @@ pub fn emit_session_state_change<R: Runtime>(
 pub fn emit_context_truncated<R: Runtime>(app: &AppHandle<R>, payload: ContextTruncatedPayload) {
     let _ = app.emit("context_truncated", payload);
 }
+
+// ── Mock Interview events ─────────────────────────────────────────────────────
+
+/// Emitted when the conductor moves to a new question (text shown in transcript
+/// immediately; TTS speaks it in the background).
+#[derive(Debug, Clone, Serialize)]
+pub struct MockQuestionStartedPayload {
+    pub question: String,
+    pub turn_n: u32,
+    pub total_questions: u32,
+}
+
+/// Emitted when the user's mic VAD chunk has been transcribed.
+#[derive(Debug, Clone, Serialize)]
+pub struct MockUserTranscribedPayload {
+    pub turn_n: u32,
+    pub text: String,
+    /// Absolute local path to the WAV file, or empty string if audio was not saved.
+    pub audio_path: String,
+}
+
+/// Streaming suggested-answer token (single merged panel, replaces directional+depth).
+#[derive(Debug, Clone, Serialize)]
+pub struct MockSuggestedTokenPayload {
+    pub token: String,
+}
+
+/// Structured coach feedback emitted once after coach LLM completes.
+#[derive(Debug, Clone, Serialize)]
+pub struct MockCoachFeedbackPayload {
+    pub turn_n: u32,
+    /// Serialised `CoachFeedback` JSON for the frontend to parse.
+    pub coach_json: String,
+    pub score: u8,
+}
+
+/// Emitted when the mock interview ends (all questions answered or user exits).
+#[derive(Debug, Clone, Serialize)]
+pub struct MockEndedPayload {
+    pub session_id: String,
+    pub turns_completed: u32,
+}
+
+pub fn emit_mock_question_started<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: MockQuestionStartedPayload,
+) {
+    let _ = app.emit("mock_question_started", payload);
+}
+
+pub fn emit_mock_user_transcribed<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: MockUserTranscribedPayload,
+) {
+    let _ = app.emit("mock_user_transcribed", payload);
+}
+
+pub fn emit_mock_suggested_token<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: MockSuggestedTokenPayload,
+) {
+    let _ = app.emit("mock_suggested_token", payload);
+}
+
+pub fn emit_mock_coach_feedback<R: Runtime>(app: &AppHandle<R>, payload: MockCoachFeedbackPayload) {
+    let _ = app.emit("mock_coach_feedback", payload);
+}
+
+pub fn emit_mock_ended<R: Runtime>(app: &AppHandle<R>, payload: MockEndedPayload) {
+    let _ = app.emit("mock_ended", payload);
+}

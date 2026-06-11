@@ -36,6 +36,7 @@ export interface RehearsalProps {
   onComplete: () => void;
   onReturnToSetup?: () => void;
   onOpenSettings?: () => void;
+  onStartMock?: () => void;
 }
 
 type SideTab = "checklist" | "questions" | "research" | "stories";
@@ -50,7 +51,7 @@ const emptyFields: SessionContextFields = {
   strategyNotes: "",
 };
 
-const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings }: RehearsalProps) => {
+const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onStartMock }: RehearsalProps) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -547,6 +548,26 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings }: R
               ? "Review the panels above, then go live when ready."
               : "Optional: ask a practice question, or go live without rehearsing."}
           </span>
+          {onStartMock && (
+            <button
+              data-testid="start-mock-button"
+              onClick={onStartMock}
+              title="Practice with AI interviewer"
+              style={{
+                padding: "8px 20px",
+                backgroundColor: "#7c3aed",
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                fontSize: "13px",
+                fontWeight: 600,
+                cursor: "pointer",
+                flexShrink: 0,
+              }}
+            >
+              Mock Interview
+            </button>
+          )}
           <button
             data-testid="rehearsal-complete-button"
             onClick={() => void handleComplete()}
