@@ -21,7 +21,7 @@
 | 7 Hardening | 🔄 Partial | ⏳ Open | eval baseline committed; 7.1 coverage + 7.8 installers + NFR run still open |
 | **8 Mock Interview** | ⏳ Branch only | ⏳ Open | `feature/mock-interview` @ `3c2aea3` — TTS + coach + mic capture; manual E2E pending |
 | Strategy B Ph1 | ✅ Code + manual | ✅ Signed off | 1.A 2026-06-09; 1.B 2026-06-10 |
-| Strategy B Ph2 | ✅ Code complete | ⏳ Open | Manual device test + Store submission pending |
+| Strategy B Ph2 | ✅ On `main` (ext) | ⏳ Open | API gate passed 2026-06-11; Chrome manual + Store submission pending |
 
 ### Cross-cutting gaps (not phase-complete)
 

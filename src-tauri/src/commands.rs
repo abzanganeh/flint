@@ -16,8 +16,8 @@ use crate::dto::{
     SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
-    emit_session_state_change, emit_token_usage_update, SessionStateChangePayload,
-    TokenUsageUpdatePayload,
+    emit_mock_coach_feedback, emit_session_state_change, emit_token_usage_update,
+    MockCoachFeedbackPayload, SessionStateChangePayload, TokenUsageUpdatePayload,
 };
 use crate::health::{checks, hardware};
 use crate::interfaces::auth::AuthToken;
@@ -29,7 +29,7 @@ use crate::llm::ollama::OllamaProvider;
 use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
-use crate::mock::coach::run_coach;
+use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::conductor::{Conductor, ConductorCommand, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
@@ -2807,8 +2807,8 @@ pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
 
 /// Stop recording, run coach LLM, persist results, and signal the conductor.
 ///
-/// The coach runs async in the background — the `mock_coach_feedback` event
-/// fires when it completes.
+/// Coach runs before the conductor advances so `mock_coach_feedback` is emitted
+/// before the next `mock_question_started` resets the UI.
 #[tauri::command]
 pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     // Pull the turn number and queue the `EndTurn` command while holding the
@@ -2833,7 +2833,8 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .await
             .map_err(|e| e.to_string())?;
 
-    // Kick off coach in the background; it will emit mock_coach_feedback when done.
+    // Await coach before advancing the conductor — otherwise the next question
+    // event resets the coach panel before feedback is delivered.
     let session_id = state
         .state_machine
         .lock()
@@ -2853,54 +2854,56 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         vec![]
     };
     let persistence = Arc::clone(&state.persistence);
-    let question = {
-        let _guard = state.mock_tasks.lock().await;
-        // The conductor already stored the question in the DB; fetch it back.
-        persistence
-            .load_mock_turns(session_id)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|t| t.turn_n == turn_n)
-            .map(|t| t.question)
-            .unwrap_or_default()
-    };
-    let prompts = prompts_base_dir();
-    let user_text_for_coach = transcript.clone();
-
-    tokio::spawn(async move {
-        let (coach_json, score) = run_coach(
-            app,
-            session_id,
-            turn_n,
-            question,
-            user_text_for_coach,
-            rag_chunks,
-            failover,
-            &prompts,
-        )
-        .await
+    let question = persistence
+        .load_mock_turns(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.turn_n == turn_n)
+        .map(|t| t.question)
         .unwrap_or_default();
+    let prompts = prompts_base_dir();
 
-        // The conductor wrote the turn row (with its own user/audio/suggested
-        // payload); we only update the coach columns here. Writing through
-        // `update_mock_turn_coach` avoids the previous race where this task
-        // wiped the suggested-answer text persisted by the conductor.
-        let turn_id = persistence
-            .load_mock_turns(session_id)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|t| t.turn_n == turn_n)
-            .map(|t| t.id);
+    let (coach_json, score) = match run_coach(
+        app.clone(),
+        session_id,
+        turn_n,
+        question,
+        transcript.clone(),
+        rag_chunks,
+        failover,
+        &prompts,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, turn_n, "coach LLM failed");
+            let (json, score) = coach_failure_payload(
+                "Coach analysis failed — check your Groq key or rate limits.",
+            );
+            emit_mock_coach_feedback(
+                &app,
+                MockCoachFeedbackPayload {
+                    turn_n,
+                    coach_json: json.clone(),
+                    score,
+                },
+            );
+            (json, score)
+        }
+    };
 
-        let Some(turn_id) = turn_id else {
-            warn!(turn_n, "coach finished but mock turn row not found");
-            return;
-        };
-
+    if let Some(turn_id) = persistence
+        .load_mock_turns(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.turn_n == turn_n)
+        .map(|t| t.id)
+    {
         if let Err(e) = persistence.update_mock_turn_coach(turn_id, &coach_json, score) {
             warn!(error = %e, "failed to persist mock turn coach feedback");
         }
-    });
+    }
 
     // Signal the conductor to advance to the next question.
     if let Some(handles) = state.mock_tasks.lock().await.as_ref() {

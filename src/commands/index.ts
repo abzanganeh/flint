@@ -627,7 +627,11 @@ export interface CoachFeedback {
   score: number;
 }
 
-export const startMock = (): Promise<void> => invoke<void>("start_mock");
+export const startMock = (guided = false): Promise<void> =>
+  invoke<void>("start_mock", { guided });
+
+export const askMockQuestion = (): Promise<void> =>
+  invoke<void>("ask_mock_question");
 
 export const startMockTurn = (): Promise<void> => invoke<void>("start_mock_turn");
 

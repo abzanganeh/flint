@@ -161,20 +161,211 @@ fn build_coach_prompt(
 
 /// Extract the JSON object from the LLM output (model may add preamble/suffix).
 fn parse_coach_json(raw: &str) -> (CoachFeedback, String) {
-    // Find the first '{' and last '}'.
-    if let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}')) {
-        let json_slice = &raw[start..=end];
-        if let Ok(feedback) = serde_json::from_str::<CoachFeedback>(json_slice) {
-            return (feedback, json_slice.to_owned());
+    let trimmed = strip_markdown_fence(raw.trim());
+
+    if let Some(slice) = extract_balanced_json(trimmed) {
+        if let Ok(feedback) = serde_json::from_str::<CoachFeedback>(&slice) {
+            return (feedback, slice);
+        }
+        if let Some(feedback) = salvage_coach_fields(&slice) {
+            let json = serde_json::to_string(&feedback).unwrap_or(slice.clone());
+            warn!("coach JSON required field salvage");
+            return (feedback, json);
         }
     }
-    // Fallback: return a default stub so the UI doesn't crash.
+
+    if let Some(feedback) = salvage_coach_fields(trimmed) {
+        let json = serde_json::to_string(&feedback).unwrap_or_default();
+        warn!("coach JSON unparseable — salvaged partial fields");
+        return (feedback, json);
+    }
+
+    coach_parse_failure("Coach feedback could not be parsed.")
+}
+
+/// Build a fallback payload and emit it when the coach LLM call fails entirely.
+pub fn coach_failure_payload(message: &str) -> (String, u8) {
+    let (_, json) = coach_parse_failure(message);
+    (json, 0)
+}
+
+fn coach_parse_failure(message: &str) -> (CoachFeedback, String) {
     let fallback = CoachFeedback {
-        context_gaps: vec!["Coach feedback could not be parsed.".to_string()],
+        context_gaps: vec![message.to_string()],
         ..Default::default()
     };
     let json = serde_json::to_string(&fallback).unwrap_or_default();
     (fallback, json)
+}
+
+fn strip_markdown_fence(raw: &str) -> &str {
+    let stripped = raw
+        .strip_prefix("```json")
+        .or_else(|| raw.strip_prefix("```"))
+        .unwrap_or(raw);
+    stripped.strip_suffix("```").unwrap_or(stripped).trim()
+}
+
+/// Return the first `{ … }` slice with string-aware brace matching.
+fn extract_balanced_json(raw: &str) -> Option<String> {
+    let start = raw.find('{')?;
+    let bytes = raw.as_bytes();
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for i in start..bytes.len() {
+        let b = bytes[i];
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(raw[start..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Best-effort field extraction when the model returns almost-valid JSON.
+fn salvage_coach_fields(raw: &str) -> Option<CoachFeedback> {
+    let score = extract_json_u8_field(raw, "score")?;
+    let mut feedback = CoachFeedback {
+        score,
+        ..Default::default()
+    };
+
+    if let Some(assessment) = extract_json_string_field(raw, "assessment") {
+        feedback.tone.assessment = assessment;
+    }
+    if let Some(suggestion) = extract_json_string_field(raw, "suggestion") {
+        feedback.tone.suggestion = suggestion;
+    }
+    if let Some(answer) = extract_json_string_field(raw, "corrected_answer") {
+        feedback.corrected_answer = answer;
+    }
+
+    feedback.context_gaps = extract_json_string_array(raw, "context_gaps");
+
+    Some(feedback)
+}
+
+fn extract_json_u8_field(raw: &str, key: &str) -> Option<u8> {
+    let needle = format!("\"{key}\"");
+    let pos = raw.find(&needle)?;
+    let mut rest = raw[pos + needle.len()..].trim_start();
+    if !rest.starts_with(':') {
+        return None;
+    }
+    rest = rest[1..].trim_start();
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse::<u8>().ok().map(|n| n.min(100))
+}
+
+fn extract_json_string_field(raw: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\"");
+    let pos = raw.find(&needle)?;
+    let mut rest = raw[pos + needle.len()..].trim_start();
+    if !rest.starts_with(':') {
+        return None;
+    }
+    rest = rest[1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+
+    let mut out = String::new();
+    let mut chars = rest.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            },
+            '"' => return Some(out),
+            other => out.push(other),
+        }
+    }
+    None
+}
+
+fn extract_json_string_array(raw: &str, key: &str) -> Vec<String> {
+    let needle = format!("\"{key}\"");
+    let Some(pos) = raw.find(&needle) else {
+        return vec![];
+    };
+    let mut rest = raw[pos + needle.len()..].trim_start();
+    if !rest.starts_with(':') {
+        return vec![];
+    }
+    rest = rest[1..].trim_start();
+    let Some(start) = rest.find('[') else {
+        return vec![];
+    };
+    let mut depth = 0u32;
+    let mut in_string = false;
+    let mut escape = false;
+    let bytes = rest.as_bytes();
+    let mut end_idx = None;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_string {
+            if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    end_idx = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(end) = end_idx else {
+        return vec![];
+    };
+    let slice = &rest[start..=end];
+    serde_json::from_str::<Vec<String>>(slice).unwrap_or_default()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -208,5 +399,20 @@ mod tests {
         let (fb, _) = parse_coach_json(raw);
         assert_eq!(fb.score, 0);
         assert!(!fb.context_gaps.is_empty());
+    }
+
+    #[test]
+    fn salvage_score_from_malformed_json() {
+        let raw = r#"{
+          "grammar_issues": [],
+          "tone": { "assessment": "good", "suggestion": "Be more specific" },
+          "context_gaps": ["missing metrics"],
+          "corrected_answer": "I built an agentic system in production.\",
+          "score": 72
+        }"#;
+        let (fb, _) = parse_coach_json(raw);
+        assert_eq!(fb.score, 72);
+        assert_eq!(fb.tone.assessment, "good");
+        assert!(!fb.corrected_answer.is_empty());
     }
 }

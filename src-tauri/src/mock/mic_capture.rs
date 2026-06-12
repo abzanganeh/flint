@@ -15,15 +15,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, StreamConfig};
+use cpal::traits::{HostTrait, StreamTrait};
 use tauri::{AppHandle, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::audio::capture::{AudioSource, FRAME_SAMPLES};
+use crate::audio::capture::{build_resampled_mono_stream, AudioSource, FRAME_SAMPLES};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunk, VadChunker};
 use crate::events::{emit_mock_user_transcribed, MockUserTranscribedPayload};
@@ -165,22 +164,12 @@ fn run_cpal_mic_thread(
         .default_input_device()
         .context("no default input device for mock mic")?;
 
-    let (config, _rate) = select_mic_config(&device).context("select mic config")?;
-
-    let tx = frame_tx;
-    let stream = device
-        .build_input_stream(
-            &config,
-            move |data: &[f32], _| {
-                // Chunk into FRAME_SAMPLES-sized slices.
-                for chunk in data.chunks(FRAME_SAMPLES) {
-                    let _ = tx.try_send(chunk.to_vec());
-                }
-            },
-            |err| warn!(error = %err, "mock mic stream error"),
-            None,
-        )
-        .context("build mock mic stream")?;
+    // Resample device-native rate → 48 kHz mono and drain exact 480-sample
+    // frames (same path as live audio capture). Raw cpal buffers are often
+    // not multiples of 480 and may be stereo — chunking them directly breaks
+    // RNNoise and the 48→16 kHz downsampler.
+    let stream =
+        build_resampled_mono_stream(&device, frame_tx).context("build mock mic stream")?;
     stream.play().context("start mock mic stream")?;
 
     let _ = ready_tx.send(Ok(()));
@@ -194,14 +183,6 @@ fn run_cpal_mic_thread(
     drop(stream);
     info!("mock mic stream stopped");
     Ok(())
-}
-
-fn select_mic_config(device: &Device) -> Result<(StreamConfig, u32)> {
-    let default_cfg = device
-        .default_input_config()
-        .context("get default input config")?;
-    let rate = default_cfg.sample_rate().0;
-    Ok((default_cfg.into(), rate))
 }
 
 // ── Async capture loop ────────────────────────────────────────────────────────
@@ -274,15 +255,22 @@ async fn capture_loop<R: Runtime>(
                     continue; // not recording — discard frames
                 }
 
-                // RNNoise expects exactly 480 f32 samples.
-                let mut proc = frame.clone();
-                if proc.len() == 480 {
-                    let _ = rnnoise.process_frame(&mut proc);
+                if frame.len() != FRAME_SAMPLES {
+                    continue;
+                }
+
+                let mut proc = frame;
+                if let Err(e) = rnnoise.process_frame(&mut proc) {
+                    warn!(error = %e, "mock mic RNNoise error");
+                    continue;
                 }
 
                 let downsampled = match downsampler.process(&proc) {
                     Ok(d) => d,
-                    Err(_) => continue,
+                    Err(e) => {
+                        warn!(error = %e, "mock mic downsampler error");
+                        continue;
+                    }
                 };
 
                 // Store raw 16kHz samples for the WAV writer.

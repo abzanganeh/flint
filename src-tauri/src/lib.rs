@@ -219,6 +219,7 @@ pub fn run() {
             commands::clear_provider_key,
             // Phase 8 — mock interview
             commands::start_mock,
+            commands::ask_mock_question,
             commands::start_mock_turn,
             commands::end_mock_turn,
             commands::skip_mock_turn,
