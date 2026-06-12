@@ -16,10 +16,13 @@ use crate::rag::embedder::Embedder;
 
 /// Retrieve the top `top_k` chunks relevant to `question`.
 ///
-/// Splits the budget as: ⌈top_k × 0.6⌉ from session RAG and ⌊top_k × 0.5⌋
-/// from the global KB, then merges and re-ranks the union to return exactly
-/// `top_k` best chunks.  When `global_kb` is `None` (embedder not ready,
-/// no matching packs), falls back to session-only retrieval.
+/// Queries two sources and merges the results:
+///   - Session RAG: up to `top_k` personalised chunks (resume, JD, prep notes).
+///   - Global KB: up to `top_k / 2` domain-knowledge chunks from the role packs.
+///
+/// The union is sorted by cosine similarity and truncated to `top_k`, so the
+/// best chunks from either source rise to the top.  When `global_kb` is `None`
+/// (embedder not ready, packs empty) only session RAG is returned.
 pub async fn query_mock_rag(
     session_id: Uuid,
     question: &str,
@@ -34,10 +37,9 @@ pub async fn query_mock_rag(
     };
 
     // Session RAG: user-specific context (resume, JD, prep notes).
-    // Give it a slightly larger share since it's more personalised.
-    let session_top_k = top_k.max(1);
+    // Full top_k budget — personalised content is most valuable.
     let mut session_chunks = session_store
-        .query(session_id, &query_vec, session_top_k)
+        .query(session_id, &query_vec, top_k.max(1))
         .await
         .unwrap_or_default();
 
