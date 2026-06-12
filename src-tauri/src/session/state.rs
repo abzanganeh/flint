@@ -293,6 +293,7 @@ const fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
             | (Rehearsing, Ready)
             | (Rehearsing, MockInterview) // user starts mock interview from rehearsal
             | (Rehearsing, Configuring) // user returns to edit pasted context
+            | (Ready, MockInterview) // optional mock practice after rehearsal gate (READY draft UI)
             | (MockInterview, Ready) // mock complete — move to live ready
             | (MockInterview, Rehearsing) // user returns to rehearsal mid-mock
             | (MockInterview, Configuring) // user restarts from session design
@@ -1158,6 +1159,20 @@ mod tests {
     }
 
     // ── Mock Interview transitions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_ready_to_mock_interview() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Rehearsing,
+            SessionState::Ready,
+        ]);
+        assert!(sm.transition(SessionState::MockInterview).is_ok());
+        assert_eq!(*sm.current(), SessionState::MockInterview);
+    }
 
     #[test]
     fn test_rehearsing_to_mock_interview() {

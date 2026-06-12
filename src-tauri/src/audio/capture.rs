@@ -648,7 +648,7 @@ fn find_system_device(_host: &cpal::Host) -> Result<Device> {
 ///
 /// For WASAPI loopback on Windows the device is an output device; we fall back
 /// to querying output configs when input configs are empty.
-fn select_stream_config(device: &Device) -> Result<(StreamConfig, u32)> {
+pub(crate) fn select_stream_config(device: &Device) -> Result<(StreamConfig, u32)> {
     let default = device
         .default_input_config()
         .or_else(|_| device.default_output_config())
@@ -740,6 +740,48 @@ fn build_input_stream(
     device
         .build_input_stream(config, data_cb, error_cb, None)
         .context("Failed to build cpal input stream")
+}
+
+/// Build a microphone input stream that resamples to 48 kHz mono and emits
+/// [`FRAME_SAMPLES`]-sized chunks. Used by mock-interview mic capture.
+pub(crate) fn build_resampled_mono_stream(
+    device: &Device,
+    tx: mpsc::Sender<Vec<f32>>,
+) -> Result<cpal::Stream> {
+    let (config, native_rate) = select_stream_config(device)?;
+    let state = Arc::new(Mutex::new(StreamState::new(native_rate)?));
+    let state_d = Arc::clone(&state);
+    let channels = config.channels as usize;
+
+    let data_cb = move |data: &[f32], _: &cpal::InputCallbackInfo| {
+        let mut st = match state_d.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        st.ingest(data, channels);
+
+        loop {
+            if st.ring.available() < FRAME_SAMPLES {
+                break;
+            }
+            let mut samples = Vec::with_capacity(FRAME_SAMPLES);
+            if !st.ring.drain_exact(&mut samples, FRAME_SAMPLES) {
+                break;
+            }
+            if tx.try_send(samples).is_err() {
+                debug!("mock mic frame dropped — channel full");
+            }
+        }
+    };
+
+    let error_cb = move |e: cpal::StreamError| {
+        error!(error = %e, "mock mic stream error");
+    };
+
+    device
+        .build_input_stream(&config, data_cb, error_cb, None)
+        .context("Failed to build mock mic input stream")
 }
 
 // ────────────────────────────────────────────────────────────────────────────

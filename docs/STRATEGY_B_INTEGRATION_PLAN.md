@@ -316,12 +316,15 @@ Popup states: not logged in → logged in on job page → not on job page
 
 ### Phase 2 Review Gate
 
-- [x] Login, Save JD, Open in Flint — code complete; manual device test pending
-- [x] `web-ext lint` clean — 0 errors; `background.scripts` removed (MV3 fix)
+- [x] Login, Save JD, Open in Flint — code complete
+- [x] Automated API gate (2026-06-11): register/login, `POST /api/job-descriptions`, redeem payload verified (`session_name`, `jd_id`, `jd_text`)
+- [x] Integration tests: 12/12 pass (`test_job_descriptions.py` + `test_extension_auth.py` with `DATABASE_URL`)
+- [x] Extension unit tests: 15/15 vitest pass
 - [x] ADR-002 committed
-- [x] Unit tests: 15 vitest pass; `test_extension_auth.py` moved to integration suite (skips without DB — correct)
+- [x] `flint-extension` merged to `main` (2026-06-11); Smart Resume Phase 2 backend already on `main`
+- [ ] `web-ext lint` — 1 Firefox-only error (`MANIFEST_FIELD_UNSUPPORTED` for nested `background/service_worker`; valid Chrome MV3)
 - [ ] Store listing submitted (manual — Chrome Web Store submission)
-- [ ] Manual end-to-end: load extension in Chrome, navigate to LinkedIn job, Save JD, Open in Flint → verify pre-fill
+- [ ] Manual end-to-end in Chrome: load unpacked `dist/`, LinkedIn job → Save JD → Open in Flint → verify Session Design pre-fill
 
 ---
 

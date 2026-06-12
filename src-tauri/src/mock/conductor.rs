@@ -30,6 +30,17 @@ use crate::session::persistence::{MockTurn, SessionPersistence};
 
 use super::tts;
 
+// ── Pace ──────────────────────────────────────────────────────────────────────
+
+/// Controls when the conductor speaks the next question.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockPace {
+    /// User clicks "Ask question" before each question is spoken.
+    Guided,
+    /// First question fires immediately; subsequent questions follow each turn.
+    Continuous,
+}
+
 // ── Channel message ───────────────────────────────────────────────────────────
 
 /// Sent from `commands.rs` → `Conductor` to advance the turn machine.
@@ -40,6 +51,8 @@ use super::tts;
 /// (transcript, audio path, and the suggested-answer text from its parallel
 /// LLM stream), which it persists via `update_mock_turn_user_answer`.
 pub enum ConductorCommand {
+    /// User is ready for the next question (guided mode only).
+    AskQuestion,
     /// User has finished answering (or pressed Skip).
     TurnComplete {
         user_text: String,
@@ -57,6 +70,7 @@ pub struct Conductor {
 
 impl Conductor {
     /// Start the conductor loop and return a handle.
+    #[allow(clippy::too_many_arguments)]
     pub fn start<R: Runtime>(
         app: AppHandle<R>,
         session_id: Uuid,
@@ -65,6 +79,7 @@ impl Conductor {
         persistence: Arc<SessionPersistence>,
         prompts_dir: PathBuf,
         rag_chunks: Vec<ScoredChunk>,
+        pace: MockPace,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConductorCommand>(8);
         tokio::spawn(conductor_loop(
@@ -75,6 +90,7 @@ impl Conductor {
             persistence,
             prompts_dir,
             rag_chunks,
+            pace,
             cmd_rx,
         ));
         Self { cmd_tx }
@@ -92,6 +108,7 @@ async fn conductor_loop<R: Runtime>(
     persistence: Arc<SessionPersistence>,
     prompts_dir: PathBuf,
     rag_chunks: Vec<ScoredChunk>,
+    pace: MockPace,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
     let questions: Vec<String> = digest.likely_questions.clone();
@@ -100,6 +117,10 @@ async fn conductor_loop<R: Runtime>(
 
     for (idx, question) in questions.iter().enumerate() {
         let turn_n = idx as u32 + 1;
+
+        if pace == MockPace::Guided && !wait_for_ask_question(&mut cmd_rx, session_id).await {
+            break;
+        }
 
         // Insert turn row into DB so it exists even before user answers.
         let turn = MockTurn {
@@ -173,6 +194,9 @@ async fn conductor_loop<R: Runtime>(
                 }
                 turns_completed += 1;
             }
+            Some(ConductorCommand::AskQuestion) => {
+                warn!(session_id = %session_id, "unexpected AskQuestion during turn");
+            }
             Some(ConductorCommand::Abort) | None => {
                 info!(session_id = %session_id, "mock interview aborted");
                 break;
@@ -192,6 +216,25 @@ async fn conductor_loop<R: Runtime>(
         turns_completed,
         "mock interview ended"
     );
+}
+
+/// Block until the frontend signals it is ready for the next question.
+async fn wait_for_ask_question(
+    cmd_rx: &mut mpsc::Receiver<ConductorCommand>,
+    session_id: Uuid,
+) -> bool {
+    loop {
+        match cmd_rx.recv().await {
+            Some(ConductorCommand::AskQuestion) => return true,
+            Some(ConductorCommand::Abort) | None => return false,
+            Some(ConductorCommand::TurnComplete { .. }) => {
+                warn!(
+                    session_id = %session_id,
+                    "TurnComplete received while waiting for AskQuestion — ignored"
+                );
+            }
+        }
+    }
 }
 
 // ── Suggested answer LLM ──────────────────────────────────────────────────────

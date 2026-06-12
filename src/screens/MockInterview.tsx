@@ -131,17 +131,22 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           }));
         }),
         onMockCoachFeedback((p) => {
-          try {
-            const fb = JSON.parse(p.coach_json) as CoachFeedback;
-            setTurn((t) => ({
-              ...t,
-              coachFeedback: fb,
-              coachLoading: false,
-              score: p.score,
-            }));
-          } catch {
-            setTurn((t) => ({ ...t, coachLoading: false }));
-          }
+          setTurn((t) => {
+            if (p.turn_n !== t.turnN) {
+              return t;
+            }
+            try {
+              const fb = JSON.parse(p.coach_json) as CoachFeedback;
+              return {
+                ...t,
+                coachFeedback: fb,
+                coachLoading: false,
+                score: p.score,
+              };
+            } catch {
+              return { ...t, coachLoading: false };
+            }
+          });
           setPhase(paceRef.current === "guided" ? "ready" : "reviewing");
         }),
         onMockEnded(() => {

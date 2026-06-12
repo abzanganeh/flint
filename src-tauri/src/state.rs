@@ -44,6 +44,8 @@ pub struct MockTaskHandles {
     pub mic_capture: MicCapture,
     /// Current turn number. Incremented by `start_mock_turn`.
     pub current_turn: u32,
+    /// When true, questions are gated on `ask_mock_question`.
+    pub guided: bool,
 }
 
 /// Handles for the running audio capture thread and background tasks.
