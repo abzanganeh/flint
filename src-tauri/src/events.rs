@@ -226,6 +226,8 @@ pub struct MockQuestionStartedPayload {
     pub question: String,
     pub turn_n: u32,
     pub total_questions: u32,
+    /// `"practice"` or `"study"` — controls suggested-answer visibility in the UI.
+    pub mode: String,
 }
 
 /// Emitted when the user's mic VAD chunk has been transcribed.

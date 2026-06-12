@@ -9,6 +9,7 @@ import {
   startMockTurn,
   stopMock,
   type CoachFeedback,
+  type MockStudyMode,
 } from "../commands";
 import {
   onMockCoachFeedback,
@@ -58,17 +59,23 @@ const emptyTurn = (): TurnState => ({
 const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInterviewProps) => {
   const [phase, setPhase] = useState<TurnPhase>("idle");
   const [pace, setPace] = useState<MockPace>("guided");
+  const [studyMode, setStudyMode] = useState<MockStudyMode>("practice");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [turn, setTurn] = useState<TurnState>(emptyTurn());
   const [recording, setRecording] = useState(false);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
+  const studyModeRef = useRef<MockStudyMode>(studyMode);
   const beginAnsweringRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     paceRef.current = pace;
   }, [pace]);
+
+  useEffect(() => {
+    studyModeRef.current = studyMode;
+  }, [studyMode]);
 
   const unlistenAll = useCallback(() => {
     unlisteners.current.forEach((fn) => fn());
@@ -103,12 +110,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     const setup = async () => {
       const unlisten = await Promise.all([
         onMockQuestionStarted((p) => {
+          setStudyMode(p.mode);
           setTurn(() => ({
             ...emptyTurn(),
             turnN: p.turn_n,
             totalQuestions: p.total_questions,
             question: p.question,
-            suggestedStreaming: true,
+            suggestedStreaming: p.mode === "study",
           }));
           setRecording(false);
           if (paceRef.current === "continuous") {
@@ -128,6 +136,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           setTurn((t) => ({
             ...t,
             suggestedText: t.suggestedText + p.token,
+            suggestedStreaming: studyModeRef.current === "study" && t.suggestedStreaming,
           }));
         }),
         onMockCoachFeedback((p) => {
@@ -176,7 +185,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     setError(null);
     setStarting(true);
     try {
-      await startMock(pace === "guided");
+      await startMock(pace === "guided", studyMode);
       setPhase(pace === "guided" ? "ready" : "waiting");
     } catch (e) {
       setError(String(e));
@@ -225,6 +234,11 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     }
     onAbort();
   };
+
+  const showSuggested =
+    studyMode === "study" ||
+    (turn.suggestedText.length > 0 &&
+      (turn.coachFeedback !== null || phase === "reviewing"));
 
   return (
     <div
@@ -324,10 +338,71 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             }}
           >
             <p style={{ margin: 0, fontSize: "14px", lineHeight: 1.6, color: "#cbd5e1" }}>
-              Choose how questions are delivered, then start the mock interview when you are
-              ready.
+              Choose how questions are delivered and whether you practice from memory or study
+              a script aloud.
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
+                SESSION STYLE
+              </span>
+              <label
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  border: studyMode === "practice" ? "1px solid #7c3aed" : "1px solid #374151",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="radio"
+                  name="mock-study-mode"
+                  checked={studyMode === "practice"}
+                  onChange={() => setStudyMode("practice")}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  <strong style={{ color: "#e2e8f0" }}>Practice (recommended)</strong>
+                  <br />
+                  <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    Answer in your own words first. Suggested answer and coach feedback appear
+                    after you finish.
+                  </span>
+                </span>
+              </label>
+              <label
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  border: studyMode === "study" ? "1px solid #7c3aed" : "1px solid #374151",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="radio"
+                  name="mock-study-mode"
+                  checked={studyMode === "study"}
+                  onChange={() => setStudyMode("study")}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  <strong style={{ color: "#e2e8f0" }}>Study</strong>
+                  <br />
+                  <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    Read the suggested script aloud. Coach scores your delivery, not content depth.
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
+                PACE
+              </span>
               <label
                 style={{
                   display: "flex",
@@ -429,11 +504,30 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </div>
         )}
 
-        {phase !== "idle" && (
+        {phase !== "idle" && showSuggested && (
           <SuggestedAnswerPanel
             text={turn.suggestedText}
             isStreaming={turn.suggestedStreaming}
           />
+        )}
+
+        {phase !== "idle" && studyMode === "practice" && !showSuggested && (
+          <div
+            style={{
+              background: "#0f1117",
+              border: "1px dashed #374151",
+              borderRadius: 8,
+              padding: "10px 14px",
+              color: "#64748b",
+              fontSize: "12px",
+            }}
+          >
+            {phase === "answering" || phase === "question"
+              ? "Answer in your own words — suggested answer unlocks after you finish."
+              : turn.coachLoading
+                ? "Analyzing your answer…"
+                : "Suggested answer appears after coach feedback."}
+          </div>
         )}
 
         {(phase === "answering" || phase === "reviewing") && (

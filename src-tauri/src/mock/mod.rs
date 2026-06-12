@@ -12,4 +12,5 @@ pub mod audio_writer;
 pub mod coach;
 pub mod conductor;
 pub mod mic_capture;
+pub mod rag;
 pub mod tts;

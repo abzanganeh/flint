@@ -6,7 +6,7 @@
 //!   QuestionAsked → UserAnswering → TurnComplete → (next turn | MockEnded)
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -22,15 +22,17 @@ use crate::events::{
     emit_mock_ended, emit_mock_question_started, emit_mock_suggested_token, MockEndedPayload,
     MockQuestionStartedPayload, MockSuggestedTokenPayload,
 };
-use crate::interfaces::vector::ScoredChunk;
+use crate::interfaces::vector::VectorInterface;
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 use crate::orchestrator::load_prompt;
+use crate::rag::embedder::Embedder;
 use crate::session::persistence::{MockTurn, SessionPersistence};
 
+use super::rag::{format_digest_context, query_mock_rag};
 use super::tts;
 
-// ── Pace ──────────────────────────────────────────────────────────────────────
+// ── Pace & mode ───────────────────────────────────────────────────────────────
 
 /// Controls when the conductor speaks the next question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,15 +43,33 @@ pub enum MockPace {
     Continuous,
 }
 
+/// Practice hides the suggested script until after the user answers.
+/// Study shows the script during the turn and coaches delivery, not content depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MockMode {
+    Practice,
+    Study,
+}
+
+impl MockMode {
+    pub fn parse(s: &str) -> Self {
+        match s.to_ascii_lowercase().as_str() {
+            "study" => Self::Study,
+            _ => Self::Practice,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Practice => "practice",
+            Self::Study => "study",
+        }
+    }
+}
+
 // ── Channel message ───────────────────────────────────────────────────────────
 
 /// Sent from `commands.rs` → `Conductor` to advance the turn machine.
-///
-/// Coach output is intentionally NOT carried here: the coach LLM runs as a
-/// background task spawned by `end_mock_turn` and writes its own columns via
-/// `update_mock_turn_coach`. The conductor only owns the user-facing fields
-/// (transcript, audio path, and the suggested-answer text from its parallel
-/// LLM stream), which it persists via `update_mock_turn_user_answer`.
 pub enum ConductorCommand {
     /// User is ready for the next question (guided mode only).
     AskQuestion,
@@ -78,8 +98,11 @@ impl Conductor {
         failover: Arc<FailoverManager>,
         persistence: Arc<SessionPersistence>,
         prompts_dir: PathBuf,
-        rag_chunks: Vec<ScoredChunk>,
+        embedder: Arc<Embedder>,
+        vector_store: Arc<dyn VectorInterface>,
+        suggested_buffer: Arc<RwLock<String>>,
         pace: MockPace,
+        mode: MockMode,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConductorCommand>(8);
         tokio::spawn(conductor_loop(
@@ -89,8 +112,11 @@ impl Conductor {
             failover,
             persistence,
             prompts_dir,
-            rag_chunks,
+            embedder,
+            vector_store,
+            suggested_buffer,
             pace,
+            mode,
             cmd_rx,
         ));
         Self { cmd_tx }
@@ -107,8 +133,11 @@ async fn conductor_loop<R: Runtime>(
     failover: Arc<FailoverManager>,
     persistence: Arc<SessionPersistence>,
     prompts_dir: PathBuf,
-    rag_chunks: Vec<ScoredChunk>,
+    embedder: Arc<Embedder>,
+    vector_store: Arc<dyn VectorInterface>,
+    suggested_buffer: Arc<RwLock<String>>,
     pace: MockPace,
+    mode: MockMode,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
     let questions: Vec<String> = digest.likely_questions.clone();
@@ -122,7 +151,13 @@ async fn conductor_loop<R: Runtime>(
             break;
         }
 
-        // Insert turn row into DB so it exists even before user answers.
+        if let Ok(mut buf) = suggested_buffer.write() {
+            buf.clear();
+        }
+
+        let rag_chunks =
+            query_mock_rag(session_id, question, &embedder, vector_store.as_ref(), 8).await;
+
         let turn = MockTurn {
             id: Uuid::new_v4(),
             session_id,
@@ -138,27 +173,26 @@ async fn conductor_loop<R: Runtime>(
             warn!(error = %e, "failed to persist mock turn row");
         }
 
-        // Announce question to frontend.
         emit_mock_question_started(
             &app,
             MockQuestionStartedPayload {
                 question: question.clone(),
                 turn_n,
                 total_questions: total,
+                mode: mode.as_str().to_string(),
             },
         );
-        info!(session_id = %session_id, turn_n, "mock question started");
+        info!(session_id = %session_id, turn_n, mode = mode.as_str(), "mock question started");
 
-        // Speak the question via platform TTS.
         tts::speak_best_effort(question).await;
 
-        // Fire suggested-answer LLM in parallel while user prepares to answer.
         let suggested_handle = {
             let app_clone = app.clone();
             let failover_clone = Arc::clone(&failover);
             let prompts_dir_clone = prompts_dir.clone();
             let rag_clone = rag_chunks.clone();
             let digest_clone = Arc::clone(&digest);
+            let buffer_clone = Arc::clone(&suggested_buffer);
             let q = question.clone();
             tokio::spawn(async move {
                 run_suggested_answer(
@@ -169,13 +203,14 @@ async fn conductor_loop<R: Runtime>(
                     &digest_clone,
                     &failover_clone,
                     &prompts_dir_clone,
+                    mode,
+                    buffer_clone,
                 )
                 .await
                 .unwrap_or_default()
             })
         };
 
-        // Wait for the command signalling turn completion.
         let cmd = cmd_rx.recv().await;
         let suggested_text = suggested_handle.await.unwrap_or_default();
 
@@ -218,7 +253,6 @@ async fn conductor_loop<R: Runtime>(
     );
 }
 
-/// Block until the frontend signals it is ready for the next question.
 async fn wait_for_ask_question(
     cmd_rx: &mut mpsc::Receiver<ConductorCommand>,
     session_id: Uuid,
@@ -239,14 +273,17 @@ async fn wait_for_ask_question(
 
 // ── Suggested answer LLM ──────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn run_suggested_answer<R: Runtime>(
     app: AppHandle<R>,
     session_id: Uuid,
     question: &str,
-    rag_chunks: &[ScoredChunk],
+    rag_chunks: &[crate::interfaces::vector::ScoredChunk],
     digest: &Digest,
     failover: &Arc<FailoverManager>,
     prompts_dir: &Path,
+    mode: MockMode,
+    suggested_buffer: Arc<RwLock<String>>,
 ) -> Result<String> {
     let prompt = build_suggested_prompt(
         question,
@@ -274,7 +311,13 @@ async fn run_suggested_answer<R: Runtime>(
         match timeout(Duration::from_secs(15), stream.next()).await {
             Ok(Some(Ok(token))) => {
                 full.push_str(&token);
-                emit_mock_suggested_token(&app, MockSuggestedTokenPayload { token });
+                if let Ok(mut buf) = suggested_buffer.write() {
+                    buf.push_str(&token);
+                }
+                // Practice mode: buffer only — reveal after the user finishes answering.
+                if mode == MockMode::Study {
+                    emit_mock_suggested_token(&app, MockSuggestedTokenPayload { token });
+                }
             }
             Ok(Some(Err(e))) => return Err(e).context("suggested token error"),
             Ok(None) => break,
@@ -290,7 +333,7 @@ async fn run_suggested_answer<R: Runtime>(
 
 fn build_suggested_prompt(
     question: &str,
-    rag_chunks: &[ScoredChunk],
+    rag_chunks: &[crate::interfaces::vector::ScoredChunk],
     digest: &Digest,
     provider: &str,
     prompts_dir: &Path,
@@ -307,8 +350,9 @@ fn build_suggested_prompt(
         .replace("{session_domain}", &digest.domain)
         .replace("{seniority}", &digest.seniority)
         .replace("{company}", &digest.company)
+        .replace("{digest_context}", &format_digest_context(digest))
         .replace("{rag_chunks}", &rag_text)
-        .replace("{last_n_turns}", "") // Phase 1: no turn history
+        .replace("{last_n_turns}", "")
         .replace("{question}", question);
     Ok(prompt)
 }
