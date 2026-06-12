@@ -100,7 +100,7 @@ impl GlobalKnowledgeBase {
         if pack_ids.is_empty() {
             return vec![];
         }
-        let per_pack = ((top_k + pack_ids.len() - 1) / pack_ids.len()).max(2);
+        let per_pack = top_k.div_ceil(pack_ids.len()).max(2);
         let mut all: Vec<ScoredChunk> = Vec::new();
 
         for &pack in pack_ids {
@@ -167,20 +167,41 @@ impl GlobalKnowledgeBase {
         }
 
         let raw_chunks = chunk_text(&combined, CHUNK_TOKENS, OVERLAP_TOKENS);
+        if raw_chunks.is_empty() {
+            warn!(pack = pack.dir_name(), "no chunks produced; skipping ingest");
+            return Ok(());
+        }
+
         let pack_uuid: Uuid = pack.uuid();
+
+        // Embed the entire pack in one batched ONNX inference call — much faster
+        // than calling embed_one() per chunk and avoids redundant model lock/unlock.
+        const EMBED_BATCH_SIZE: usize = 64;
         let mut chunks = Vec::with_capacity(raw_chunks.len());
 
-        for text in raw_chunks {
-            let embedding = embedder.embed_one(&text).unwrap_or_default();
-            chunks.push(Chunk {
-                id: Uuid::new_v4(),
-                text,
-                embedding,
-                session_id: pack_uuid,
-            });
+        for batch in raw_chunks.chunks(EMBED_BATCH_SIZE) {
+            let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
+            let embeddings = embedder.embed_batch(&refs).unwrap_or_default();
+
+            for (text, embedding) in batch.iter().zip(embeddings) {
+                if embedding.is_empty() {
+                    warn!(pack = pack.dir_name(), "empty embedding for chunk; skipping");
+                    continue;
+                }
+                chunks.push(Chunk {
+                    id: Uuid::new_v4(),
+                    text: text.clone(),
+                    embedding,
+                    session_id: pack_uuid,
+                });
+            }
         }
 
         let n = chunks.len();
+        if n == 0 {
+            warn!(pack = pack.dir_name(), "all chunks produced empty embeddings; skipping ingest");
+            return Ok(());
+        }
         self.store.ingest(pack_uuid, chunks).await?;
         info!(pack = pack.dir_name(), chunks = n, "knowledge pack embedded and stored");
         Ok(())

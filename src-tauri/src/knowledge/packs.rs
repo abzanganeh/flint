@@ -88,6 +88,9 @@ pub fn packs_for_role(domain: &str, role: &str) -> Vec<PackId> {
         .iter()
         .any(|kw| combined.contains(kw));
 
+    const GENERAL_SW_PACKS: &[PackId] =
+        &[PackId::SystemDesign, PackId::WebBackend, PackId::DesignPatterns];
+
     let mut packs = vec![PackId::Algorithms, PackId::Behavioral];
 
     if is_ml {
@@ -99,15 +102,15 @@ pub fn packs_for_role(domain: &str, role: &str) -> Vec<PackId> {
     }
 
     if is_backend {
-        packs.extend_from_slice(&[PackId::SystemDesign, PackId::WebBackend, PackId::DesignPatterns]);
+        packs.extend_from_slice(GENERAL_SW_PACKS);
     }
 
-    // General software engineer fallback — no keyword hit
+    // Unrecognised role → general software-engineering selection.
     if !is_ml && !is_frontend && !is_backend {
-        packs.extend_from_slice(&[PackId::SystemDesign, PackId::WebBackend, PackId::DesignPatterns]);
+        packs.extend_from_slice(GENERAL_SW_PACKS);
     }
 
-    // Dedup preserving insertion order
+    // Dedup preserving insertion order.
     let mut seen = HashSet::new();
     packs.retain(|p| seen.insert(p.uuid()));
     packs
