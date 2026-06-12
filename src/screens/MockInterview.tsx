@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
+  askMockQuestion,
   endMockTurn,
   skipMockTurn,
   startMock,
@@ -25,7 +26,10 @@ export interface MockInterviewProps {
   onAbort: () => void;
 }
 
-type TurnPhase = "waiting" | "question" | "answering" | "reviewing";
+type MockPace = "guided" | "continuous";
+
+/** idle = pick mode; ready = guided, waiting for Ask question; waiting = expecting question event */
+type TurnPhase = "idle" | "ready" | "waiting" | "question" | "answering" | "reviewing";
 
 interface TurnState {
   turnN: number;
@@ -52,18 +56,50 @@ const emptyTurn = (): TurnState => ({
 });
 
 const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInterviewProps) => {
-  const [phase, setPhase] = useState<TurnPhase>("waiting");
+  const [phase, setPhase] = useState<TurnPhase>("idle");
+  const [pace, setPace] = useState<MockPace>("guided");
+  const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [turn, setTurn] = useState<TurnState>(emptyTurn());
   const [recording, setRecording] = useState(false);
   const unlisteners = useRef<UnlistenFn[]>([]);
+  const paceRef = useRef<MockPace>(pace);
+  const beginAnsweringRef = useRef<(() => Promise<void>) | null>(null);
+
+  useEffect(() => {
+    paceRef.current = pace;
+  }, [pace]);
 
   const unlistenAll = useCallback(() => {
     unlisteners.current.forEach((fn) => fn());
     unlisteners.current = [];
   }, []);
 
+  const beginAnswering = useCallback(async () => {
+    setRecording(true);
+    setTurn((t) => ({ ...t, userTranscript: "", coachFeedback: null, coachLoading: false }));
+    setPhase("answering");
+    try {
+      await startMockTurn();
+    } catch (e) {
+      setError(String(e));
+    }
+  }, []);
+
   useEffect(() => {
+    beginAnsweringRef.current = beginAnswering;
+  }, [beginAnswering]);
+
+  useEffect(() => {
+    // Track whether the cleanup ran before the async setup resolved.
+    // In React StrictMode, effects mount → unmount → remount synchronously.
+    // Because setup() is async, the first-mount cleanup fires while the
+    // Promise.all is still pending, leaving unlisteners.current empty and the
+    // first set of listeners alive. The second mount then registers a second
+    // set, so every event fires twice. The cancelled flag ensures any listeners
+    // that resolve after cleanup are torn down immediately.
+    let cancelled = false;
+
     const setup = async () => {
       const unlisten = await Promise.all([
         onMockQuestionStarted((p) => {
@@ -74,8 +110,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             question: p.question,
             suggestedStreaming: true,
           }));
-          setPhase("question");
           setRecording(false);
+          if (paceRef.current === "continuous") {
+            setPhase("answering");
+            void beginAnsweringRef.current?.();
+          } else {
+            setPhase("question");
+          }
         }),
         onMockUserTranscribed((p) => {
           setTurn((t) => ({
@@ -101,47 +142,52 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           } catch {
             setTurn((t) => ({ ...t, coachLoading: false }));
           }
-          setPhase("reviewing");
+          setPhase(paceRef.current === "guided" ? "ready" : "reviewing");
         }),
         onMockEnded(() => {
-          // The conductor emits `mock_ended` once the question list is
-          // exhausted, but the state machine and mic resources are still on
-          // MOCK_INTERVIEW. Call `stopMock` to transition back to REHEARSING
-          // and shut the mic capture down before navigating away — otherwise
-          // any follow-up Rehearsal action errors out with an invalid
-          // transition.
           void stopMock()
-            .catch(() => {
-              // Best-effort: backend may already have torn down on abort.
-            })
+            .catch(() => undefined)
             .finally(() => {
               onComplete();
             });
         }),
       ]);
-      unlisteners.current = unlisten;
 
-      // Start the mock session.
-      try {
-        await startMock();
-        setPhase("waiting");
-      } catch (e) {
-        setError(String(e));
+      if (cancelled) {
+        unlisten.forEach((fn) => fn());
+        return;
       }
+      unlisteners.current = unlisten;
     };
 
     void setup();
-    return () => unlistenAll();
+    return () => {
+      cancelled = true;
+      unlistenAll();
+    };
   }, [unlistenAll, onComplete]);
 
-  const handleStartAnswering = async () => {
-    setRecording(true);
-    setTurn((t) => ({ ...t, userTranscript: "", coachFeedback: null, coachLoading: false }));
-    setPhase("answering");
+  const handleStartSession = async () => {
+    setError(null);
+    setStarting(true);
     try {
-      await startMockTurn();
+      await startMock(pace === "guided");
+      setPhase(pace === "guided" ? "ready" : "waiting");
     } catch (e) {
       setError(String(e));
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const handleAskQuestion = async () => {
+    setError(null);
+    setPhase("waiting");
+    try {
+      await askMockQuestion();
+    } catch (e) {
+      setError(String(e));
+      setPhase("ready");
     }
   };
 
@@ -159,7 +205,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     setRecording(false);
     try {
       await skipMockTurn();
-      setPhase("waiting");
+      setPhase(pace === "guided" ? "ready" : "waiting");
     } catch (e) {
       setError(String(e));
     }
@@ -250,9 +296,109 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
       )}
 
       {/* Main content */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: 12 }}>
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          padding: "12px 16px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+        }}
+      >
+        {phase === "idle" && (
+          <div
+            style={{
+              background: "#111827",
+              border: "1px solid #1e2028",
+              borderRadius: 8,
+              padding: "16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
+            }}
+          >
+            <p style={{ margin: 0, fontSize: "14px", lineHeight: 1.6, color: "#cbd5e1" }}>
+              Choose how questions are delivered, then start the mock interview when you are
+              ready.
+            </p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <label
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  border: pace === "guided" ? "1px solid #7c3aed" : "1px solid #374151",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="radio"
+                  name="mock-pace"
+                  checked={pace === "guided"}
+                  onChange={() => setPace("guided")}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  <strong style={{ color: "#e2e8f0" }}>Step by step</strong>
+                  <br />
+                  <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    You click &quot;Ask question&quot; for each prompt, then answer at your pace.
+                  </span>
+                </span>
+              </label>
+              <label
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  border: pace === "continuous" ? "1px solid #7c3aed" : "1px solid #374151",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="radio"
+                  name="mock-pace"
+                  checked={pace === "continuous"}
+                  onChange={() => setPace("continuous")}
+                  style={{ marginTop: 3 }}
+                />
+                <span>
+                  <strong style={{ color: "#e2e8f0" }}>Continuous (live-like)</strong>
+                  <br />
+                  <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    Questions play in sequence; the mic opens automatically after each one.
+                  </span>
+                </span>
+              </label>
+            </div>
+            <button
+              type="button"
+              data-testid="mock-start-session-button"
+              onClick={() => void handleStartSession()}
+              disabled={starting}
+              style={{
+                ...primaryBtn,
+                alignSelf: "flex-start",
+                opacity: starting ? 0.6 : 1,
+              }}
+            >
+              {starting ? "Starting…" : "Start Mock Interview"}
+            </button>
+          </div>
+        )}
 
-        {/* Question bubble */}
+        {phase === "ready" && pace === "guided" && !turn.question && (
+          <p style={{ margin: 0, fontSize: "13px", color: "#94a3b8" }}>
+            Session ready. Click <strong>Ask question</strong> when you want the interviewer to
+            speak the next prompt.
+          </p>
+        )}
+
         {turn.question && (
           <div
             style={{
@@ -263,20 +409,28 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
               padding: "12px 14px",
             }}
           >
-            <div style={{ color: "#7c3aed", fontSize: "10px", fontWeight: 600, marginBottom: 6, letterSpacing: "0.06em" }}>
+            <div
+              style={{
+                color: "#7c3aed",
+                fontSize: "10px",
+                fontWeight: 600,
+                marginBottom: 6,
+                letterSpacing: "0.06em",
+              }}
+            >
               INTERVIEWER
             </div>
             <p style={{ margin: 0, fontSize: "14px", lineHeight: 1.6 }}>{turn.question}</p>
           </div>
         )}
 
-        {/* Suggested answer (streams while AI question is displayed) */}
-        <SuggestedAnswerPanel
-          text={turn.suggestedText}
-          isStreaming={turn.suggestedStreaming}
-        />
+        {phase !== "idle" && (
+          <SuggestedAnswerPanel
+            text={turn.suggestedText}
+            isStreaming={turn.suggestedStreaming}
+          />
+        )}
 
-        {/* User transcript */}
         {(phase === "answering" || phase === "reviewing") && (
           <div
             style={{
@@ -294,28 +448,59 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                 marginBottom: 6,
               }}
             >
-              <span style={{ color: "#22c55e", fontSize: "10px", fontWeight: 600, letterSpacing: "0.06em" }}>
+              <span
+                style={{
+                  color: "#22c55e",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  letterSpacing: "0.06em",
+                }}
+              >
                 YOUR ANSWER
               </span>
               {recording && (
-                <span style={{ color: "#ef4444", fontSize: "10px", display: "flex", alignItems: "center", gap: 4 }}>
-                  <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#ef4444", display: "inline-block" }} />
+                <span
+                  style={{
+                    color: "#ef4444",
+                    fontSize: "10px",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: "50%",
+                      background: "#ef4444",
+                      display: "inline-block",
+                    }}
+                  />
                   REC
                 </span>
               )}
             </div>
-            <p style={{ margin: 0, fontSize: "13px", lineHeight: 1.6, color: turn.userTranscript ? "#e2e8f0" : "#475569" }}>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "13px",
+                lineHeight: 1.6,
+                color: turn.userTranscript ? "#e2e8f0" : "#475569",
+              }}
+            >
               {turn.userTranscript || (recording ? "Listening…" : "No answer recorded.")}
             </p>
           </div>
         )}
 
-        {/* Coach panel */}
-        <CoachPanel
-          feedback={turn.coachFeedback}
-          isLoading={turn.coachLoading}
-          score={turn.score}
-        />
+        {phase !== "idle" && (
+          <CoachPanel
+            feedback={turn.coachFeedback}
+            isLoading={turn.coachLoading}
+            score={turn.score}
+          />
+        )}
       </div>
 
       {/* Footer controls */}
@@ -329,24 +514,29 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           flexShrink: 0,
         }}
       >
+        {phase === "ready" && pace === "guided" && (
+          <button
+            type="button"
+            data-testid="mock-ask-question-button"
+            onClick={() => void handleAskQuestion()}
+            style={primaryBtn}
+          >
+            Ask question
+          </button>
+        )}
+
         {phase === "waiting" && (
           <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center" }}>
-            Waiting for question…
+            {pace === "continuous" ? "Next question incoming…" : "Preparing question…"}
           </span>
         )}
 
         {phase === "question" && (
           <>
-            <button
-              onClick={() => void handleSkip()}
-              style={ghostBtn}
-            >
+            <button onClick={() => void handleSkip()} style={ghostBtn}>
               Skip
             </button>
-            <button
-              onClick={() => void handleStartAnswering()}
-              style={primaryBtn}
-            >
+            <button onClick={() => void beginAnswering()} style={primaryBtn}>
               Start Answering
             </button>
           </>
@@ -361,12 +551,10 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </button>
         )}
 
-        {phase === "reviewing" && (
-          <>
-            <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center", flex: 1 }}>
-              Next question incoming…
-            </span>
-          </>
+        {phase === "reviewing" && pace === "continuous" && (
+          <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center", flex: 1 }}>
+            Analyzing your answer… next question when ready.
+          </span>
         )}
       </div>
     </div>
