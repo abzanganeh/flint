@@ -30,9 +30,10 @@ use crate::llm::ollama::OllamaProvider;
 use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
+use crate::knowledge::packs_for_role;
 use crate::mock::coach::{coach_failure_payload, run_coach};
-use crate::mock::rag::query_mock_rag;
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
+use crate::mock::rag::query_mock_rag;
 use crate::mock::mic_capture::MicCapture;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
@@ -2736,6 +2737,8 @@ pub async fn start_mock(
     .await
     .map_err(|e| e.to_string())?;
 
+    let role_packs = packs_for_role(&digest.domain, &digest.role);
+
     let conductor = Conductor::start(
         app.clone(),
         session_id,
@@ -2745,6 +2748,8 @@ pub async fn start_mock(
         prompts_base_dir(),
         embedder,
         Arc::clone(&state.vector_store),
+        Arc::clone(&state.global_kb),
+        role_packs.clone(),
         Arc::clone(&suggested_buffer),
         pace,
         mock_mode,
@@ -2766,6 +2771,7 @@ pub async fn start_mock(
         guided,
         mode: mock_mode,
         suggested_text: suggested_buffer,
+        role_packs,
     });
 
     info!(
@@ -2837,7 +2843,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .await
             .map_err(|e| e.to_string())?;
 
-    let (mock_mode, suggested_answer) = {
+    let (mock_mode, suggested_answer, role_packs) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
         let suggested = handles
@@ -2845,7 +2851,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        (handles.mode, suggested)
+        (handles.mode, suggested, handles.role_packs.clone())
     };
 
     let session_id = state
@@ -2870,6 +2876,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             &question,
             &embedder,
             state.vector_store.as_ref(),
+            Some((state.global_kb.as_ref(), &role_packs)),
             8,
         )
         .await

@@ -1,0 +1,86 @@
+FRONTEND ENGINEERING — INTERVIEW REFERENCE
+
+== REACT CORE CONCEPTS ==
+
+Reconciliation: React maintains a virtual DOM and diffs it against the previous version (diffing algorithm). Key differences trigger minimal real DOM updates. Keys in lists are critical — they tell React which element corresponds to which. Key should be a stable, unique ID, never an array index (index-as-key causes bugs when the list reorders).
+
+Component lifecycle with hooks:
+- useState: local component state. State updates are batched in React 18. Functional updates (setState(prev => prev + 1)) avoid stale closures.
+- useEffect: side effects (data fetching, subscriptions, timers). Dependency array controls when it runs: [] = once on mount, [dep] = when dep changes, no array = every render. Return cleanup function for subscriptions/intervals.
+- useRef: mutable value that doesn't trigger re-render. Used for: DOM access, previous value storage, stable callback identity (store function in ref to avoid re-registering event listeners).
+- useCallback: memoize function reference. Only worthwhile if the function is a dependency of a child component's useEffect or passed as a prop to a React.memo component. Otherwise, creates overhead without benefit.
+- useMemo: memoize expensive computation. Returns cached value if dependencies unchanged. Use for: filtering/sorting large lists, complex derived state.
+- useContext: read context value. Context changes cause all consumers to re-render — keep context granular.
+
+Controlled vs Uncontrolled: controlled = React state owns the value (value + onChange). Uncontrolled = DOM owns the value (ref to read it). Controlled is the React way and makes validation and derived state easy.
+
+== RENDERING PATTERNS ==
+
+CSR (Client-Side Rendering): JavaScript fetches data and renders in browser. Good DX, fast navigation after initial load. Downsides: slow initial load (blank page until JS executes), poor SEO (crawlers may not execute JS).
+
+SSR (Server-Side Rendering): server executes React, sends pre-rendered HTML. Fast First Contentful Paint (FCP), SEO-friendly. Downsides: server load, Time to Interactive (TTI) can still be slow (hydration).
+
+SSG (Static Site Generation): HTML generated at build time. Fastest possible load, trivially cacheable at CDN. Good for: marketing pages, blogs, docs. Downsides: must rebuild for content updates.
+
+ISR (Incremental Static Regeneration, Next.js): SSG with revalidation on a timer or on demand. Best of SSG (fast) and SSR (up-to-date content) for content that changes occasionally.
+
+Streaming SSR (React 18 + Next.js 13 App Router): server sends HTML in chunks as they're ready. Suspense boundaries allow placeholder while data loads. Reduces Time to First Byte (TTFB) for data-heavy pages.
+
+Hydration: reattachment of React event listeners to server-rendered HTML. Hydration mismatch (server renders different HTML than client expects) causes errors — avoid side effects that differ between environments.
+
+== STATE MANAGEMENT ==
+
+Local state (useState): for UI state that doesn't need to be shared. Keep it close to where it's used.
+
+Prop drilling becomes painful when passing state through 3+ levels of components. Solutions: Context (for low-frequency updates), state management libraries (high-frequency updates, complex logic), or component composition (lift rendering up).
+
+React Context: good for theme, locale, auth user, UI mode. Not designed for high-frequency updates (all consumers re-render). Split contexts by concern; use useMemo on the value object to prevent unnecessary re-renders.
+
+Zustand: minimal, flexible global state. Store is external to React. Selectors subscribe to specific slices — components only re-render when their slice changes. Better performance than Context for complex state.
+
+Redux: predictable state container. Unidirectional data flow: action → reducer → store → component. Redux Toolkit reduces boilerplate (createSlice, createAsyncThunk). Good for: complex client state, time-travel debugging, large teams.
+
+React Query / SWR: server state management. Handles caching, background refetching, stale-while-revalidate, pagination, and optimistic updates. Server state is different from client state — separate concerns.
+
+== PERFORMANCE OPTIMIZATION ==
+
+React.memo: wrap component to skip re-render if props unchanged (shallow comparison). Only useful if re-renders are actually expensive or if component is deep in a frequently-updating tree.
+
+Code splitting: dynamic import() breaks bundle into chunks loaded on demand. React.lazy + Suspense for component-level splitting. Route-based splitting is the most impactful (load code for each page on navigation).
+
+Virtualization: render only visible items in a long list (react-window, react-virtualized). A list of 10,000 items in the DOM causes serious performance issues; virtualization renders only ~20–50 visible items.
+
+Image optimization: next/image handles: lazy loading, responsive sizes (srcset), format conversion (WebP), size hints. Always specify width/height or aspect-ratio to prevent layout shift (CLS).
+
+Core Web Vitals:
+- LCP (Largest Contentful Paint): when the largest image or text block renders. Target < 2.5s. Optimize: preload critical resources, reduce server response time, use CDN.
+- FID (First Input Delay) / INP (Interaction to Next Paint): responsiveness to user input. Target: FID < 100ms, INP < 200ms. Reduce long tasks on the main thread.
+- CLS (Cumulative Layout Shift): unexpected visual movement. Target < 0.1. Fix: reserve space for images/ads, avoid inserting content above existing content.
+
+Bundle analysis: webpack-bundle-analyzer or next-bundle-analyzer to identify large dependencies. Tree shaking removes unused code (requires ES modules). Import specific utilities instead of entire libraries (lodash/merge not lodash).
+
+== BROWSER AND JAVASCRIPT ==
+
+Event loop: call stack + task queue + microtask queue. Execution order: synchronous code → microtasks (Promises, queueMicrotask) → macrotasks (setTimeout, setInterval, I/O). Promises are always async — even a resolved Promise runs in microtask queue.
+
+Event delegation: attach one listener to a parent instead of listeners on many children. Leverages event bubbling. More performant for dynamic lists. The event target tells you which child was clicked.
+
+Web Workers: run JavaScript in background thread without blocking the main thread. Use for: CPU-heavy operations (image processing, large data transforms, WASM compute). Cannot directly access DOM — communicate via postMessage.
+
+Service Workers: scriptable network proxy. Enables PWAs, offline support (cache API), background sync, push notifications. Intercepts fetch requests. Must be served over HTTPS.
+
+Debounce vs throttle: debounce delays execution until N ms after the last call (good for search-as-you-type, resize handler). Throttle ensures execution at most once per N ms (good for scroll handler, rate limiting API calls).
+
+Memory leaks in React: common causes — event listeners added in useEffect without cleanup, setTimeout/setInterval without clearTimeout/clearInterval, observable subscriptions not unsubscribed, stale closures holding references, WeakMap vs Map distinction (Map holds strong references).
+
+== ACCESSIBILITY ==
+
+Semantic HTML: use header, nav, main, section, article, aside, footer, button (not div with onClick), a with href. Screen readers navigate by landmark roles. Native elements have built-in accessibility behaviors.
+
+ARIA: augments HTML semantics. Use aria-label for unlabeled controls, aria-describedby to link a control to its description, aria-expanded for disclosure widgets, role="dialog" + aria-modal for modals. Rule: don't use ARIA to override native semantics when the right HTML element exists.
+
+Keyboard navigation: all interactive elements must be reachable and operable via keyboard. Focus management: on modal open, move focus to modal; on close, restore focus to trigger. Trap focus inside modal with tab cycling.
+
+Focus indicators: visible focus ring is legally required (WCAG 2.1 AA). :focus-visible shows ring only for keyboard navigation, not mouse clicks. Never remove outline: none without providing a visible alternative.
+
+Color contrast: WCAG AA requires 4.5:1 ratio for normal text, 3:1 for large text (18px+ or 14px+ bold). Use automated tools (axe, Lighthouse) to catch violations early.

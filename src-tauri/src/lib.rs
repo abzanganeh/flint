@@ -1,6 +1,7 @@
 pub mod audio;
 mod auth_session;
 mod commands;
+pub mod knowledge;
 pub mod confidence;
 pub mod cost;
 pub mod deep_link;
@@ -117,6 +118,7 @@ pub fn run() {
             health::hardware::assess_hardware();
             let app_state = state::AppState::new(app)?;
             app_state.spawn_embedder_init();
+            app_state.spawn_knowledge_init();
             let restored = tauri::async_runtime::block_on(app_state.restore_auth_from_keychain());
             if restored {
                 emit_session_state_change(

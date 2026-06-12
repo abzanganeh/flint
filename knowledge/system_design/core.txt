@@ -1,0 +1,112 @@
+SYSTEM DESIGN — INTERVIEW REFERENCE
+
+== FRAMEWORK FOR ANSWERING SYSTEM DESIGN QUESTIONS ==
+
+1. Clarify requirements (5 min): functional (what does the system do?), non-functional (scale, latency, consistency, availability). Explicitly state assumptions.
+2. Estimate scale: DAU, QPS, storage. Back-of-envelope math is expected. 100M DAU × 10 actions/day = 1000 QPS average, ~5000 QPS peak.
+3. High-level design: draw major components (clients, API servers, databases, caches, queues). No implementation details yet.
+4. Deep-dive: interviewers will guide you. Be ready to go deep on any component.
+5. Identify bottlenecks and trade-offs: every design choice has costs.
+
+== SCALABILITY FUNDAMENTALS ==
+
+Vertical scaling (scale up): add CPU/RAM. Simple but has hard limits and is a single point of failure.
+Horizontal scaling (scale out): add more machines. Requires stateless services or external shared state.
+
+Stateless services: each request carries all needed context (or context lives in shared store). Enables any node to handle any request — essential for horizontal scaling.
+
+Load balancing: distribute traffic across servers. L4 (transport layer, TCP) vs L7 (application layer, HTTP, can route by URL/cookie). Algorithms: round-robin, weighted, least connections, IP hash (sticky sessions), consistent hashing.
+
+== CACHING ==
+
+Cache sits between the client and the data source to reduce latency and database load. Effective when data is read far more than it is written, and when the same data is accessed repeatedly (temporal locality).
+
+Write policies:
+- Write-through: write to cache and DB simultaneously. Strong consistency, more write latency.
+- Write-behind (write-back): write to cache, async flush to DB. Lower write latency, risk of data loss.
+- Write-around: write directly to DB, bypass cache. Cache populated on read. Good for write-heavy, infrequently re-read data.
+
+Eviction policies: LRU (least recently used), LFU (least frequently used), TTL-based expiry.
+
+Cache invalidation is hard. Strategies: TTL expiry, event-driven invalidation (DB trigger), cache-aside (application manages), read-through (cache fetches from DB on miss).
+
+Redis vs Memcached: Redis supports richer data structures (lists, sets, sorted sets, pub/sub), persistence, replication, and clustering. Memcached is simpler and slightly faster for pure key-value. Redis is the default choice in modern systems.
+
+CDN (Content Delivery Network): geographically distributed cache for static assets and sometimes API responses. Push CDN (proactively push content) vs Pull CDN (origin serves on first request, CDN caches). Reduces latency for global users, reduces origin load.
+
+== DATABASES ==
+
+Relational (RDBMS): ACID guarantees (Atomicity, Consistency, Isolation, Durability). Strong schema enforcement. SQL joins for complex queries. Good for: financial transactions, user profiles, anything needing strong consistency and complex relationships.
+
+Indexes speed up reads at the cost of write overhead and storage. B-tree index: balanced tree, good for range queries and equality. Hash index: O(1) equality, no range support. Composite index: column order matters, follows leftmost-prefix rule. Covering index: index contains all queried columns, avoids table access.
+
+Normalization (reduce redundancy) vs Denormalization (duplicate data for read performance). In high-read systems, denormalization is common.
+
+Replication: primary-replica (master-slave). Primary handles writes; replicas serve reads. Async replication = eventual consistency, possible stale reads. Sync replication = stronger consistency, higher write latency. Multi-primary for geographic distribution.
+
+Sharding (horizontal partitioning): split data across multiple DB instances. Shard key choice is critical — avoid hotspots. Range sharding: easy range queries, potential hotspots. Hash sharding: even distribution, range queries harder. Directory-based: flexible but adds lookup overhead.
+
+NoSQL:
+- Document (MongoDB): flexible schema, good for hierarchical data, fast reads by document ID.
+- Key-value (Redis, DynamoDB): fastest reads/writes, limited query patterns.
+- Wide-column (Cassandra, HBase): designed for time-series, append-heavy workloads, excellent write throughput.
+- Graph (Neo4j): social networks, recommendation engines, fraud detection with complex relationships.
+
+CAP Theorem: a distributed system can guarantee at most two of: Consistency, Availability, Partition tolerance. Since network partitions happen in practice, real systems choose CP (sacrifice availability during partition, e.g., Zookeeper, HBase) or AP (sacrifice consistency during partition, e.g., Cassandra, DynamoDB with eventual consistency).
+
+== MESSAGE QUEUES AND EVENT STREAMING ==
+
+Queues decouple producers from consumers, enable async processing, and act as buffers for traffic spikes. Key concepts: producer, consumer, broker, topic/queue, acknowledgement.
+
+Kafka: distributed, high-throughput event streaming. Topics are divided into partitions; partitions are ordered but Kafka only guarantees order within a partition. Consumer groups allow parallel processing. Retention-based (not deleted on consume). Suited for event sourcing, audit logs, stream processing, high-volume pipelines.
+
+RabbitMQ: traditional message broker. Message deleted after acknowledgement. Supports complex routing (exchanges: direct, topic, fanout, headers). Better for task queues, RPC patterns, lower throughput than Kafka.
+
+Delivery guarantees:
+- At-most-once: fire and forget. Simple, possible message loss.
+- At-least-once: retry until acked. Possible duplicates — consumers must be idempotent.
+- Exactly-once: hardest to achieve. Kafka supports it with transactions + idempotent producers.
+
+Backpressure: when consumers are slower than producers, queue fills up. Solutions: increase consumers, implement circuit breaker, rate-limit producers, use DLQ (dead-letter queue) for failed messages.
+
+== API DESIGN ==
+
+REST: resources identified by URLs, stateless, standard HTTP verbs (GET, POST, PUT, PATCH, DELETE). Idempotent: GET, PUT, DELETE are idempotent; POST is not. Use proper status codes: 200 OK, 201 Created, 400 Bad Request, 401 Unauthorized, 403 Forbidden, 404 Not Found, 409 Conflict, 429 Too Many Requests, 500 Internal Server Error.
+
+Rate limiting: protect services from abuse and overload. Algorithms: token bucket (bursts allowed), leaky bucket (smooth output), fixed window, sliding window log, sliding window counter. Store counters in Redis; key on user ID or API key.
+
+Idempotency keys: client-generated UUID on POST requests. Server stores key and result; if request replayed with same key, return cached result. Critical for payment and order APIs.
+
+Versioning: URL versioning (/v1/users), header versioning, query parameter. Maintain backward compatibility; deprecate slowly.
+
+Pagination: offset/limit (simple, poor performance on large offsets), cursor-based (efficient, consistent with concurrent writes), keyset (sort by stable unique column).
+
+GraphQL: client specifies exact fields needed, reduces over-fetching and under-fetching. Trade-off: complex queries can overload server, harder to cache (all POST), N+1 problem requires DataLoader.
+
+gRPC: binary protocol (Protocol Buffers), lower latency than JSON/REST, strongly typed contracts, streaming support. Use for internal service-to-service communication.
+
+== MICROSERVICES AND DISTRIBUTED SYSTEMS ==
+
+Service discovery: services register with a registry (Consul, Eureka, Kubernetes Service) and discover each other dynamically. Avoids hardcoded IPs, supports auto-scaling.
+
+Circuit breaker pattern: after N failures, circuit opens and fails fast for a cooldown period before probing again. Prevents cascade failures. Hystrix (Java), resilience4j, or built into service mesh (Istio).
+
+API Gateway: single entry point for clients. Handles auth, rate limiting, routing, request transformation, logging. Examples: Kong, AWS API Gateway, NGINX.
+
+Saga pattern: manage distributed transactions without 2PC. Choreography (each service listens to events and reacts) vs Orchestration (central coordinator calls services in sequence). Sagas are eventually consistent; compensating transactions for rollback.
+
+Consistent hashing: minimize reshuffling when nodes are added/removed. Place nodes and keys on a ring; key goes to the next clockwise node. Virtual nodes improve balance. Used in Cassandra, DynamoDB, Memcached.
+
+Data consistency patterns: strong consistency (synchronous replication, higher latency), eventual consistency (async, higher availability), causal consistency (operations that are causally related appear in order), read-your-writes (user sees their own writes).
+
+== COMMON SYSTEM DESIGN EXAMPLES ==
+
+URL Shortener: hash URL to short code, store in key-value store (Redis + DB). Handle collisions. Read-heavy — cache hot short codes. Counter-based ID (base62 encode) vs hash-based. Analytics with append-only event log.
+
+Twitter/Feed: write fanout (push tweet to all follower feeds on write, good for read performance) vs read fanout (pull from followed users on read, good for celebrities with millions of followers). Hybrid: push for normal users, pull for celebrities. Timeline stored in Redis sorted set.
+
+Instagram: photos stored in object storage (S3), metadata in DB, CDN for delivery. Separate read/write paths. Newsfeed similar to Twitter. Notification service with push (APNs, FCM) for mobile.
+
+Rate Limiter: Redis INCR with expiry (fixed window), Redis sorted set for sliding window log. Distribute across data centers with slight inconsistency tolerated.
+
+Chat System (WhatsApp): WebSocket for real-time bidirectional connection. Message storage with Cassandra (write-heavy, append-only, ordered by timestamp). Presence service with heartbeats. Push notifications when offline.

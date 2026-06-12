@@ -1,0 +1,143 @@
+ALGORITHMS AND DATA STRUCTURES — INTERVIEW REFERENCE
+
+== ARRAYS AND HASHING ==
+
+Hash maps give O(1) average lookup, insert, and delete. Use them for: counting frequencies, checking membership, caching computed results, and grouping elements by a key. The key interview insight is that a second pass (or second pointer) that would be O(n²) with nested loops becomes O(n) with a hash map.
+
+Common patterns:
+- Two-sum: store complement in map on first pass, check on second (or same) pass.
+- Sliding window with character counts: use a fixed-size array of 26 for lowercase letters instead of a hash map — faster and cleaner.
+- Anagram detection: sort both strings and compare, or count characters with a difference array.
+- Longest consecutive sequence: insert all elements into a set, then start counting only from elements that have no predecessor (n-1 not in set). O(n) overall.
+
+Collision handling: chaining (linked list per bucket) vs open addressing (linear/quadratic probing). Load factor > 0.75 triggers rehashing. Python dict uses open addressing with random probing; Java HashMap uses chaining.
+
+== TWO POINTERS ==
+
+When an array is sorted (or can be sorted), two pointers moving toward each other from opposite ends reduce O(n²) comparisons to O(n). Key invariant: you can prove that moving one pointer eliminates all valid answers from its current position.
+
+- Two-sum on sorted array: if sum < target, advance left; if sum > target, retreat right.
+- Container with most water: always move the shorter side inward — moving the taller side can only decrease or maintain the area.
+- Remove duplicates in-place: slow pointer marks the write position; fast pointer scans ahead.
+- Trapping rain water: track max-left and max-right; water at position i = min(max_left, max_right) - height[i].
+
+Same-direction two pointers (fast/slow): detect cycle in linked list (Floyd's), find middle node, remove k-th from end.
+
+== SLIDING WINDOW ==
+
+Fixed-size window: maintain sum/product/count and subtract outgoing element, add incoming. O(n) total.
+
+Variable-size window: expand right until condition violated, shrink left until condition restored. The key is that the window always grows by 1 from the right, and shrinks from the left only when necessary — this gives amortized O(n).
+
+Classic problems:
+- Minimum window substring: track required character counts; when all satisfied, try to shrink by advancing left.
+- Longest substring without repeating characters: use set or last-seen index map; move left to max(left, last_seen[char] + 1).
+- Permutation in string: maintain frequency difference array; when all zeros, window is a permutation.
+
+== BINARY SEARCH ==
+
+Any time the search space is ordered and you can eliminate half on each step, binary search applies. Runs O(log n). The critical question is: what does your mid comparison tell you?
+
+Template (finds leftmost valid position):
+  lo, hi = 0, n
+  while lo < hi:
+      mid = (lo + hi) // 2
+      if condition(mid): hi = mid
+      else: lo = mid + 1
+  return lo
+
+- Find first/last occurrence: binary search twice, adjusting the bias (hi=mid vs lo=mid+1).
+- Rotated sorted array: one half is always sorted — check which half, then decide where to recurse.
+- Binary search on answer: "minimum maximum" or "k-th smallest" problems. Define a feasibility function, binary search on the answer space.
+- sqrt(x): binary search on [0, x], check mid*mid <= x.
+
+== TREES ==
+
+BST invariant: left subtree < node < right subtree. In-order traversal yields sorted sequence. Useful for range queries, predecessor/successor search. Balanced BSTs (AVL, Red-Black) guarantee O(log n) operations.
+
+DFS traversals:
+- Pre-order (root, left, right): serialize/deserialize tree, copy tree.
+- In-order (left, root, right): sorted sequence in BST, kth-smallest.
+- Post-order (left, right, root): delete tree, compute subtree sizes, evaluate expression tree.
+
+BFS (level-order): find shortest path in unweighted tree, level averages, right-side view.
+
+Common patterns:
+- Validate BST: pass min/max bounds down recursively.
+- LCA (lowest common ancestor): recurse; if both nodes found in different subtrees, current node is LCA.
+- Diameter: max path through any node = left_depth + right_depth. Update global max during post-order DFS.
+- Path sum: pass remaining target down; leaf node base case.
+- Serialize/deserialize: pre-order with null markers; reconstruct by consuming from queue.
+
+Trie: prefix tree where each node has children map. O(m) insert/search for string of length m. Use for: autocomplete, word search, prefix matching.
+
+== GRAPHS ==
+
+Represent as adjacency list (sparse graphs) or matrix (dense, direct edge queries). Most interview graphs are sparse.
+
+BFS: queue-based, level-by-level expansion. Finds shortest path (unweighted). Time O(V + E).
+DFS: stack/recursion, depth-first. Finds connected components, cycles, topological order. Time O(V + E).
+
+Key algorithms:
+- Shortest path (unweighted): BFS.
+- Shortest path (weighted, non-negative): Dijkstra with min-heap. O((V + E) log V).
+- Shortest path (negative weights): Bellman-Ford. O(VE).
+- Topological sort (DAG): DFS post-order reverse, or Kahn's algorithm (in-degree reduction with queue).
+- Cycle detection: in undirected graph, DFS with parent tracking; in directed graph, three-color DFS (white/grey/black) or topological sort (cycle if not all nodes visited).
+- Strongly connected components: Kosaraju's (two DFS passes) or Tarjan's (single DFS with low-link values).
+
+Union-Find (disjoint set): supports union and find in near-O(1) with path compression + union by rank. Used for dynamic connectivity, minimum spanning tree (Kruskal's), cycle detection.
+
+== DYNAMIC PROGRAMMING ==
+
+DP trades space for time by caching overlapping subproblem results. Two approaches:
+- Top-down (memoization): recursive with cache. Easy to write, natural structure.
+- Bottom-up (tabulation): iterative, often more space-efficient.
+
+Classic patterns:
+- 1D DP (Fibonacci, climbing stairs, house robber): dp[i] depends on dp[i-1] and dp[i-2]. Space optimizable to O(1).
+- Knapsack (0/1): dp[i][w] = max(dp[i-1][w], value[i] + dp[i-1][w-weight[i]]). Use 1D rolling array.
+- LCS (Longest Common Subsequence): dp[i][j] = dp[i-1][j-1]+1 if chars match, else max(dp[i-1][j], dp[i][j-1]).
+- Coin change: dp[amount] = min over all coins c: dp[amount - c] + 1. Init with infinity.
+- Palindromic substrings: expand around center (O(n²) time, O(1) space) or Manacher's O(n).
+- Interval DP: merge intervals, dp[i][j] depends on all splits k where i ≤ k < j.
+- Grid DP: paths in grid, dp[i][j] = dp[i-1][j] + dp[i][j-1].
+
+Tip: identify the state (what changes between subproblems), the transition (how states relate), and the base cases.
+
+== SORTING ==
+
+Quicksort: average O(n log n), worst O(n²). In-place, cache-friendly. Use randomised pivot to avoid degenerate inputs. Partition step: pivot to correct position, all smaller on left, all larger on right.
+
+Mergesort: guaranteed O(n log n). Stable. Requires O(n) extra space. Preferred for linked lists (no random access needed) and external sorting.
+
+Heapsort: O(n log n) worst case, in-place, but not stable and poor cache performance.
+
+Counting/Radix/Bucket sort: O(n + k) when domain is bounded. Use when elements are integers in a known range.
+
+In interviews, always mention that Python's sort (Timsort) is O(n log n) worst-case and stable; it's a hybrid mergesort/insertion sort that exploits existing runs.
+
+When to use which: small arrays → insertion sort; need stability → mergesort; need in-place + average fast → quicksort; need guaranteed O(n log n) in-place → heapsort.
+
+== HEAPS / PRIORITY QUEUES ==
+
+Min-heap: parent ≤ children. Extract-min in O(log n), insert in O(log n), peek in O(1). Build heap from array in O(n).
+
+Classic applications:
+- K-th largest: maintain min-heap of size k; if new element > heap min, push and pop.
+- Merge k sorted lists: push (value, list_index, element_index) for each head; poll min, advance that list.
+- Median of data stream: maintain max-heap of lower half and min-heap of upper half; balance sizes.
+- Task scheduling: use heap to always process minimum-cost or earliest-deadline task.
+- Dijkstra: priority queue keyed on tentative distances.
+
+Python: heapq module, min-heap by default. For max-heap, negate values. Push (priority, item) tuples.
+
+== INTERVIEW STRATEGY ==
+
+Before coding: clarify input/output, ask about edge cases (empty, single element, duplicates, negatives), and state your brute-force approach and its complexity.
+
+Complexity analysis: always state both time and space. Consider input-size constants: for string problems, the alphabet size often matters. For graph problems, V vs E.
+
+Optimization signal words: "optimal", "minimum", "maximum", "shortest", "k-th" → think about heaps, binary search on answer, or DP. "All combinations/subsets" → backtracking. "Unique paths/ways to reach" → DP.
+
+Common gotchas: integer overflow (use long/int64), off-by-one in binary search, mutating input in-place when not allowed, not handling cycles in graphs, and forgetting to handle the empty-input case.
