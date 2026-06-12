@@ -1,0 +1,89 @@
+BEHAVIORAL INTERVIEW — REFERENCE
+
+== THE STAR FRAMEWORK ==
+
+Situation: set the context concisely. One or two sentences maximum. The interviewer needs background, not a history lesson.
+Task: what was your specific responsibility? Distinguish your role from the team's.
+Action: the bulk of your answer (60–70%). What did YOU do? Use "I", not "we". Be specific about decisions made, alternatives considered, and why you chose your approach. Show technical depth and judgment.
+Result: quantify outcomes. Impact on users, revenue, reliability, team velocity. If exact numbers are unavailable, use directional language: "reduced latency by roughly half" or "eliminated a category of production incidents."
+
+Practice rule: write 5–8 stories from your experience that can flex to multiple questions. A single rich story ("I rebuilt our ML inference pipeline") can answer questions about: technical challenges, conflict, influence, failure, leadership, and innovation.
+
+== AMAZON LEADERSHIP PRINCIPLES (widely used) ==
+
+Customer Obsession: start with customer needs and work backward. In answers: show you talked to users, analyzed their pain, and made decisions that sacrificed short-term engineering elegance for customer value.
+
+Ownership: act like an owner even outside your scope. Show you raised a problem you discovered but didn't have to fix, or that you improved a shared system without being asked.
+
+Invent and Simplify: seek out ways to remove complexity. Show you challenged an existing process, removed unnecessary steps, or automated something manual.
+
+Are Right, A Lot: make good decisions with incomplete information. Show your judgment process, how you weigh options, and that you seek diverse perspectives before committing.
+
+Learn and Be Curious: proactively develop skills and explore outside your domain. Show examples of self-directed learning that had business impact.
+
+Hire and Develop the Best: raise the bar. Show how you mentored, gave constructive feedback, or recruited someone strong.
+
+Insist on the Highest Standards: relentlessly high standards. Show you pushed back on a design or code that wasn't good enough, and what you did about it.
+
+Bias for Action: speed matters. Show you made a reversible decision quickly rather than waiting for perfect information.
+
+Frugality: accomplish more with less. Show you solved a problem with existing resources or rejected an over-engineered solution.
+
+Earn Trust: honest, humble, transparent. Show you admitted a mistake, delivered bad news, or disagreed respectfully.
+
+Dive Deep: data-driven, detail-oriented. Show a time you went deeper than your role required and found the root cause, not just the symptom.
+
+Have Backbone; Disagree and Commit: voice dissent respectfully, then commit once a decision is made. Show a time you pushed back, were overruled, and still executed with full effort — or changed the outcome.
+
+Deliver Results: focus on key inputs and outcomes. Show you prioritized ruthlessly under pressure.
+
+== COMMON QUESTION TYPES AND HOW TO FRAME ANSWERS ==
+
+Tell me about a time you dealt with conflict:
+- Frame: professional disagreement on technical direction. You disagreed, you explained your reasoning clearly (ideally with data), you listened, you reached a decision together. Avoid: interpersonal drama, blaming others.
+- Good ending: either you were persuaded and learned something, or you persuaded them and the outcome validated the choice.
+
+Tell me about a failure:
+- Frame: a real failure (not a humble-brag). Show self-awareness. Explain what went wrong, your role in it, what you learned, and what you changed afterward.
+- Avoid: "I work too hard" or blaming others. Show genuine reflection.
+
+Tell me about a time you influenced without authority:
+- Frame: you needed something from a team or person who didn't report to you. Show how you built the case, found mutual benefit, brought data, used empathy, or escalated appropriately.
+- Show: understanding their priorities, not just your own.
+
+Tell me about your most complex technical challenge:
+- Lead with the business impact and the scale. Then explain the technical problem clearly (at the right level for your interviewer). Explain your decision-making process: what options did you consider, what trade-offs drove your choice?
+- Use STAR. Quantify the result.
+
+Tell me about a time you had to make a decision with incomplete data:
+- Show: you gathered what was available, defined the decision criteria, made a reversible decision, set up feedback loops to validate, and adapted based on results.
+
+Tell me about a time you mentored or developed someone:
+- Specific person, specific skill or situation. What did you observe? What feedback did you give? How did you adapt your approach to them? What was the outcome?
+
+== COMMON MISTAKES TO AVOID ==
+
+Saying "we" instead of "I": interviewers can't assess your contribution. Use "I" for your actions and "we" when describing the team context.
+
+Vague impact: "improved performance" → "reduced P99 latency from 800ms to 120ms for our checkout API." Always push yourself to add a number, even an approximate one.
+
+Skipping the stakes: tell the interviewer why this mattered. What would have happened if you hadn't acted?
+
+Choosing a trivial example: pick stories where the stakes, complexity, or learning were real. If your best failure story is a small typo, find a bigger story.
+
+Going too long: behavioral questions should take 2–4 minutes. Practice out loud with a timer.
+
+Not adapting to the role level: senior/staff roles require stories about systems, teams, and cross-functional impact. IC4/junior roles can focus on individual technical contributions.
+
+== PREPARING YOUR STORY BANK ==
+
+Organize 6–10 stories by theme. Suggested coverage:
+- Technical complexity and decision-making (2 stories)
+- Influencing others or driving cross-team alignment (2 stories)
+- Failure and learning (1–2 stories)
+- Leadership or mentoring (1 story)
+- Customer or user impact (1 story)
+- Handling ambiguity or changing requirements (1 story)
+- Moving fast under pressure (1 story)
+
+For each story, write down: the situation in 2 sentences, your specific actions (3–4 bullet points), and 1–2 quantified outcomes. Practice delivering each in under 3 minutes.

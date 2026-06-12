@@ -1,0 +1,71 @@
+MACHINE LEARNING AND AI PLATFORM — INTERVIEW REFERENCE
+
+== RAG (RETRIEVAL-AUGMENTED GENERATION) ==
+
+RAG grounds LLM outputs in external, up-to-date, or proprietary knowledge without fine-tuning the model. Core pipeline: chunk documents → embed chunks → store vectors → at query time, embed query → retrieve top-k → inject retrieved context into LLM prompt.
+
+Chunking strategies: fixed-size (overlap to preserve context across boundaries), semantic (split on sentences/paragraphs), recursive (try large chunks first, split if too big). Chunk size trade-off: large chunks carry more context but use more prompt tokens and blur similarity signals; small chunks are more precise but may lose context. Typical: 200–500 token chunks with 20–50% overlap.
+
+Embedding models: sentence-transformers (SBERT), OpenAI text-embedding-ada-002, bge-small/large, E5. Domain matters — a general model may underperform a fine-tuned domain-specific one. Dimensionality vs. quality trade-off. Normalize embeddings to unit norm for cosine similarity via dot product.
+
+Vector stores: FAISS (in-memory, high performance), Pinecone (managed, production), Weaviate (schema-aware, hybrid search), Qdrant (Rust-based, fast), sqlite-vec (lightweight, embedded). Index types: HNSW (approximate, fast build + query), IVF (inverted file, fast query for large scale), brute-force (exact but O(n)).
+
+Retrieval quality improvements: MMR (Maximal Marginal Relevance) for diversity, reranking with a cross-encoder (ColBERT, Cohere Rerank) for precision, query expansion (HyDE — generate hypothetical answer, embed that), sparse+dense hybrid search (BM25 + embeddings, e.g., Elasticsearch dense_vector + BM25).
+
+Evaluation: RAGAS metrics — answer relevancy, faithfulness (does the answer follow from the context?), context precision, context recall. Human evaluation is still gold standard. A/B test retrieval strategy changes on real traffic with user feedback signals (thumbs up/down).
+
+RAG failure modes: retrieved context is irrelevant (embedding quality), context is truncated (chunk too small), LLM ignores retrieved context (prompt not structured to force grounding), hallucination on questions with no relevant context (need an "I don't know" fallback).
+
+== LLM FUNDAMENTALS FOR ENGINEERS ==
+
+Transformer architecture: self-attention computes pairwise relationships between all tokens in the sequence. Multi-head attention allows the model to attend to different aspects simultaneously. Positional encoding adds sequence order information (sinusoidal or rotary). Feed-forward layers apply per-position transformations. Layer normalization stabilizes training.
+
+Tokens vs words: subword tokenization (BPE, SentencePiece). Average English word ≈ 1.3 tokens. Cost scales with context window × token rate. Context window: GPT-4 128K, Claude 200K, Gemini 1M. Longer contexts are harder to reason over despite window size.
+
+Temperature: 0 = deterministic greedy, 1 = standard sampling. Values < 1 sharpen distribution (more focused), values > 1 flatten (more creative/random). Top-p (nucleus sampling): sample from smallest set whose cumulative probability ≥ p. Top-k: limit to k most likely tokens. In production, temperature 0 or 0.1 for factual tasks; 0.7–1.0 for creative.
+
+Prompt engineering: system prompt sets persona and constraints; user prompt is the request. Chain-of-thought (CoT) prompting: "think step by step" improves reasoning on complex tasks. Few-shot prompting: provide examples in the prompt to guide format/style. Role prompting: "You are an expert X" sets the framing.
+
+Hallucination: the model generates plausible-sounding but incorrect information. Mitigations: grounding (RAG), retrieval citation requirements ("only use information from the provided context"), structured outputs (JSON schema enforcement), verification passes (LLM-as-judge), uncertainty quantification.
+
+Context poisoning and prompt injection: malicious content in retrieved documents that overrides the system prompt. Defense: separate system instructions from retrieved content clearly, use XML/delimiters, validate outputs.
+
+== FINE-TUNING VS PROMPTING VS RAG ==
+
+Prompting: no training cost, fast iteration, general model knowledge, limited context. Best for: short custom instructions, formatting constraints, task framing.
+
+RAG: adds external knowledge at inference time. No training cost. Knowledge is up-to-date and controllable. Best for: long-tail factual questions, private/enterprise data, reducing hallucination. Latency cost from retrieval.
+
+Fine-tuning: train the model on domain-specific data. Improves format adherence, tone, and domain vocabulary. Does not reliably add new factual knowledge — models forget. Use for: writing style, output format (JSON), domain jargon absorption. Requires labeled data and compute budget.
+
+RLHF/RLAIF: align model outputs with human preferences using reward modeling and PPO or DPO. Used to make base models more helpful, harmless, and honest (HHH). Not typically used at the application layer.
+
+== MLOPS AND MODEL SERVING ==
+
+Model registry: versioned store of trained models with metadata (training data, metrics, lineage). Tools: MLflow, DVC, Weights & Biases, SageMaker Model Registry. Enables reproducibility and rollback.
+
+Feature store: central repository for ML features. Offline store (batch, historical) + online store (low-latency serving). Prevents training-serving skew. Tools: Feast, Hopsworks, Tecton.
+
+CI/CD for ML: trigger retraining on data drift or schedule. Evaluate on held-out set before promoting. Shadow deployment (new model runs in parallel, logs outputs, not served to users) before A/B test.
+
+Model serving: REST (simple, higher latency), gRPC (lower latency, binary), batch inference (offline, high throughput), streaming inference (real-time, LLM token streaming). Horizontal scaling: multiple model replicas behind load balancer. Autoscaling based on queue depth or request rate.
+
+Latency optimization: quantization (FP32 → FP16/INT8, reduces memory bandwidth and compute with small quality loss), distillation (train smaller model to mimic larger), pruning (remove low-importance weights), batching (process multiple requests together on GPU), caching (cache embeddings or even LLM outputs for repeated queries), speculative decoding (draft small model, verify with large).
+
+Data drift: distribution of production inputs diverges from training distribution. Monitor with KL divergence, PSI (Population Stability Index), or statistical tests. Triggers for retraining. Concept drift: the underlying relationship between inputs and targets changes (e.g., user behavior shifts).
+
+== EVALUATION METHODOLOGY ==
+
+Offline metrics: measure on held-out test set. Precision, recall, F1, AUC-ROC for classification. BLEU, ROUGE, BERTScore for generation. NDCG, MRR for ranking. Offline metrics don't always correlate with online business metrics.
+
+Online metrics: A/B test with statistical significance. Conversion rate, click-through rate, user retention, revenue per user. Run for enough time to detect weekly seasonality. Guard-rail metrics: ensure you don't improve the primary metric by degrading a secondary one.
+
+LLM-as-judge: use a strong LLM (GPT-4) to evaluate outputs of weaker models. Prompt it with criteria (relevance, correctness, helpfulness, safety). Auto-evaluates at scale. Biases: length preference, position bias, self-preference. Calibrate against human labels.
+
+Evaluation gates: automated checks that must pass before promoting a model. Examples: hallucination rate < 2%, toxicity score < 0.01, latency P99 < 500ms, accuracy ≥ baseline. Fail → block promotion, alert the team.
+
+== INTERVIEW FRAMING FOR ML SYSTEM DESIGN ==
+
+Frame ML system design with: data collection and quality, feature engineering, model selection and training, serving infrastructure, monitoring and feedback loops. Always address: how do you know when the model degrades? What triggers retraining? How do you handle cold start?
+
+Show awareness of the full ML lifecycle: data → features → train → evaluate → serve → monitor → retrain. Each stage has specific tools and failure modes. Interviewers want to see that you think in systems, not just model architectures.

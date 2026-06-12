@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::deep_link;
 use tokio::task::JoinHandle;
 
+use crate::knowledge::{knowledge_base_dir, GlobalKnowledgeBase, PackId};
 use crate::mock::conductor::{Conductor, MockMode};
 use crate::mock::mic_capture::MicCapture;
 
@@ -50,6 +51,8 @@ pub struct MockTaskHandles {
     pub mode: MockMode,
     /// Latest suggested-answer text for the active turn (shared with conductor).
     pub suggested_text: Arc<std::sync::RwLock<String>>,
+    /// Knowledge packs relevant for this session's role/domain.
+    pub role_packs: Vec<PackId>,
 }
 
 /// Handles for the running audio capture thread and background tasks.
@@ -129,6 +132,11 @@ pub struct AppState {
     /// Mock session handles. `Some` only while a mock interview is active.
     pub mock_tasks: Mutex<Option<MockTaskHandles>>,
 
+    /// Static interview knowledge base — domain packs embedded once at first
+    /// launch into a dedicated `flint_knowledge.db`.  Queried alongside
+    /// session RAG during mock interviews.
+    pub global_kb: Arc<GlobalKnowledgeBase>,
+
     /// Phase 7.4 — process-wide cumulative token / cost accounting. Read by
     /// the orchestrator pre-dispatch to enforce the configured cap; mutated
     /// post-turn to advance the totals and fire warning / suspension events.
@@ -194,6 +202,25 @@ impl AppState {
             .context("Failed to open vector store DB")?,
         );
 
+        // ── Embedder slot (shared between AppState and GlobalKnowledgeBase) ───
+        let embedder_slot = Arc::new(StdRwLock::new(None::<Arc<Embedder>>));
+
+        // ── Global knowledge base (separate DB, pack-UUID keyed) ─────────────
+        let kb_db_path = data_dir.join("flint_knowledge.db");
+        let kb_store: Arc<dyn VectorInterface> = Arc::new(
+            SqliteVecStore::new(
+                kb_db_path
+                    .to_str()
+                    .context("Non-UTF-8 knowledge store path")?,
+            )
+            .context("Failed to open knowledge store DB")?,
+        );
+        let global_kb = Arc::new(GlobalKnowledgeBase::new(
+            kb_store,
+            Arc::clone(&embedder_slot),
+            knowledge_base_dir(),
+        ));
+
         // ── State machine wired to persistence ───────────────────────────────
         let persister = Arc::clone(&persistence) as Arc<dyn crate::session::state::StatePersister>;
         let state_machine = Arc::new(Mutex::new(SessionStateMachine::with_persister(persister)));
@@ -207,7 +234,7 @@ impl AppState {
             session_digest: Arc::new(RwLock::new(None)),
             prewarm_cache: Arc::new(Mutex::new(PreWarmCache::new())),
             persistence,
-            embedder: Arc::new(StdRwLock::new(None)),
+            embedder: embedder_slot,
             vector_store,
             llm: Arc::new(StubLLMProvider),
             live_tasks: Mutex::new(None),
@@ -216,6 +243,7 @@ impl AppState {
             rehearsal_turn: Mutex::new(0),
             rehearsal_turn_cancel: Mutex::new(None),
             mock_tasks: Mutex::new(None),
+            global_kb,
             cost_tracker: Arc::new(CostTracker::new()),
             feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
             embedder_cache_dir,
@@ -275,6 +303,14 @@ impl AppState {
                 }
             })
             .expect("spawn embedder-init thread");
+    }
+
+    /// Trigger background loading of all knowledge packs.
+    ///
+    /// Must be called after `spawn_embedder_init` — the loader waits internally
+    /// for the embedder slot to become populated before embedding begins.
+    pub fn spawn_knowledge_init(&self) {
+        self.global_kb.spawn_background_load();
     }
 
     // ── Auth helpers ─────────────────────────────────────────────────────────

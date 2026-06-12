@@ -23,6 +23,7 @@ use crate::events::{
     MockQuestionStartedPayload, MockSuggestedTokenPayload,
 };
 use crate::interfaces::vector::VectorInterface;
+use crate::knowledge::{GlobalKnowledgeBase, PackId};
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 use crate::orchestrator::load_prompt;
@@ -100,6 +101,8 @@ impl Conductor {
         prompts_dir: PathBuf,
         embedder: Arc<Embedder>,
         vector_store: Arc<dyn VectorInterface>,
+        global_kb: Arc<GlobalKnowledgeBase>,
+        role_packs: Vec<PackId>,
         suggested_buffer: Arc<RwLock<String>>,
         pace: MockPace,
         mode: MockMode,
@@ -114,6 +117,8 @@ impl Conductor {
             prompts_dir,
             embedder,
             vector_store,
+            global_kb,
+            role_packs,
             suggested_buffer,
             pace,
             mode,
@@ -135,6 +140,8 @@ async fn conductor_loop<R: Runtime>(
     prompts_dir: PathBuf,
     embedder: Arc<Embedder>,
     vector_store: Arc<dyn VectorInterface>,
+    global_kb: Arc<GlobalKnowledgeBase>,
+    role_packs: Vec<PackId>,
     suggested_buffer: Arc<RwLock<String>>,
     pace: MockPace,
     mode: MockMode,
@@ -155,8 +162,15 @@ async fn conductor_loop<R: Runtime>(
             buf.clear();
         }
 
-        let rag_chunks =
-            query_mock_rag(session_id, question, &embedder, vector_store.as_ref(), 8).await;
+        let rag_chunks = query_mock_rag(
+            session_id,
+            question,
+            &embedder,
+            vector_store.as_ref(),
+            Some((global_kb.as_ref(), &role_packs)),
+            8,
+        )
+        .await;
 
         let turn = MockTurn {
             id: Uuid::new_v4(),

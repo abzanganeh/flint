@@ -1,0 +1,59 @@
+DESIGN PATTERNS AND PRINCIPLES — INTERVIEW REFERENCE
+
+== SOLID PRINCIPLES ==
+
+Single Responsibility (SRP): a class/module should have one reason to change — one job. Violation: a UserService that also sends emails and writes audit logs. Fix: split into UserService, EmailService, AuditService. In interviews, SRP violations are the most common code smell — point them out proactively.
+
+Open/Closed (OCP): open for extension, closed for modification. Add new behavior by adding new code, not editing existing code. Achieved via interfaces, abstract classes, and strategy pattern. Example: instead of if/else chains on type, define a common interface and add new implementations.
+
+Liskov Substitution (LSP): subclasses must be substitutable for their base classes without breaking program correctness. Classic violation: Square extends Rectangle but overrides setWidth/setHeight, breaking the Rectangle invariant. LSP is violated when a subclass weakens preconditions or strengthens postconditions.
+
+Interface Segregation (ISP): clients should not be forced to depend on methods they don't use. Fat interfaces lead to empty implementations. Split large interfaces into smaller, focused ones. Example: instead of one Printer interface with print/scan/fax, create separate interfaces.
+
+Dependency Inversion (DIP): high-level modules should depend on abstractions, not concrete implementations. Enables testability (inject mock dependencies) and flexibility (swap implementations). Constructor injection is the most explicit form. Frameworks like Spring, Guice, .NET DI implement this.
+
+== CREATIONAL PATTERNS ==
+
+Singleton: ensure exactly one instance, provide global access. Implementation: private constructor, static getInstance() with lazy initialization, thread safety via double-checked locking or eager initialization. Drawbacks: global state, hard to test, hidden dependencies. Prefer dependency injection over singleton where possible. Legitimate use: logging, config, connection pools.
+
+Factory Method: define an interface for creating objects; let subclasses decide which class to instantiate. Decouples object creation from usage. Use when you don't know the exact type at compile time, or when subclasses should control what gets created. Example: a LoggerFactory that creates FileLogger or ConsoleLogger based on config.
+
+Abstract Factory: family of related objects without specifying concrete classes. Example: UI factory that creates Button + TextField for either Windows or Mac OS. Switch the factory to change all UI elements at once. Use when system must be independent of how its products are created.
+
+Builder: separate complex object construction from representation. Step-by-step construction with a fluent API. Use when a class has many optional parameters (telescoping constructor problem). Java StringBuilder, Lombok @Builder, test data builders. The director controls the build sequence; the builder handles the details.
+
+Prototype: clone existing objects. Useful when object creation is expensive (e.g., DB lookup) and the new object is similar to an existing one. Implement Cloneable or a custom copy() method. Deep vs shallow copy distinction is critical — nested mutable objects need deep copying.
+
+== STRUCTURAL PATTERNS ==
+
+Adapter: convert an interface into another that clients expect. Wraps an incompatible class. Class adapter (inheritance) vs Object adapter (composition — preferred). Use when integrating with a legacy or third-party library. Example: wrap a legacy payment gateway's API to match your internal PaymentProcessor interface.
+
+Decorator: add behavior to objects dynamically, without subclassing. Wraps objects in a chain of decorators, each adding functionality. Java I/O streams (BufferedInputStream wraps FileInputStream). Prefer composition over inheritance — decorators follow Open/Closed. Use when you need to add responsibilities to individual objects without affecting others.
+
+Facade: provide a simplified interface to a complex subsystem. Clients interact with the facade; the subsystem remains unchanged. Reduces client-subsystem coupling. Example: a CompilerFacade that orchestrates lexer, parser, analyzer, and code generator. Use to define entry points to each subsystem layer.
+
+Proxy: provide a surrogate that controls access to another object. Types: Virtual proxy (lazy loading, expensive object created on demand), Protection proxy (access control), Remote proxy (local representative for remote object), Caching proxy (cache expensive results). Spring's @Transactional and Spring Data repositories use JDK dynamic proxies or CGLIB proxies.
+
+Composite: treat individual objects and compositions uniformly. Tree structure where leaves and branches implement the same interface. Use for: file system (files and folders), UI component hierarchy, expression trees. Key: Component interface must be meaningful for both leaves and composites.
+
+== BEHAVIORAL PATTERNS ==
+
+Strategy: define a family of algorithms, encapsulate each, make them interchangeable. The context delegates the algorithm to the strategy object. Example: sorting strategy (quicksort, mergesort, radix) selected at runtime. Eliminates long if/else chains based on type. Pair with dependency injection for best testability.
+
+Observer: define a one-to-many dependency so that when one object changes state, all dependents are notified automatically. Subject maintains a list of observers and notifies them. Push (subject sends data) vs pull (observers fetch data). Used in event systems, reactive programming (RxJava, Rx), DOM events. Risk: cascading notifications, memory leaks from unregistered observers.
+
+Command: encapsulate a request as an object. Enables: parameterization of operations, queuing, logging, undoable operations. Invoker doesn't know what operation is performed. Components: Command (interface with execute/undo), ConcreteCommand, Invoker, Receiver. Use in: UI actions with undo/redo, job queues, macro recording.
+
+State: allow an object to alter its behavior when its state changes. Looks like the object changes its class. Extract state-specific behavior into state objects. Cleaner than large switch/if chains. Example: vending machine states (Idle, HasCoin, Dispensing). Each state handles events differently and transitions to the next state.
+
+Template Method: define the skeleton of an algorithm in a base class; let subclasses override specific steps without changing the algorithm's structure. The base class calls the abstract hook methods. Example: data processing pipeline where parseData() and processRecord() are overridden per format. Use when you have invariant parts and variant parts of an algorithm.
+
+Chain of Responsibility: pass a request along a chain of handlers until one handles it. Each handler decides to process or pass forward. Decouples sender from receivers. Examples: HTTP middleware, logging handlers, approval workflows. Risk: request may fall through unhandled — include a default handler.
+
+== INTERVIEW FRAMING ==
+
+When asked "how would you design X?" — always mention which patterns apply and why. Common phrasing: "I'd use the Strategy pattern here so we can add new algorithms without modifying the core processing loop." or "This is a classic Decorator use case — we can add retry, logging, and rate limiting transparently without changing the underlying client."
+
+Anti-patterns to name-drop: God Object (class that knows too much), Spaghetti Code (no structure), Magic Numbers (unnamed constants), Primitive Obsession (using primitives instead of domain objects), Feature Envy (method uses another class's data more than its own).
+
+Trade-offs to discuss: patterns add complexity and indirection — use them only when they solve a real problem you have, not one you might have. Over-engineering is a smell too.

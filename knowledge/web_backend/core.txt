@@ -1,0 +1,85 @@
+WEB AND BACKEND ENGINEERING — INTERVIEW REFERENCE
+
+== HTTP FUNDAMENTALS ==
+
+HTTP is a stateless, request-response protocol. HTTP/1.1 uses persistent connections (keep-alive) but suffers from head-of-line blocking within a connection. HTTP/2 introduces multiplexing (multiple streams on one TCP connection), header compression (HPACK), and server push. HTTP/3 uses QUIC (UDP-based) to eliminate TCP head-of-line blocking entirely, improving performance on lossy networks.
+
+Status codes:
+- 2xx Success: 200 OK, 201 Created, 204 No Content.
+- 3xx Redirect: 301 Permanent, 302 Temporary, 304 Not Modified (conditional GET with ETag/Last-Modified).
+- 4xx Client Error: 400 Bad Request, 401 Unauthorized (not authenticated), 403 Forbidden (authenticated but not allowed), 404 Not Found, 409 Conflict, 422 Unprocessable Entity, 429 Too Many Requests.
+- 5xx Server Error: 500 Internal Server Error, 502 Bad Gateway, 503 Service Unavailable, 504 Gateway Timeout.
+
+HTTP methods: GET (safe, idempotent, no body), POST (non-idempotent, creates resource), PUT (idempotent, full replacement), PATCH (partial update), DELETE (idempotent).
+
+Caching headers: Cache-Control (max-age, no-cache, no-store, public/private), ETag (entity tag for conditional requests), Last-Modified, Vary (cache key includes listed headers, e.g., Vary: Accept-Encoding).
+
+== REST API DESIGN ==
+
+REST constraints: stateless (server holds no session state), uniform interface (resources identified by URLs, representations self-descriptive), layered system, client-server separation.
+
+URL design: nouns, not verbs. /users/{id}/orders, not /getUserOrders. Use plural nouns for collections. Hierarchical relationships in the path; flat relationships via query parameters.
+
+Versioning: /v1/users is explicit and easy to route. Header versioning (Accept: application/vnd.myapi.v1+json) is more RESTful but harder to debug.
+
+Pagination: offset/limit (?offset=100&limit=20) is simple but slow on large offsets (DB must scan). Cursor-based pagination (?after=eyJpZCI6MTAwfQ) is efficient and stable under concurrent writes — the cursor encodes the last seen position (often base64-encoded JSON).
+
+Filtering and sorting: /orders?status=pending&sort=created_at:desc. Index filter columns in the DB.
+
+Error responses: consistent JSON envelope: {"error": {"code": "VALIDATION_ERROR", "message": "...", "details": [...]}}. Never expose stack traces in production.
+
+Idempotency: critical for payment and mutation APIs. Client generates a UUID and sends it as Idempotency-Key header. Server stores (key → result) with TTL. On retry with same key, return stored result without re-executing side effects.
+
+== AUTHENTICATION AND AUTHORIZATION ==
+
+Session-based auth: server stores session in memory or Redis, client stores session ID in cookie. Simple, easy to invalidate, but doesn't scale horizontally without shared session store. Stateful.
+
+JWT (JSON Web Token): self-contained token with header.payload.signature. Server validates signature without DB lookup — stateless, scalable. Payload contains claims (sub, exp, roles). Signed with HMAC or RSA. Refresh tokens: long-lived, stored securely, used to get new short-lived access tokens. Problem: JWTs cannot be invalidated before expiry (mitigate with short expiry + refresh token rotation, or a token blocklist).
+
+OAuth 2.0: authorization framework. Authorization Code flow (web apps): redirect user to provider, exchange code for access token, never expose token in URL. PKCE extension required for public clients (mobile/SPA). Client Credentials flow: machine-to-machine, no user involved.
+
+OIDC (OpenID Connect): identity layer on top of OAuth 2.0. Returns ID token (JWT with user info) in addition to access token. Enables single sign-on (SSO).
+
+API Keys: simple, long-lived, sent in header (Authorization: Bearer KEY or X-API-Key). Prefix with a recognizable string so secret scanners can detect leaks. Rate-limit per key.
+
+== SQL AND DATABASES ==
+
+Query optimization: use EXPLAIN / EXPLAIN ANALYZE to see query plan. Avoid SELECT * (pulls unnecessary columns). Full table scan (Seq Scan) is expensive on large tables — add index on filter/join columns. Index selectivity matters: an index on a boolean column with 50/50 distribution is barely useful.
+
+Indexes: B-tree (default, good for equality and range), Hash (equality only, faster for exact match), GIN/GiST (full-text, JSON, array), partial index (index subset of rows). Index bloat from updates/deletes — VACUUM in PostgreSQL. Covering index includes all queried columns to avoid heap fetch.
+
+Joins: INNER JOIN (only matching rows), LEFT JOIN (all left rows, NULLs for non-matching right), FULL OUTER JOIN (all rows from both). Join order optimization: smaller result sets first. Use indexes on join columns.
+
+Transactions and isolation levels:
+- Read Uncommitted: dirty reads allowed (never use).
+- Read Committed (default in PostgreSQL): no dirty reads, but non-repeatable reads possible.
+- Repeatable Read: same query returns same result in a transaction, but phantom reads possible.
+- Serializable: full isolation, as if transactions ran sequentially. Highest cost.
+
+Deadlocks: transaction A holds lock on X, waits for Y; transaction B holds Y, waits for X. Databases detect and abort one transaction. Prevention: always acquire locks in a consistent order, keep transactions short, avoid user interaction inside transactions.
+
+N+1 query problem: loading a list of 100 orders and then fetching each order's user with a separate query = 101 queries. Fix: JOIN, eager loading (ORM's includes/preload), or DataLoader batching pattern.
+
+== SECURITY (OWASP TOP 10) ==
+
+SQL Injection: attacker inserts SQL into input that modifies the query. Prevention: parameterized queries / prepared statements. Never string-concatenate user input into SQL.
+
+XSS (Cross-Site Scripting): attacker injects malicious scripts into pages served to users. Reflected (in URL), stored (in DB), DOM-based. Prevention: output encoding, Content Security Policy (CSP), HTTPOnly/Secure cookies.
+
+CSRF (Cross-Site Request Forgery): malicious site triggers authenticated requests to your site. Prevention: CSRF tokens (unique per session, validated on state-changing requests), SameSite cookie attribute (Lax or Strict), double-submit cookie pattern.
+
+IDOR (Insecure Direct Object Reference): access user's data by guessing IDs. Prevention: always authorize, not just authenticate — check that the requesting user owns the resource (e.g., WHERE id = ? AND user_id = ?).
+
+Broken Authentication: weak passwords, no MFA, session fixation, predictable tokens. Prevention: strong password policy, MFA support, secure random token generation, proper session invalidation.
+
+Sensitive Data Exposure: store passwords as bcrypt/scrypt/Argon2 hashes (never plaintext or MD5/SHA1). Encrypt PII at rest (AES-256). Use HTTPS everywhere. Set Strict-Transport-Security header.
+
+== ASYNC PATTERNS AND PERFORMANCE ==
+
+Connection pooling: reuse DB connections (pgBouncer for PostgreSQL, HikariCP for Java). Opening a DB connection is expensive (~10ms). Pool size ≈ (core_count × 2) + effective_spindle_count is a common heuristic.
+
+Event loop (Node.js, Python asyncio): single-threaded concurrency via non-blocking I/O. Ideal for I/O-bound workloads (network calls, DB queries). CPU-bound work blocks the loop — offload to worker threads or processes.
+
+Background jobs: defer non-critical work (sending emails, generating reports, post-processing uploads) to a job queue (Celery, Sidekiq, BullMQ). Return a job ID to the client, poll or use WebSocket for status. Decouple request latency from processing time.
+
+WebSockets: full-duplex, persistent connection. Use for real-time features (chat, live notifications, collaborative editing). Server-Sent Events (SSE) for server-to-client streaming (simpler, uses standard HTTP, one direction only).
