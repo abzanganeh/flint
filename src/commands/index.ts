@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { MockStudyMode } from "../events";
+
 export type UserPlan = "free" | "premium";
 
 export interface UserDto {
@@ -627,8 +629,12 @@ export interface CoachFeedback {
   score: number;
 }
 
-export const startMock = (guided = false): Promise<void> =>
-  invoke<void>("start_mock", { guided });
+export type { MockStudyMode } from "../events";
+
+export const startMock = (
+  guided = false,
+  mode: MockStudyMode = "practice",
+): Promise<void> => invoke<void>("start_mock", { guided, mode });
 
 export const askMockQuestion = (): Promise<void> =>
   invoke<void>("ask_mock_question");

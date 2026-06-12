@@ -269,10 +269,13 @@ export const onResearchCitation = (
 
 // ── Mock Interview events ─────────────────────────────────────────────────────
 
+export type MockStudyMode = "practice" | "study";
+
 export interface MockQuestionStartedEventPayload {
   question: string;
   turn_n: number;
   total_questions: number;
+  mode: MockStudyMode;
 }
 
 export interface MockUserTranscribedEventPayload {

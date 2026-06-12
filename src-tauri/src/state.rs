@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 use crate::deep_link;
 use tokio::task::JoinHandle;
 
-use crate::mock::conductor::Conductor;
+use crate::mock::conductor::{Conductor, MockMode};
 use crate::mock::mic_capture::MicCapture;
 
 use crate::audio::pipeline::DetectedQuestion;
@@ -46,6 +46,10 @@ pub struct MockTaskHandles {
     pub current_turn: u32,
     /// When true, questions are gated on `ask_mock_question`.
     pub guided: bool,
+    /// Practice hides suggested answer until after the user responds.
+    pub mode: MockMode,
+    /// Latest suggested-answer text for the active turn (shared with conductor).
+    pub suggested_text: Arc<std::sync::RwLock<String>>,
 }
 
 /// Handles for the running audio capture thread and background tasks.

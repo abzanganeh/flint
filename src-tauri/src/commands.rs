@@ -16,8 +16,9 @@ use crate::dto::{
     SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
-    emit_mock_coach_feedback, emit_session_state_change, emit_token_usage_update,
-    MockCoachFeedbackPayload, SessionStateChangePayload, TokenUsageUpdatePayload,
+    emit_mock_coach_feedback, emit_mock_suggested_token, emit_session_state_change,
+    emit_token_usage_update, MockCoachFeedbackPayload, MockSuggestedTokenPayload,
+    SessionStateChangePayload, TokenUsageUpdatePayload,
 };
 use crate::health::{checks, hardware};
 use crate::interfaces::auth::AuthToken;
@@ -30,7 +31,8 @@ use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
 use crate::mock::coach::{coach_failure_payload, run_coach};
-use crate::mock::conductor::{Conductor, ConductorCommand, MockPace};
+use crate::mock::rag::query_mock_rag;
+use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
@@ -2660,8 +2662,10 @@ pub async fn start_mock(
     app: AppHandle,
     state: State<'_, AppState>,
     guided: Option<bool>,
+    mode: Option<String>,
 ) -> Result<(), String> {
     let guided = guided.unwrap_or(false);
+    let mock_mode = MockMode::parse(mode.as_deref().unwrap_or("practice"));
     let pace = if guided {
         MockPace::Guided
     } else {
@@ -2706,18 +2710,8 @@ pub async fn start_mock(
     // Build FailoverManager.
     let (failover, _, _) = build_failover_stack(&app, &state).await?;
 
-    // Retrieve RAG chunks by querying the first likely question as the seed.
-    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
-        let seed = digest.likely_questions.first().cloned().unwrap_or_default();
-        let query_vec = embedder.embed_one(&seed).unwrap_or_default();
-        state
-            .vector_store
-            .query(session_id, &query_vec, 10)
-            .await
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
+    let embedder = state.require_embedder()?;
+    let suggested_buffer = Arc::new(std::sync::RwLock::new(String::new()));
 
     // Create audio directory.
     let audio_dir = app
@@ -2749,8 +2743,11 @@ pub async fn start_mock(
         Arc::clone(&failover),
         Arc::clone(&state.persistence),
         prompts_base_dir(),
-        rag_chunks,
+        embedder,
+        Arc::clone(&state.vector_store),
+        Arc::clone(&suggested_buffer),
         pace,
+        mock_mode,
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -2767,9 +2764,16 @@ pub async fn start_mock(
         mic_capture,
         current_turn: 0,
         guided,
+        mode: mock_mode,
+        suggested_text: suggested_buffer,
     });
 
-    info!(session_id = %session_id, guided, "mock interview started");
+    info!(
+        session_id = %session_id,
+        guided,
+        mode = mock_mode.as_str(),
+        "mock interview started"
+    );
     Ok(())
 }
 
@@ -2833,8 +2837,17 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .await
             .map_err(|e| e.to_string())?;
 
-    // Await coach before advancing the conductor — otherwise the next question
-    // event resets the coach panel before feedback is delivered.
+    let (mock_mode, suggested_answer) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let suggested = handles
+            .suggested_text
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        (handles.mode, suggested)
+    };
+
     let session_id = state
         .state_machine
         .lock()
@@ -2842,17 +2855,6 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .session_id()
         .ok_or("no active session")?;
     let (failover, _, _) = build_failover_stack(&app, &state).await?;
-    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
-        let q = transcript.clone();
-        let vec = embedder.embed_one(&q).unwrap_or_default();
-        state
-            .vector_store
-            .query(session_id, &vec, 8)
-            .await
-            .unwrap_or_default()
-    } else {
-        vec![]
-    };
     let persistence = Arc::clone(&state.persistence);
     let question = persistence
         .load_mock_turns(session_id)
@@ -2861,6 +2863,19 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .find(|t| t.turn_n == turn_n)
         .map(|t| t.question)
         .unwrap_or_default();
+
+    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
+        query_mock_rag(
+            session_id,
+            &question,
+            &embedder,
+            state.vector_store.as_ref(),
+            8,
+        )
+        .await
+    } else {
+        vec![]
+    };
     let prompts = prompts_base_dir();
 
     let (coach_json, score) = match run_coach(
@@ -2869,7 +2884,9 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         turn_n,
         question,
         transcript.clone(),
+        suggested_answer.clone(),
         rag_chunks,
+        mock_mode,
         failover,
         &prompts,
     )
@@ -2892,6 +2909,15 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             (json, score)
         }
     };
+
+    if mock_mode == MockMode::Practice && !suggested_answer.is_empty() {
+        emit_mock_suggested_token(
+            &app,
+            MockSuggestedTokenPayload {
+                token: suggested_answer,
+            },
+        );
+    }
 
     if let Some(turn_id) = persistence
         .load_mock_turns(session_id)

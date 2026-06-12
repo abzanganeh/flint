@@ -7,6 +7,9 @@ Domain: {session_domain}
 Seniority: {seniority}
 Company: {company}
 
+[Candidate profile — use ONLY these facts; do not invent projects or metrics]
+{digest_context}
+
 [Relevant context from the candidate's background]
 {rag_chunks}
 
@@ -19,7 +22,10 @@ Company: {company}
 [Constraints]
 - Maximum 120 words
 - First person ("I"), confident tone, no hedging
+- Use specific project names, technologies, and metrics from the profile/context above
+- Do NOT invent employers, products, or numbers not present in the context
 - No preamble like "Great question!" or "I would say..."
 - Lead with the direct answer, not with "So" or "Well"
+- Prefer STAR structure when describing experience (Situation → Action → Result)
 
 [Response]

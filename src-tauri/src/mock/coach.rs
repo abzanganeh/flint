@@ -20,7 +20,15 @@ use crate::events::{emit_mock_coach_feedback, MockCoachFeedbackPayload};
 use crate::interfaces::vector::ScoredChunk;
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
+use crate::mock::conductor::MockMode;
 use crate::orchestrator::load_prompt;
+
+/// Minimum word overlap (Jaccard) with the suggested script to flag echo reading.
+const SUGGESTED_ECHO_THRESHOLD: f32 = 0.55;
+/// Score cap when the user reads the suggested answer in practice mode.
+const ECHO_SCORE_CAP: u8 = 45;
+/// Minimum spoken words for a scored answer in practice mode.
+const MIN_ANSWER_WORDS: usize = 5;
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -73,14 +81,18 @@ pub async fn run_coach<R: Runtime>(
     turn_n: u32,
     question: String,
     user_answer: String,
+    suggested_answer: String,
     rag_chunks: Vec<ScoredChunk>,
+    mode: MockMode,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
 ) -> Result<(String, u8)> {
     let prompt = build_coach_prompt(
         &question,
         &user_answer,
+        &suggested_answer,
         &rag_chunks,
+        mode,
         failover.active_provider_name(),
         prompts_dir,
     )?;
@@ -111,8 +123,10 @@ pub async fn run_coach<R: Runtime>(
         }
     }
 
-    let (feedback, json) = parse_coach_json(&raw);
+    let (mut feedback, mut json) = parse_coach_json(&raw);
+    apply_coach_guardrails(&mut feedback, &user_answer, &suggested_answer, mode);
     let score = feedback.score;
+    json = serde_json::to_string(&feedback).unwrap_or(json);
 
     info!(
         session_id = %session_id,
@@ -138,11 +152,17 @@ pub async fn run_coach<R: Runtime>(
 fn build_coach_prompt(
     question: &str,
     user_answer: &str,
+    suggested_answer: &str,
     rag_chunks: &[ScoredChunk],
+    mode: MockMode,
     provider: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
-    let template = load_prompt("mock_coach", provider, prompts_dir)?;
+    let template_name = match mode {
+        MockMode::Study => "mock_coach/study",
+        MockMode::Practice => "mock_coach",
+    };
+    let template = load_prompt(template_name, provider, prompts_dir)?;
     let rag_text = rag_chunks
         .iter()
         .take(5)
@@ -153,8 +173,71 @@ fn build_coach_prompt(
     let prompt = template
         .replace("{question}", question)
         .replace("{user_answer}", user_answer)
+        .replace("{suggested_answer}", suggested_answer)
         .replace("{rag_chunks}", &rag_text);
     Ok(prompt)
+}
+
+/// Enforce deterministic scoring rules the LLM may ignore.
+fn apply_coach_guardrails(
+    feedback: &mut CoachFeedback,
+    user_answer: &str,
+    suggested_answer: &str,
+    mode: MockMode,
+) {
+    let word_count = count_words(user_answer);
+
+    if word_count < MIN_ANSWER_WORDS {
+        feedback.score = 0;
+        if !feedback
+            .context_gaps
+            .iter()
+            .any(|g| g.contains("No answer recorded"))
+        {
+            feedback.context_gaps.insert(0, "No answer recorded".to_string());
+        }
+        return;
+    }
+
+    if mode == MockMode::Practice {
+        let overlap = word_jaccard(user_answer, suggested_answer);
+        if overlap >= SUGGESTED_ECHO_THRESHOLD {
+            feedback.score = feedback.score.min(ECHO_SCORE_CAP);
+            let msg = "You read the suggested answer — practice in your own words.";
+            if !feedback.context_gaps.iter().any(|g| g == msg) {
+                feedback.context_gaps.insert(0, msg.to_string());
+            }
+        }
+    }
+}
+
+fn count_words(text: &str) -> usize {
+    text.split_whitespace().filter(|w| !w.is_empty()).count()
+}
+
+fn tokenize_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() > 2)
+        .map(str::to_string)
+        .collect()
+}
+
+fn word_jaccard(a: &str, b: &str) -> f32 {
+    let ta = tokenize_words(a);
+    let tb = tokenize_words(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let set_a: std::collections::HashSet<_> = ta.iter().collect();
+    let set_b: std::collections::HashSet<_> = tb.iter().collect();
+    let inter = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    if union <= f32::EPSILON {
+        0.0
+    } else {
+        inter / union
+    }
 }
 
 // ── JSON parser ───────────────────────────────────────────────────────────────
@@ -414,5 +497,42 @@ mod tests {
         assert_eq!(fb.score, 72);
         assert_eq!(fb.tone.assessment, "good");
         assert!(!fb.corrected_answer.is_empty());
+    }
+
+    #[test]
+    fn guardrails_zero_score_for_empty_answer() {
+        let mut fb = CoachFeedback {
+            score: 80,
+            ..Default::default()
+        };
+        apply_coach_guardrails(&mut fb, "um", "full suggested script here", MockMode::Practice);
+        assert_eq!(fb.score, 0);
+    }
+
+    #[test]
+    fn guardrails_caps_score_when_reading_suggested_script() {
+        let script = "I built an agentic AI system with hybrid RAG and evaluation gates achieving high accuracy.";
+        let mut fb = CoachFeedback {
+            score: 85,
+            ..Default::default()
+        };
+        apply_coach_guardrails(&mut fb, script, script, MockMode::Practice);
+        assert_eq!(fb.score, ECHO_SCORE_CAP);
+        assert!(
+            fb.context_gaps
+                .iter()
+                .any(|g| g.contains("read the suggested answer"))
+        );
+    }
+
+    #[test]
+    fn guardrails_does_not_cap_echo_in_study_mode() {
+        let script = "I built an agentic AI system with hybrid RAG and evaluation gates achieving high accuracy.";
+        let mut fb = CoachFeedback {
+            score: 85,
+            ..Default::default()
+        };
+        apply_coach_guardrails(&mut fb, script, script, MockMode::Study);
+        assert_eq!(fb.score, 85);
     }
 }
