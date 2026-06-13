@@ -31,6 +31,7 @@ import Onboarding from "./screens/Onboarding";
 import { Recovery } from "./screens/Recovery";
 import Rehearsal from "./screens/Rehearsal";
 import MockInterview from "./screens/MockInterview";
+import MockSummary from "./screens/MockSummary";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
@@ -48,6 +49,7 @@ type AppScreen =
   | "digest-review"
   | "rehearsal"
   | "mock-interview"
+  | "mock-summary"
   | "live"
   | "session-summary";
 
@@ -63,6 +65,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "digest-review",
   "rehearsal",
   "mock-interview",
+  "mock-summary",
   "session-summary",
 ];
 
@@ -578,9 +581,17 @@ function App() {
       <Shell nav={nav}>
         <MockInterview
           sessionId={sessionId ?? ""}
-          onComplete={() => setScreen("rehearsal")}
+          onComplete={() => setScreen("mock-summary")}
           onAbort={() => setScreen("rehearsal")}
         />
+      </Shell>
+    );
+  }
+
+  if (screen === "mock-summary") {
+    return (
+      <Shell nav={nav}>
+        <MockSummary onContinue={() => setScreen("rehearsal")} />
       </Shell>
     );
   }

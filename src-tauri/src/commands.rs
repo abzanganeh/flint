@@ -42,6 +42,9 @@ use crate::research::{self, tavily, ResearchSource};
 
 /// Approximate base chars added to a research prompt (template + labels).
 const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
+
+/// Number of Tavily results to fetch per enrichment query.
+const ENRICHMENT_RESULTS_PER_QUERY: usize = 4;
 use crate::session::draft;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
@@ -703,6 +706,103 @@ pub async fn get_session_context_fields(
 /// Valid from: `DIGEST_REVIEW`.  
 /// Emits: `PRE_WARMING` immediately, then `REHEARSING` when complete.
 #[tauri::command]
+/// Fire-and-forget background task that runs targeted Tavily searches for the
+/// company + role, then ingests the results into the session RAG store.
+///
+/// Silently skips when no Tavily API key is present.  Results are available
+/// in both rehearsal prep-chat and mock interview RAG by the time the user
+/// navigates to either screen.
+fn spawn_company_enrichment(
+    session_id: Uuid,
+    company: String,
+    role: String,
+    domain: String,
+    embedder: Arc<crate::rag::embedder::Embedder>,
+    vector_store: Arc<dyn crate::interfaces::vector::VectorInterface>,
+) {
+    tokio::spawn(async move {
+        let web = match tavily::resolve_tavily() {
+            Some(t) => t,
+            None => {
+                tracing::debug!(session_id = %session_id, "no Tavily key; skipping company enrichment");
+                return;
+            }
+        };
+
+        let queries = [
+            format!("{company} software engineering interview questions {role}"),
+            format!("{company} engineering culture values {domain}"),
+        ];
+
+        let mut combined = String::new();
+        for query in &queries {
+            match web.search(query, ENRICHMENT_RESULTS_PER_QUERY).await {
+                Ok(results) => {
+                    for r in &results {
+                        combined.push_str(&format!("## {}\n{}\n\n", r.title, r.snippet));
+                    }
+                    tracing::debug!(session_id = %session_id, query = %query, results = results.len(), "company enrichment search done");
+                }
+                Err(e) => warn!(session_id = %session_id, query = %query, error = %e, "company enrichment search failed"),
+            }
+        }
+
+        if combined.trim().is_empty() {
+            return;
+        }
+
+        let raw_chunks = chunk_text(&combined, 200, 50);
+        if raw_chunks.is_empty() {
+            return;
+        }
+
+        let embeddings = {
+            let chunks_clone = raw_chunks.clone();
+            let emb = Arc::clone(&embedder);
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = chunks_clone.iter().map(String::as_str).collect();
+                emb.embed_batch(&refs)
+            })
+            .await
+        };
+
+        let embeddings = match embeddings {
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => {
+                warn!(session_id = %session_id, error = %e, "company enrichment embedding failed");
+                return;
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "company enrichment embedder task panicked");
+                return;
+            }
+        };
+
+        let chunks: Vec<Chunk> = raw_chunks
+            .into_iter()
+            .zip(embeddings)
+            .filter(|(_, emb)| !emb.is_empty())
+            .map(|(text, embedding)| Chunk {
+                id: Uuid::new_v4(),
+                text,
+                embedding,
+                session_id,
+            })
+            .collect();
+
+        let count = chunks.len();
+        if count == 0 {
+            return;
+        }
+
+        match vector_store.ingest(session_id, chunks).await {
+            Ok(()) => info!(session_id = %session_id, chunks = count, company = %company, "company enrichment ingested into session RAG"),
+            Err(e) => warn!(session_id = %session_id, error = %e, "company enrichment ingest failed"),
+        }
+    });
+}
+
+#[tauri::command]
 pub async fn confirm_digest(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -726,6 +826,19 @@ pub async fn confirm_digest(
     *state.session_digest.write().await = Some(digest_rust.clone());
     if let Err(e) = state.persistence.store_session_digest(sid, &digest_rust) {
         warn!(session_id = %sid, error = %e, "failed to persist confirmed digest");
+    }
+
+    // Kick off a background Tavily sweep for company/role context so results
+    // are in session RAG before the user reaches rehearsal or mock interview.
+    if let Ok(embedder) = state.require_embedder() {
+        spawn_company_enrichment(
+            sid,
+            digest_rust.company.clone(),
+            digest_rust.role.clone(),
+            digest_rust.domain.clone(),
+            embedder,
+            Arc::clone(&state.vector_store),
+        );
     }
 
     // Transition → PRE_WARMING.
