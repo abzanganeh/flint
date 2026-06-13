@@ -701,11 +701,6 @@ pub async fn get_session_context_fields(
         .map_err(|e| e.to_string())
 }
 
-/// Accept the (possibly edited) digest and trigger pre-warming.
-///
-/// Valid from: `DIGEST_REVIEW`.  
-/// Emits: `PRE_WARMING` immediately, then `REHEARSING` when complete.
-#[tauri::command]
 /// Fire-and-forget background task that runs targeted Tavily searches for the
 /// company + role, then ingests the results into the session RAG store.
 ///
@@ -802,6 +797,10 @@ fn spawn_company_enrichment(
     });
 }
 
+/// Accept the (possibly edited) digest and trigger pre-warming.
+///
+/// Valid from: `DIGEST_REVIEW`.
+/// Emits: `PRE_WARMING` immediately, then `REHEARSING` when complete.
 #[tauri::command]
 pub async fn confirm_digest(
     app: AppHandle,
