@@ -158,7 +158,6 @@ async fn conductor_loop<R: Runtime>(
     let mut followup_handles: Vec<JoinHandle<Option<String>>> = Vec::new();
     let mut followup_queue: VecDeque<String> = VecDeque::new();
 
-    let mut aborted = false;
     let mut turns_completed: u32 = 0;
 
     // Build an iterator over both scripted and (eventually) dynamic questions.
@@ -167,7 +166,8 @@ async fn conductor_loop<R: Runtime>(
     let mut question_idx: usize = 0;
 
     while question_idx < scripted_count || !followup_queue.is_empty() {
-        let question: String = if question_idx < scripted_count {
+        let is_followup = question_idx >= scripted_count;
+        let question: String = if !is_followup {
             base_questions[question_idx].clone()
         } else {
             match followup_queue.pop_front() {
@@ -177,10 +177,13 @@ async fn conductor_loop<R: Runtime>(
         };
 
         let turn_n = turns_completed + 1;
-        let total_questions_now = scripted_count as u32 + followup_queue.len() as u32;
+        // When in the follow-up phase the current question has already been
+        // popped from the queue, so add 1 back to get the real total count.
+        let total_questions_now = scripted_count as u32
+            + followup_queue.len() as u32
+            + u32::from(is_followup);
 
         if pace == MockPace::Guided && !wait_for_ask_question(&mut cmd_rx, session_id).await {
-            aborted = true;
             break;
         }
 
@@ -291,17 +294,17 @@ async fn conductor_loop<R: Runtime>(
             }
             Some(ConductorCommand::Abort) | None => {
                 info!(session_id = %session_id, "mock interview aborted");
-                aborted = true;
                 break;
             }
         }
 
         question_idx += 1;
 
-        // When scripted questions are done, collect any completed follow-up handles.
+        // When scripted questions are done, collect follow-up results concurrently.
         if question_idx >= scripted_count && followup_queue.is_empty() && !followup_handles.is_empty() {
-            for handle in followup_handles.drain(..) {
-                if let Ok(Some(q)) = handle.await {
+            let results = futures::future::join_all(followup_handles.drain(..)).await;
+            for result in results {
+                if let Ok(Some(q)) = result {
                     followup_queue.push_back(q);
                 }
             }
@@ -313,11 +316,9 @@ async fn conductor_loop<R: Runtime>(
         }
     }
 
-    if !aborted {
-        // Drain any remaining follow-up handles that weren't collected inside the loop.
-        for handle in followup_handles {
-            let _ = handle.await;
-        }
+    // Cancel any in-flight follow-up generation tasks — they are no longer needed.
+    for handle in followup_handles {
+        handle.abort();
     }
 
     emit_mock_ended(
@@ -363,15 +364,18 @@ async fn generate_follow_up<R: Runtime>(
         stream: false,
     };
 
-    let text = failover
-        .complete(prompt, config, app, 60)
-        .await
-        .context("follow-up LLM failed")?;
+    let text = timeout(
+        Duration::from_secs(20),
+        failover.complete(prompt, config, app, 60),
+    )
+    .await
+    .context("follow-up generation timed out")?
+    .context("follow-up LLM failed")?;
 
     let cleaned = text.trim().trim_matches('"').trim().to_string();
 
-    // Sanity check: result should look like a question or short phrase.
-    if cleaned.is_empty() || cleaned.len() > 200 {
+    // Must look like a plausible question: non-empty, reasonable length, ends with '?'.
+    if cleaned.is_empty() || cleaned.len() > 200 || !cleaned.ends_with('?') {
         return Ok(None);
     }
 

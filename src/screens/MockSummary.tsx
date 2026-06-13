@@ -69,6 +69,7 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
                 controls
                 src={audioSrc}
                 preload="none"
+                aria-label={`Recording for question ${turn.turn_n}`}
               />
             </div>
           )}
@@ -139,10 +140,10 @@ export function MockSummary({ onContinue }: Props) {
       });
   }, []);
 
+  const scoredTurns = turns.filter((t) => t.score > 0);
   const avgScore =
-    turns.length > 0
-      ? Math.round(turns.filter((t) => t.score > 0).reduce((s, t) => s + t.score, 0) /
-          Math.max(1, turns.filter((t) => t.score > 0).length))
+    scoredTurns.length > 0
+      ? Math.round(scoredTurns.reduce((s, t) => s + t.score, 0) / scoredTurns.length)
       : 0;
 
   if (loading) {
