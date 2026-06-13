@@ -309,8 +309,15 @@ impl AppState {
     ///
     /// Must be called after `spawn_embedder_init` — the loader waits internally
     /// for the embedder slot to become populated before embedding begins.
+    ///
+    /// Uses `tauri::async_runtime::spawn` (callable from any thread) rather than
+    /// `tokio::spawn` (requires an active Tokio context) because this is invoked
+    /// from the synchronous Tauri setup callback.
     pub fn spawn_knowledge_init(&self) {
-        self.global_kb.spawn_background_load();
+        let kb = Arc::clone(&self.global_kb);
+        tauri::async_runtime::spawn(async move {
+            kb.spawn_background_load();
+        });
     }
 
     // ── Auth helpers ─────────────────────────────────────────────────────────
