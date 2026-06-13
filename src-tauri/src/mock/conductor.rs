@@ -5,6 +5,7 @@
 //! The conductor owns the turn state machine:
 //!   QuestionAsked → UserAnswering → TurnComplete → (next turn | MockEnded)
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -13,6 +14,7 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use tauri::{AppHandle, Runtime};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -130,6 +132,9 @@ impl Conductor {
 
 // ── Loop ──────────────────────────────────────────────────────────────────────
 
+/// Max AI-generated follow-up questions appended after the scripted questions.
+const MAX_FOLLOW_UPS: usize = 3;
+
 #[allow(clippy::too_many_arguments)]
 async fn conductor_loop<R: Runtime>(
     app: AppHandle<R>,
@@ -147,14 +152,35 @@ async fn conductor_loop<R: Runtime>(
     mode: MockMode,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
-    let questions: Vec<String> = digest.likely_questions.clone();
-    let total = questions.len() as u32;
+    let base_questions: Vec<String> = digest.likely_questions.clone();
+    // Follow-ups generated async during each turn; collected into a queue after the
+    // scripted questions are exhausted.
+    let mut followup_handles: Vec<JoinHandle<Option<String>>> = Vec::new();
+    let mut followup_queue: VecDeque<String> = VecDeque::new();
+
+    let mut aborted = false;
     let mut turns_completed: u32 = 0;
 
-    for (idx, question) in questions.iter().enumerate() {
-        let turn_n = idx as u32 + 1;
+    // Build an iterator over both scripted and (eventually) dynamic questions.
+    // We process the scripted list first, then drain followup_queue afterward.
+    let scripted_count = base_questions.len();
+    let mut question_idx: usize = 0;
+
+    while question_idx < scripted_count || !followup_queue.is_empty() {
+        let question: String = if question_idx < scripted_count {
+            base_questions[question_idx].clone()
+        } else {
+            match followup_queue.pop_front() {
+                Some(q) => q,
+                None => break,
+            }
+        };
+
+        let turn_n = turns_completed + 1;
+        let total_questions_now = scripted_count as u32 + followup_queue.len() as u32;
 
         if pace == MockPace::Guided && !wait_for_ask_question(&mut cmd_rx, session_id).await {
+            aborted = true;
             break;
         }
 
@@ -164,7 +190,7 @@ async fn conductor_loop<R: Runtime>(
 
         let rag_chunks = query_mock_rag(
             session_id,
-            question,
+            &question,
             &embedder,
             vector_store.as_ref(),
             Some((global_kb.as_ref(), &role_packs)),
@@ -192,13 +218,13 @@ async fn conductor_loop<R: Runtime>(
             MockQuestionStartedPayload {
                 question: question.clone(),
                 turn_n,
-                total_questions: total,
+                total_questions: total_questions_now,
                 mode: mode.as_str().to_string(),
             },
         );
         info!(session_id = %session_id, turn_n, mode = mode.as_str(), "mock question started");
 
-        tts::speak_best_effort(question).await;
+        tts::speak_best_effort(&question).await;
 
         let suggested_handle = {
             let app_clone = app.clone();
@@ -242,14 +268,55 @@ async fn conductor_loop<R: Runtime>(
                     warn!(error = %e, "failed to persist mock turn user answer");
                 }
                 turns_completed += 1;
+
+                // Kick off a background follow-up generation if we haven't
+                // exceeded the cap and we're still in the scripted phase.
+                if question_idx < scripted_count && followup_handles.len() < MAX_FOLLOW_UPS {
+                    let fq = question.clone();
+                    let fa = user_text.clone();
+                    let fd = Arc::clone(&digest);
+                    let ff = Arc::clone(&failover);
+                    let fp = prompts_dir.clone();
+                    let fa_app = app.clone();
+                    followup_handles.push(tokio::spawn(async move {
+                        generate_follow_up(&fa_app, &fq, &fa, &fd, &ff, &fp)
+                            .await
+                            .ok()
+                            .flatten()
+                    }));
+                }
             }
             Some(ConductorCommand::AskQuestion) => {
                 warn!(session_id = %session_id, "unexpected AskQuestion during turn");
             }
             Some(ConductorCommand::Abort) | None => {
                 info!(session_id = %session_id, "mock interview aborted");
+                aborted = true;
                 break;
             }
+        }
+
+        question_idx += 1;
+
+        // When scripted questions are done, collect any completed follow-up handles.
+        if question_idx >= scripted_count && followup_queue.is_empty() && !followup_handles.is_empty() {
+            for handle in followup_handles.drain(..) {
+                if let Ok(Some(q)) = handle.await {
+                    followup_queue.push_back(q);
+                }
+            }
+            info!(
+                session_id = %session_id,
+                follow_ups = followup_queue.len(),
+                "follow-up questions ready"
+            );
+        }
+    }
+
+    if !aborted {
+        // Drain any remaining follow-up handles that weren't collected inside the loop.
+        for handle in followup_handles {
+            let _ = handle.await;
         }
     }
 
@@ -265,6 +332,50 @@ async fn conductor_loop<R: Runtime>(
         turns_completed,
         "mock interview ended"
     );
+}
+
+/// Generate one targeted follow-up question based on what the user actually said.
+/// Returns `None` on LLM failure or if the response is clearly not a question.
+async fn generate_follow_up<R: Runtime>(
+    app: &AppHandle<R>,
+    question: &str,
+    user_answer: &str,
+    digest: &Digest,
+    failover: &Arc<FailoverManager>,
+    prompts_dir: &Path,
+) -> Result<Option<String>> {
+    if user_answer.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let template = load_prompt("mock_followup", failover.active_provider_name(), prompts_dir)
+        .context("follow-up prompt not found")?;
+
+    let prompt = template
+        .replace("{domain}", &digest.domain)
+        .replace("{role}", &digest.role)
+        .replace("{question}", question)
+        .replace("{user_answer}", user_answer);
+
+    let config = CompletionConfig {
+        max_tokens: Some(60),
+        temperature: 0.6,
+        stream: false,
+    };
+
+    let text = failover
+        .complete(prompt, config, app, 60)
+        .await
+        .context("follow-up LLM failed")?;
+
+    let cleaned = text.trim().trim_matches('"').trim().to_string();
+
+    // Sanity check: result should look like a question or short phrase.
+    if cleaned.is_empty() || cleaned.len() > 200 {
+        return Ok(None);
+    }
+
+    Ok(Some(cleaned))
 }
 
 async fn wait_for_ask_question(
