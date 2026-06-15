@@ -81,8 +81,10 @@ pub enum ConductorCommand {
         user_text: String,
         audio_path: String,
     },
-    /// User exits mock mode mid-session.
+    /// User cancels — tear down without a summary screen.
     Abort,
+    /// User ends early — emit `mock_ended` so the UI can show results.
+    FinishEarly,
 }
 
 // ── Conductor ─────────────────────────────────────────────────────────────────
@@ -159,6 +161,7 @@ async fn conductor_loop<R: Runtime>(
     let mut followup_queue: VecDeque<String> = VecDeque::new();
 
     let mut turns_completed: u32 = 0;
+    let mut cancelled = false;
 
     // Build an iterator over both scripted and (eventually) dynamic questions.
     // We process the scripted list first, then drain followup_queue afterward.
@@ -183,8 +186,15 @@ async fn conductor_loop<R: Runtime>(
             + followup_queue.len() as u32
             + u32::from(is_followup);
 
-        if pace == MockPace::Guided && !wait_for_ask_question(&mut cmd_rx, session_id).await {
-            break;
+        if pace == MockPace::Guided {
+            match wait_for_ask_question(&mut cmd_rx, session_id).await {
+                WaitOutcome::Ask => {}
+                WaitOutcome::FinishEarly => break,
+                WaitOutcome::Cancelled => {
+                    cancelled = true;
+                    break;
+                }
+            }
         }
 
         if let Ok(mut buf) = suggested_buffer.write() {
@@ -292,8 +302,13 @@ async fn conductor_loop<R: Runtime>(
             Some(ConductorCommand::AskQuestion) => {
                 warn!(session_id = %session_id, "unexpected AskQuestion during turn");
             }
+            Some(ConductorCommand::FinishEarly) => {
+                info!(session_id = %session_id, "mock interview finish early");
+                break;
+            }
             Some(ConductorCommand::Abort) | None => {
-                info!(session_id = %session_id, "mock interview aborted");
+                info!(session_id = %session_id, "mock interview cancelled");
+                cancelled = true;
                 break;
             }
         }
@@ -321,18 +336,20 @@ async fn conductor_loop<R: Runtime>(
         handle.abort();
     }
 
-    emit_mock_ended(
-        &app,
-        MockEndedPayload {
-            session_id: session_id.to_string(),
+    if !cancelled {
+        emit_mock_ended(
+            &app,
+            MockEndedPayload {
+                session_id: session_id.to_string(),
+                turns_completed,
+            },
+        );
+        info!(
+            session_id = %session_id,
             turns_completed,
-        },
-    );
-    info!(
-        session_id = %session_id,
-        turns_completed,
-        "mock interview ended"
-    );
+            "mock interview ended"
+        );
+    }
 }
 
 /// Generate one targeted follow-up question based on what the user actually said.
@@ -382,14 +399,21 @@ async fn generate_follow_up<R: Runtime>(
     Ok(Some(cleaned))
 }
 
+enum WaitOutcome {
+    Ask,
+    FinishEarly,
+    Cancelled,
+}
+
 async fn wait_for_ask_question(
     cmd_rx: &mut mpsc::Receiver<ConductorCommand>,
     session_id: Uuid,
-) -> bool {
+) -> WaitOutcome {
     loop {
         match cmd_rx.recv().await {
-            Some(ConductorCommand::AskQuestion) => return true,
-            Some(ConductorCommand::Abort) | None => return false,
+            Some(ConductorCommand::AskQuestion) => return WaitOutcome::Ask,
+            Some(ConductorCommand::FinishEarly) => return WaitOutcome::FinishEarly,
+            Some(ConductorCommand::Abort) | None => return WaitOutcome::Cancelled,
             Some(ConductorCommand::TurnComplete { .. }) => {
                 warn!(
                     session_id = %session_id,

@@ -1,9 +1,17 @@
-//! SQLite-backed vector store using the `sqlite-vec` extension.
+//! SQLite-backed dual vector store using the `sqlite-vec` extension.
 //!
-//! Each session gets its own `vec0` virtual table named
-//! `vec_chunks_<session_id_hex>` (32-char lowercase hex UUID without
-//! hyphens). Chunk metadata (text, UUID) lives in a shared `chunk_meta`
-//! table keyed by the same rowid as the vec0 table entry.
+//! ## Dual-store model (Phase 9, design doc §16.5)
+//!
+//! Each session owns two independent sqlite-vec virtual tables:
+//!
+//! | Table name | Metadata table | Content |
+//! |---|---|---|
+//! | `vec_chunks_<id>` | `chunk_meta` | Context: JD, resume, notes, user-provided Q&A |
+//! | `vec_qa_<id>` | `chunk_meta_qa` | Q&A: quality-gated AI-generated answers |
+//!
+//! Separating the tables prevents Q&A chunks from outranking context chunks
+//! during retrieval (Q&A embeddings are semantically very close to the question
+//! they answer and would consistently score higher than JD text).
 //!
 //! ## Score formula
 //!
@@ -75,7 +83,7 @@ fn register_vec_extension() {
 // Store
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// SQLite + sqlite-vec backed vector store.
+/// SQLite + sqlite-vec backed dual vector store.
 ///
 /// Construct with [`SqliteVecStore::new`] and wrap in `Arc` for sharing
 /// across tasks.
@@ -100,9 +108,7 @@ impl SqliteVecStore {
             warn!(mode = %mode, "WAL mode not active (expected for in-memory DBs)");
         }
 
-        // Shared metadata table: one row per chunk, rowid matches the vec0 entry.
-        // `embedding` is stored as raw little-endian f32 bytes so the retriever
-        // can compute real inter-chunk dot-product similarity for MMR.
+        // Context metadata table (existing schema — unchanged for backward compat).
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS chunk_meta (
                  id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -116,30 +122,59 @@ impl SqliteVecStore {
         )
         .context("failed to create chunk_meta table")?;
 
+        // Q&A metadata table (Phase 9 — separate table prevents schema entanglement
+        // and makes session cleanup atomic per store type).
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS chunk_meta_qa (
+                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                 chunk_uuid  TEXT    NOT NULL,
+                 session_id  TEXT    NOT NULL,
+                 text        TEXT    NOT NULL,
+                 embedding   BLOB    NOT NULL DEFAULT ''
+             );
+             CREATE INDEX IF NOT EXISTS idx_chunk_meta_qa_session
+                 ON chunk_meta_qa(session_id);",
+        )
+        .context("failed to create chunk_meta_qa table")?;
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
     }
 
-    /// The `vec0` table name for a session.
-    fn vec_table(session_id: Uuid) -> String {
+    // ── Table name helpers ──────────────────────────────────────────────────
+
+    fn context_vec_table(session_id: Uuid) -> String {
         format!("vec_chunks_{}", session_id.simple())
     }
 
-    /// Create the session's `vec0` virtual table if it does not yet exist.
-    fn ensure_vec_table(conn: &rusqlite::Connection, session_id: Uuid) -> Result<()> {
-        let table = Self::vec_table(session_id);
+    fn qa_vec_table(session_id: Uuid) -> String {
+        format!("vec_qa_{}", session_id.simple())
+    }
+
+    // ── Table creation ──────────────────────────────────────────────────────
+
+    fn ensure_context_table(conn: &rusqlite::Connection, session_id: Uuid) -> Result<()> {
+        let table = Self::context_vec_table(session_id);
         conn.execute_batch(&format!(
             "CREATE VIRTUAL TABLE IF NOT EXISTS {table}
              USING vec0(embedding float[384])"
         ))
-        .with_context(|| format!("failed to create vec table for session {session_id}"))?;
-        Ok(())
+        .with_context(|| format!("failed to create context vec table for session {session_id}"))
     }
 
-    /// Check whether the session's `vec0` table exists in the schema.
-    fn vec_table_exists(conn: &rusqlite::Connection, session_id: Uuid) -> bool {
-        let table = Self::vec_table(session_id);
+    fn ensure_qa_table(conn: &rusqlite::Connection, session_id: Uuid) -> Result<()> {
+        let table = Self::qa_vec_table(session_id);
+        conn.execute_batch(&format!(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS {table}
+             USING vec0(embedding float[384])"
+        ))
+        .with_context(|| format!("failed to create Q&A vec table for session {session_id}"))
+    }
+
+    // ── Table existence checks ──────────────────────────────────────────────
+
+    fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
         conn.query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
             params![table],
@@ -147,6 +182,121 @@ impl SqliteVecStore {
         )
         .unwrap_or(0)
             > 0
+    }
+
+    // ── Shared ingest logic ─────────────────────────────────────────────────
+
+    /// Core ingest routine. `vec_table` and `meta_table` control which store
+    /// the chunks land in. `ensure_fn` creates the vec0 table if absent.
+    fn ingest_into(
+        conn: &rusqlite::Connection,
+        session_id: Uuid,
+        chunks: &[Chunk],
+        vec_table: &str,
+        meta_table: &str,
+        ensure_fn: impl Fn(&rusqlite::Connection, Uuid) -> Result<()>,
+    ) -> Result<()> {
+        ensure_fn(conn, session_id)?;
+
+        let mut meta_stmt = conn
+            .prepare(&format!(
+                "INSERT INTO {meta_table} (chunk_uuid, session_id, text, embedding)
+                 VALUES (?1, ?2, ?3, ?4)"
+            ))
+            .context("prepare meta insert")?;
+        let mut vec_stmt = conn
+            .prepare(&format!(
+                "INSERT INTO {vec_table}(rowid, embedding) VALUES (?1, ?2)"
+            ))
+            .context("prepare vec insert")?;
+
+        for chunk in chunks {
+            let emb_bytes: &[u8] = cast_slice(&chunk.embedding);
+            meta_stmt
+                .execute(params![
+                    chunk.id.to_string(),
+                    chunk.session_id.to_string(),
+                    chunk.text,
+                    emb_bytes,
+                ])
+                .context("insert meta row")?;
+            let rowid = conn.last_insert_rowid();
+
+            let bytes: &[u8] = cast_slice(&chunk.embedding);
+            vec_stmt
+                .execute(params![rowid, bytes])
+                .context("insert vec embedding")?;
+        }
+
+        Ok(())
+    }
+
+    // ── Shared query logic ──────────────────────────────────────────────────
+
+    fn query_from(
+        conn: &rusqlite::Connection,
+        session_id: Uuid,
+        embedding: &[f32],
+        top_k: usize,
+        vec_table: &str,
+        meta_table: &str,
+    ) -> Result<Vec<ScoredChunk>> {
+        if !Self::table_exists(conn, vec_table) {
+            return Ok(vec![]);
+        }
+
+        let bytes: &[u8] = cast_slice(embedding);
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT v.rowid, v.distance, m.chunk_uuid, m.text, m.embedding
+                 FROM {vec_table} v
+                 JOIN {meta_table} m ON m.id = v.rowid
+                 WHERE v.embedding MATCH ?1
+                   AND k = ?2
+                 ORDER BY v.distance"
+            ))
+            .context("prepare query")?;
+
+        let results = stmt
+            .query_map(params![bytes, top_k as i64], |row| {
+                let distance: f64 = row.get(1)?;
+                let chunk_uuid: String = row.get(2)?;
+                let text: String = row.get(3)?;
+                let emb_bytes: Vec<u8> = row.get(4)?;
+                Ok((distance, chunk_uuid, text, emb_bytes))
+            })
+            .context("execute query")?
+            .collect::<Result<Vec<_>, _>>()
+            .context("collect query rows")?;
+
+        let scored: Vec<ScoredChunk> = results
+            .into_iter()
+            .map(|(distance, chunk_uuid, text, emb_bytes)| {
+                // Cosine similarity from L2 distance for unit-norm vectors:
+                // cos_sim = 1 - dist² / 2
+                let dist = distance as f32;
+                let score = 1.0 - (dist * dist) / 2.0;
+
+                let embedding: Vec<f32> = if emb_bytes.len() % 4 == 0 {
+                    cast_slice::<u8, f32>(&emb_bytes).to_vec()
+                } else {
+                    vec![]
+                };
+
+                ScoredChunk {
+                    chunk: Chunk {
+                        id: Uuid::parse_str(&chunk_uuid).unwrap_or_else(|_| Uuid::nil()),
+                        text,
+                        embedding,
+                        session_id,
+                    },
+                    score,
+                }
+            })
+            .collect();
+
+        Ok(scored)
     }
 }
 
@@ -156,55 +306,32 @@ impl SqliteVecStore {
 
 #[async_trait]
 impl VectorInterface for SqliteVecStore {
-    async fn ingest(&self, session_id: Uuid, chunks: Vec<Chunk>) -> Result<()> {
+    async fn ingest_context(&self, session_id: Uuid, chunks: Vec<Chunk>) -> Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("vec store mutex poisoned");
-            Self::ensure_vec_table(&conn, session_id)?;
-
-            let vec_table = Self::vec_table(session_id);
-            let mut meta_stmt = conn
-                .prepare(
-                    "INSERT INTO chunk_meta (chunk_uuid, session_id, text, embedding)
-                     VALUES (?1, ?2, ?3, ?4)",
-                )
-                .context("prepare chunk_meta insert")?;
-            let mut vec_stmt = conn
-                .prepare(&format!(
-                    "INSERT INTO {vec_table}(rowid, embedding) VALUES (?1, ?2)"
-                ))
-                .context("prepare vec insert")?;
-
-            for chunk in &chunks {
-                let emb_bytes: &[u8] = cast_slice(&chunk.embedding);
-                meta_stmt
-                    .execute(params![
-                        chunk.id.to_string(),
-                        chunk.session_id.to_string(),
-                        chunk.text,
-                        emb_bytes,
-                    ])
-                    .context("insert chunk_meta")?;
-                let rowid = conn.last_insert_rowid();
-
-                let bytes: &[u8] = cast_slice(&chunk.embedding);
-                vec_stmt
-                    .execute(params![rowid, bytes])
-                    .context("insert vec embedding")?;
-            }
-
+            let vec_table = SqliteVecStore::context_vec_table(session_id);
+            let meta_table = "chunk_meta";
+            SqliteVecStore::ingest_into(
+                &conn,
+                session_id,
+                &chunks,
+                &vec_table,
+                meta_table,
+                SqliteVecStore::ensure_context_table,
+            )?;
             debug!(
                 session_id = %session_id,
                 count = chunks.len(),
-                "ingested chunks into vector store",
+                "ingested chunks into context store",
             );
             Ok(())
         })
         .await
-        .context("ingest spawn_blocking panicked")?
+        .context("ingest_context spawn_blocking panicked")?
     }
 
-    async fn query(
+    async fn query_context(
         &self,
         session_id: Uuid,
         embedding: &[f32],
@@ -212,92 +339,101 @@ impl VectorInterface for SqliteVecStore {
     ) -> Result<Vec<ScoredChunk>> {
         let conn = self.conn.clone();
         let embedding = embedding.to_vec();
-
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("vec store mutex poisoned");
-
-            if !Self::vec_table_exists(&conn, session_id) {
-                return Ok(vec![]);
-            }
-
-            let vec_table = Self::vec_table(session_id);
-            let bytes: &[u8] = cast_slice(&embedding);
-
-            // sqlite-vec's vec0 requires `k = ?` in the WHERE clause (not a
-            // parameterised LIMIT) for the KNN query planner to activate.
-            // Return the stored embedding so the retriever can compute real
-            // inter-chunk dot-product similarity for MMR de-duplication.
-            let mut stmt = conn
-                .prepare(&format!(
-                    "SELECT v.rowid, v.distance, m.chunk_uuid, m.text, m.embedding
-                     FROM {vec_table} v
-                     JOIN chunk_meta m ON m.id = v.rowid
-                     WHERE v.embedding MATCH ?1
-                       AND k = ?2
-                     ORDER BY v.distance"
-                ))
-                .context("prepare query")?;
-
-            let results = stmt
-                .query_map(params![bytes, top_k as i64], |row| {
-                    let distance: f64 = row.get(1)?;
-                    let chunk_uuid: String = row.get(2)?;
-                    let text: String = row.get(3)?;
-                    let emb_bytes: Vec<u8> = row.get(4)?;
-                    Ok((distance, chunk_uuid, text, emb_bytes))
-                })
-                .context("execute query")?
-                .collect::<Result<Vec<_>, _>>()
-                .context("collect query rows")?;
-
-            let scored: Vec<ScoredChunk> = results
-                .into_iter()
-                .map(|(distance, chunk_uuid, text, emb_bytes)| {
-                    // Cosine similarity from L2 distance for unit-norm vectors:
-                    // cos_sim = 1 - dist² / 2
-                    let dist = distance as f32;
-                    let score = 1.0 - (dist * dist) / 2.0;
-
-                    // Deserialise the stored f32 bytes back to a Vec<f32>.
-                    let embedding: Vec<f32> = if emb_bytes.len() % 4 == 0 {
-                        cast_slice::<u8, f32>(&emb_bytes).to_vec()
-                    } else {
-                        vec![]
-                    };
-
-                    ScoredChunk {
-                        chunk: Chunk {
-                            id: Uuid::parse_str(&chunk_uuid).unwrap_or_else(|_| Uuid::nil()),
-                            text,
-                            embedding,
-                            session_id,
-                        },
-                        score,
-                    }
-                })
-                .collect();
-
+            let vec_table = SqliteVecStore::context_vec_table(session_id);
+            let results = SqliteVecStore::query_from(
+                &conn,
+                session_id,
+                &embedding,
+                top_k,
+                &vec_table,
+                "chunk_meta",
+            )?;
             debug!(
                 session_id = %session_id,
-                returned = scored.len(),
-                "vector store query complete",
+                returned = results.len(),
+                "context store query complete",
             );
-            Ok(scored)
+            Ok(results)
         })
         .await
-        .context("query spawn_blocking panicked")?
+        .context("query_context spawn_blocking panicked")?
+    }
+
+    async fn ingest_qa(&self, session_id: Uuid, chunks: Vec<Chunk>) -> Result<()> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("vec store mutex poisoned");
+            let vec_table = SqliteVecStore::qa_vec_table(session_id);
+            let meta_table = "chunk_meta_qa";
+            SqliteVecStore::ingest_into(
+                &conn,
+                session_id,
+                &chunks,
+                &vec_table,
+                meta_table,
+                SqliteVecStore::ensure_qa_table,
+            )?;
+            debug!(
+                session_id = %session_id,
+                count = chunks.len(),
+                "ingested Q&A pair into Q&A store",
+            );
+            Ok(())
+        })
+        .await
+        .context("ingest_qa spawn_blocking panicked")?
+    }
+
+    async fn query_qa(
+        &self,
+        session_id: Uuid,
+        embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<ScoredChunk>> {
+        let conn = self.conn.clone();
+        let embedding = embedding.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().expect("vec store mutex poisoned");
+            let vec_table = SqliteVecStore::qa_vec_table(session_id);
+            let results = SqliteVecStore::query_from(
+                &conn,
+                session_id,
+                &embedding,
+                top_k,
+                &vec_table,
+                "chunk_meta_qa",
+            )?;
+            debug!(
+                session_id = %session_id,
+                returned = results.len(),
+                "Q&A store query complete",
+            );
+            Ok(results)
+        })
+        .await
+        .context("query_qa spawn_blocking panicked")?
     }
 
     async fn delete_session(&self, session_id: Uuid) -> Result<()> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().expect("vec store mutex poisoned");
-            let vec_table = Self::vec_table(session_id);
 
-            if Self::vec_table_exists(&conn, session_id) {
-                conn.execute_batch(&format!("DROP TABLE {vec_table}"))
+            let ctx_table = SqliteVecStore::context_vec_table(session_id);
+            let qa_table = SqliteVecStore::qa_vec_table(session_id);
+
+            if SqliteVecStore::table_exists(&conn, &ctx_table) {
+                conn.execute_batch(&format!("DROP TABLE {ctx_table}"))
                     .with_context(|| {
-                        format!("failed to drop vec table for session {session_id}")
+                        format!("failed to drop context vec table for session {session_id}")
+                    })?;
+            }
+            if SqliteVecStore::table_exists(&conn, &qa_table) {
+                conn.execute_batch(&format!("DROP TABLE {qa_table}"))
+                    .with_context(|| {
+                        format!("failed to drop Q&A vec table for session {session_id}")
                     })?;
             }
 
@@ -307,7 +443,13 @@ impl VectorInterface for SqliteVecStore {
             )
             .context("delete chunk_meta for session")?;
 
-            debug!(session_id = %session_id, "deleted session from vector store");
+            conn.execute(
+                "DELETE FROM chunk_meta_qa WHERE session_id = ?1",
+                params![session_id.to_string()],
+            )
+            .context("delete chunk_meta_qa for session")?;
+
+            debug!(session_id = %session_id, "deleted session from both vector stores");
             Ok(())
         })
         .await
@@ -377,10 +519,10 @@ mod tests {
         let emb = require_embedder!();
 
         let chunk = make_chunk("distributed systems and fault tolerance", session, emb);
-        store.ingest(session, vec![chunk]).await.unwrap();
+        store.ingest_context(session, vec![chunk]).await.unwrap();
 
         let query = emb.embed_one("Tell me about distributed systems").unwrap();
-        let results = store.query(session, &query, 5).await.unwrap();
+        let results = store.query_context(session, &query, 5).await.unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(
@@ -390,29 +532,63 @@ mod tests {
         );
     }
 
-    /// Session isolation: chunks ingested under session A must not appear in
-    /// queries against session B (design doc §11 and RAG rules §13).
+    /// Session isolation: context chunks ingested under session A must not
+    /// appear in context queries against session B.
     #[tokio::test]
-    async fn test_session_isolation() {
+    async fn test_context_session_isolation() {
         let store = make_store();
         let session_a = Uuid::new_v4();
         let session_b = Uuid::new_v4();
         let emb = require_embedder!();
 
         let chunk = make_chunk("machine learning and neural networks", session_a, emb);
-        store.ingest(session_a, vec![chunk]).await.unwrap();
+        store.ingest_context(session_a, vec![chunk]).await.unwrap();
 
         let query = emb.embed_one("machine learning").unwrap();
-        let results = store.query(session_b, &query, 5).await.unwrap();
+        let results = store.query_context(session_b, &query, 5).await.unwrap();
 
         assert!(
             results.is_empty(),
-            "session B must not see chunks ingested under session A"
+            "session B must not see context chunks from session A"
         );
     }
 
+    /// Q&A store isolation: Q&A chunks must not appear in context queries and
+    /// vice versa for the same session.
     #[tokio::test]
-    async fn test_chunk_count() {
+    async fn test_qa_context_store_isolation() {
+        let store = make_store();
+        let session = Uuid::new_v4();
+        let emb = require_embedder!();
+
+        let ctx_chunk = make_chunk("Identity and access management fundamentals", session, emb);
+        store.ingest_context(session, vec![ctx_chunk]).await.unwrap();
+
+        let qa_chunk = make_chunk(
+            "Q: Tell me about yourself\nA: I am an IAM architect with 8 years experience",
+            session,
+            emb,
+        );
+        store.ingest_qa(session, vec![qa_chunk]).await.unwrap();
+
+        // Context query should not return the Q&A chunk.
+        let ctx_query = emb.embed_one("Tell me about yourself").unwrap();
+        let ctx_results = store.query_context(session, &ctx_query, 5).await.unwrap();
+        assert!(
+            ctx_results
+                .iter()
+                .all(|r| !r.chunk.text.contains("Tell me about yourself")),
+            "context store must not return Q&A chunk"
+        );
+
+        // Q&A query should return the Q&A chunk, not the context chunk.
+        let qa_results = store.query_qa(session, &ctx_query, 5).await.unwrap();
+        assert_eq!(qa_results.len(), 1);
+        assert!(qa_results[0].chunk.text.contains("Tell me about yourself"));
+    }
+
+    #[tokio::test]
+    async fn test_chunk_count_context_only() {
         let store = make_store();
         let session = Uuid::new_v4();
         let emb = require_embedder!();
@@ -423,36 +599,46 @@ mod tests {
             .iter()
             .map(|t| make_chunk(t, session, emb))
             .collect();
-        store.ingest(session, chunks).await.unwrap();
+        store.ingest_context(session, chunks).await.unwrap();
 
+        // chunk_count reflects context store only.
         assert_eq!(store.chunk_count(session), 3);
     }
 
     #[tokio::test]
-    async fn test_delete_session_removes_all_data() {
+    async fn test_delete_session_removes_both_stores() {
         let store = make_store();
         let session = Uuid::new_v4();
         let emb = require_embedder!();
 
-        let chunk = make_chunk("Rust ownership and borrowing", session, emb);
-        store.ingest(session, vec![chunk]).await.unwrap();
-        assert_eq!(store.chunk_count(session), 1);
+        let ctx_chunk = make_chunk("Rust ownership and borrowing", session, emb);
+        store.ingest_context(session, vec![ctx_chunk]).await.unwrap();
+
+        let qa_chunk = make_chunk(
+            "Q: What is ownership?\nA: Ownership is a set of rules that govern memory",
+            session,
+            emb,
+        );
+        store.ingest_qa(session, vec![qa_chunk]).await.unwrap();
 
         store.delete_session(session).await.unwrap();
 
         assert_eq!(store.chunk_count(session), 0);
+
         let query = emb.embed_one("Rust ownership").unwrap();
-        let results = store.query(session, &query, 5).await.unwrap();
-        assert!(results.is_empty(), "query after delete must return empty");
+        let ctx_results = store.query_context(session, &query, 5).await.unwrap();
+        let qa_results = store.query_qa(session, &query, 5).await.unwrap();
+        assert!(ctx_results.is_empty(), "context store must be empty after delete");
+        assert!(qa_results.is_empty(), "Q&A store must be empty after delete");
     }
 
     #[tokio::test]
-    async fn test_query_on_empty_session_returns_empty() {
+    async fn test_query_empty_qa_store_returns_empty() {
         let store = make_store();
         let session = Uuid::new_v4();
         let emb = require_embedder!();
         let query = emb.embed_one("anything").unwrap();
-        let results = store.query(session, &query, 5).await.unwrap();
+        let results = store.query_qa(session, &query, 5).await.unwrap();
         assert!(results.is_empty());
     }
 
@@ -467,13 +653,16 @@ mod tests {
             "product management and roadmaps",
             "distributed systems architecture",
         ];
-        let chunks: Vec<Chunk> = texts.iter().map(|t| make_chunk(t, session, emb)).collect();
-        store.ingest(session, chunks).await.unwrap();
+        let chunks: Vec<Chunk> = texts
+            .iter()
+            .map(|t| make_chunk(t, session, emb))
+            .collect();
+        store.ingest_context(session, chunks).await.unwrap();
 
         let query = emb
             .embed_one("software engineering and architecture")
             .unwrap();
-        let results = store.query(session, &query, 3).await.unwrap();
+        let results = store.query_context(session, &query, 3).await.unwrap();
 
         for r in &results {
             assert!(
@@ -484,16 +673,16 @@ mod tests {
         }
     }
 
+    /// Backward-compat alias: `ingest` routes to context store.
     #[tokio::test]
-    async fn test_multi_chunk_batch_ingest() {
+    async fn test_compat_ingest_alias() {
         let store = make_store();
         let session = Uuid::new_v4();
         let emb = require_embedder!();
 
-        let texts: Vec<&str> = (0..10).map(|_| "unique chunk text").collect();
-        let chunks: Vec<Chunk> = texts.iter().map(|t| make_chunk(t, session, emb)).collect();
-        store.ingest(session, chunks).await.unwrap();
-
-        assert_eq!(store.chunk_count(session), 10);
+        let chunk = make_chunk("IAM architect background", session, emb);
+        // Old call site — uses the alias, should land in context store.
+        store.ingest(session, vec![chunk]).await.unwrap();
+        assert_eq!(store.chunk_count(session), 1);
     }
 }

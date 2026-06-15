@@ -542,6 +542,81 @@ Prerequisites: Groq API key in Settings; digest confirmed with ≥1 `likely_ques
 
 ---
 
+## Phase 9 — Dual Vector Store Q&A Embedding
+
+**Goal:** Embed quality-gated AI answers into a per-session Q&A vector store (`session_qa_<id>`) separate from the context store (`session_context_<id>`). Use slot-allocated retrieval (6 context + 2 Q&A chunks) at live/rehearsal time. Embed user-provided Q&A pairs directly into the context store at confirm_digest time.  
+**Branch:** `feature/qa-pair-embedding`  
+**Duration:** 3–4 days  
+**Design reference:** `docs/flint_system_design_v3.md` Section 16.5, `docs/QA_RETRIEVAL_AND_QUESTION_BANK.md`  
+**Depends on:** Phase 5.5 complete ✅
+
+### Background — Bug Fixes Applied Before Phase 9 (June 2026)
+
+The following bugs were identified and fixed during active use of the question bank feature. Phase 9 builds on top of these already-merged fixes.
+
+| Bug | Root cause | Fix merged |
+|-----|-----------|------------|
+| Previous session questions shown in rehearsal | `get_question_bank` seeded from global in-memory `session_digest` | Seed from SQLite-scoped `load_session_digest(sid)` |
+| Question count capped at ~10 | `max_tokens: 1024` on digest LLM call | Raised to `max_tokens: 4096` |
+| Question count capped at ~25 even with 4096 tokens | Prompt said "up to 20 interview questions" | Removed cap in prompt; added "no upper limit" instruction |
+| Bank not reset after re-extraction | `confirm_digest` did not sync question bank | Added bank re-sync block in `confirm_digest` |
+| Large question lists truncated | LLM output budget finite | Added `extract_questions_from_text()` regex fallback; runs O(lines), zero LLM cost |
+
+### Architecture (Phase 9)
+
+See `docs/flint_system_design_v3.md` Section 16.5 for full dual-store design. Summary:
+
+- Two sqlite-vec tables per session: `session_context_<id>` (unchanged) and `session_qa_<id>` (new)
+- User-provided Q&A pairs embedded into context store (trusted, ground-truth)
+- AI-generated answers embedded into Q&A store only when confidence ≥ 0.65
+- Retrieval: 6 context slots (always filled) + 2 Q&A slots (score ≥ 0.80 threshold, empty if none qualify)
+- Prompt labels distinguish context chunks from Q&A chunks
+
+### Tasks
+
+| # | Task | Agent | Review? | Status |
+|---|---|---|---|---|
+| 9.1 | Extend `VectorInterface` trait: `ingest_context`, `ingest_qa`, `query_context`, `query_qa` + deprecate generic `ingest`/`query` | Cursor Agent (Sonnet) | All call sites updated | [ ] Not started |
+| 9.2 | `rag/store.rs`: SQLite migration v9 — create `session_qa_<id>` virtual table alongside `session_context_<id>`; update `VectorStore` impl | Cursor Agent | Two-table isolation integration test | [ ] Not started |
+| 9.3 | `rag/retriever.rs`: `retrieve_for_prompt(session_id, question_embedding)` — 6 context + 2 Q&A slots with MMR on context | Cursor Agent | Verify Q&A never displaces context slots | [ ] Not started |
+| 9.4 | `orchestrator/directional.rs` + `depth.rs`: after turn completes, if confidence ≥ 0.65 embed Q&A pair into `session_qa_<id>` | Cursor Agent (Sonnet) | Confirm low-confidence answers not embedded | [ ] Not started |
+| 9.5 | `commands.rs` `confirm_digest`: embed user-provided Q&A pairs (from question_bank) into `session_context_<id>` | Cursor Agent | Round-trip: embed → query → assert retrieval | [ ] Not started |
+| 9.6 | Prompt templates: add `[How you answered a similar question earlier]` label section; load from `/prompts/` | Cursor Agent | Labels present only when Q&A chunks non-empty | [ ] Not started |
+| 9.7 | Integration tests: dual-table isolation, slot allocation, confidence gate, context store Q&A embedding | `best-of-n-runner` (3 attempts) | — | [ ] Not started |
+| 9.8 | `delete_session` extended: drops both tables | Cursor Agent | Verify no orphaned Q&A table | [ ] Not started |
+
+### Phase 9 Review Gate
+
+- [ ] Two sqlite-vec tables per session — integration test confirms session A Q&A does not appear in session B context queries
+- [ ] Confidence gate: answer with score 0.64 not embedded; score 0.65 embedded — unit test
+- [ ] Slot allocation: context query always returns ≥ 6 chunks (or all available if < 6); Q&A returns 0–2 — unit test
+- [ ] User-provided Q&A pairs in context store: paste "Q: X\nA: Y" → confirm digest → query → assert chunk retrieved with score ≥ 0.80
+- [ ] Prompt labels: Q&A label present when Q&A chunks non-empty; absent when Q&A store is empty
+- [ ] `cargo test --test rag_dual_store` passes
+- [ ] Retrieval P95 < 50ms for both stores combined (NFR gate)
+
+---
+
+## Phase 9.5 — Shared Question Bank (Deferred)
+
+**Gate:** Phase 9 shipped + ≥ 500 quality-gated Q&A pairs per domain accumulated from production sessions  
+**Duration:** 4–6 weeks  
+**Design reference:** `docs/QA_RETRIEVAL_AND_QUESTION_BANK.md` Sections 4–7
+
+**Goal:** A shared global repository of curated interview questions with canonical answers, enriched continuously from real session signal and accessible across users. Quality controlled by an automated agent pipeline (Generator → Critic → Synthesiser → Validator). User contributions opt-in only.
+
+**Not detailed here until gate met.** See `docs/QA_RETRIEVAL_AND_QUESTION_BANK.md` for full architecture.
+
+| Task | Notes |
+|------|-------|
+| Smart Resume `services/questions/` module | REST API: `GET /api/interview-questions?company=&role=&domain=` |
+| Flint integration: query shared bank at session start | Merge with local bank; local takes priority on conflicts |
+| Agent enrichment pipeline | Generator → Critic → Synthesiser → Validator; run offline; curated canonical answers |
+| Privacy opt-in flow | Per-session consent dialog; BYOK defaults to opt-out; Supabase RLS on contribution rows |
+| Admin panel: question corpus management | Tag, review, promote, demote canonical answers |
+
+---
+
 ## Quick Reference — What to Prompt Cursor With
 
 ### Starting a new task

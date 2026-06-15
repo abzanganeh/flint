@@ -126,6 +126,7 @@ mod tests {
             session_id: Uuid::new_v4(),
             question: question.to_string(),
             rag_chunks: vec![],
+            qa_chunks: vec![],
             digest: Arc::new(crate::digest::Digest {
                 role: "Engineer".to_string(),
                 company: "Acme".to_string(),

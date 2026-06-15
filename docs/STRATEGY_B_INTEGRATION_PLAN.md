@@ -535,14 +535,92 @@ Popup states: not logged in → logged in on job page → not on job page
 
 ## Phase 5.5 — Interview Question Corpus API (deferred, plan stub)
 
-**Gate:** v2 Mock Interview shipped and question bank feature validated
+**Gate:** Flint Phase 9 (dual vector stores) shipped + v2 Mock Interview shipped + ≥ 500 quality-gated Q&A pairs per domain accumulated from production sessions  
+**Full design:** `Flint/docs/QA_RETRIEVAL_AND_QUESTION_BANK.md`
 
-**Goal:** Power the in-app question bank search with a curated company/role question dataset.
+**Goal:** Power the in-app question bank and live retrieval with a curated company/role/domain question corpus. Two tiers: (1) static curated dataset served from Smart Resume API; (2) a live-enriched shared question bank fed from anonymised session signal.
 
-- **New route:** `GET /api/interview-questions?company=&role=&domain=`
-- Dataset: curated/sourced from public Glassdoor, Blind, Leetcode discussion threads; clearly labelled "suggested, not verified interview history"
-- Flint desktop queries this API from question bank search — caches results locally per session
-- No detailed implementation plan until gate met; route contract defined here for compatibility planning
+### Route Contract (defined now for compatibility planning)
+
+| Route | Auth | Response |
+|-------|------|----------|
+| `GET /api/interview-questions?company=&role=&domain=` | Bearer JWT | `{ questions: [{ id, text, domain, tags, canonical_answer? }] }` |
+| `GET /api/interview-questions/{id}/canonical` | Bearer JWT | `{ question_id, answer_text, confidence, last_updated }` |
+| `POST /api/interview-questions/contribute` | Bearer JWT | `{ question_id, answer_text, session_id }` → opt-in only |
+
+### Data Model
+
+```sql
+CREATE TABLE interview_questions (
+    id UUID PRIMARY KEY,
+    text TEXT NOT NULL,
+    domain TEXT NOT NULL,          -- "software_engineering", "product", "finance", etc.
+    role_tags TEXT[],              -- ["senior", "architect", "ic"]
+    company_tags TEXT[],           -- ["faang", "startup", "finance"]
+    difficulty TEXT,               -- "behavioural", "technical", "situational"
+    source TEXT NOT NULL,          -- "curated", "session_signal", "community"
+    canonical_answer TEXT,         -- NULL until agent pipeline completes
+    canonical_confidence REAL,     -- 0.0–1.0; threshold 0.65 before surfacing to users
+    canonical_updated_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE question_contributions (
+    id UUID PRIMARY KEY,
+    question_id UUID REFERENCES interview_questions(id),
+    user_id UUID REFERENCES auth.users(id),
+    answer_text TEXT NOT NULL,
+    session_confidence REAL NOT NULL,   -- Flint confidence score from source session
+    session_id TEXT NOT NULL,
+    consented BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+RLS: `question_contributions` row visible only to owning `user_id` and `role = admin`. `interview_questions` readable by all authenticated users; writable only by service role.
+
+### Agent Enrichment Pipeline (offline, not request-path)
+
+Run as a background job or Supabase Edge Function on a schedule (nightly or on-demand):
+
+```
+For each question with >= 3 contributions (consented = TRUE):
+    1. Generator: LLM synthesises candidate answer from all contributions
+    2. Critic: separate LLM call evaluates candidate against a rubric
+       - Factual accuracy (0–10)
+       - Behavioural framework adherence (0–10)
+       - Conciseness — 60–120 second verbal delivery (0–10)
+       - Domain specificity vs genericism (0–10)
+    3. If Critic total < 28/40: discard candidate, log for manual review
+    4. Synthesiser: refine passing candidate based on Critic feedback
+    5. Validator: final LLM + regex check — no factual claims that can't be grounded in the question context
+    6. If Validator passes: set canonical_answer, canonical_confidence = avg_critic/40, canonical_updated_at = NOW()
+    7. Publish to interview_questions table
+```
+
+This pipeline ensures bad answers in contributions never pollute the canonical answer seen by other users. A canonical answer is not surfaced until all four agents agree.
+
+### Privacy Model
+
+- Contributions opt-in only per session — never automatic
+- Opt-in dialog shown once per account (BYOK users default opt-out; platform-credit users shown dialog)
+- Contributions stored with `user_id` for GDPR deletion path
+- Canonical answers are fully anonymised — no user attribution
+- `GET /api/user/data-export` includes all `question_contributions` rows for the user
+
+### Flint Desktop Integration
+
+At session start (after question bank is seeded from digest), Flint queries:
+```
+GET /api/interview-questions?company={company}&role={role}&domain={domain}&limit=20
+```
+Merges results with local bank: local questions take priority; shared questions appended with `[suggested]` label.
+
+During live/rehearsal retrieval (Section 16.5 dual-store): shared canonical answers, if available for a matched question, are injected as a third prompt slot labelled `[Industry-standard answer for this question type]`. This is a separate slot from the 6 context + 2 Q&A pair slots — it does not displace either.
+
+### Flint Phase 9 Prerequisite
+
+Phase 5.5 cannot ship before Flint Phase 9 (dual vector stores) because the shared canonical answers are embedded into the session Q&A store (`session_qa_<id>`) at session start — not kept in plain text. Without Phase 9's schema, there is no store to embed them into.
 
 ---
 
