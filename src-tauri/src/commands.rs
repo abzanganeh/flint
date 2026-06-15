@@ -3,9 +3,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as AnyhowContext;
 use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::audio::capture::AudioCapture;
@@ -827,6 +828,96 @@ pub async fn confirm_digest(
         warn!(session_id = %sid, error = %e, "failed to persist confirmed digest");
     }
 
+    // Sync the question bank to the newly confirmed digest. This is essential
+    // when the user returns to Session Design and re-extracts — without this
+    // the bank retains stale questions from the previous extraction run.
+    //
+    // We also scan the raw context text for question-lines (ending with `?`)
+    // and merge them in. This is the safety net for large structured question
+    // banks that exceed the LLM digest token budget: the model can only fit
+    // ~25–30 questions in its JSON output at 4096 tokens, but a user may paste
+    // 100+ staged questions. The regex path costs zero LLM tokens and runs in
+    // O(lines).
+    let context_blob_opt = state.persistence.get_session_context(sid).ok();
+    {
+        let mut bank: Vec<String> = digest_rust.likely_questions.clone();
+
+        if let Some(ref context_blob) = context_blob_opt {
+            let extracted = extract_questions_from_text(context_blob);
+            let bank_lower: Vec<String> = bank.iter().map(|q| q.to_lowercase()).collect();
+            for q in extracted {
+                if !bank_lower.iter().any(|existing| *existing == q.to_lowercase()) {
+                    bank.push(q);
+                }
+            }
+        }
+
+        if let Err(e) = state.persistence.store_question_bank(sid, &bank) {
+            warn!(session_id = %sid, error = %e, "failed to reset question bank on confirm_digest");
+        } else {
+            debug!(session_id = %sid, count = bank.len(), "question bank synced on confirm_digest");
+        }
+    }
+
+    // Embed user-provided Q&A pairs into the context store (Phase 9).
+    //
+    // If the user pasted structured "Q: X\nA: Y" content, we extract and
+    // re-embed each pair as a unified chunk. This gives semantic retrieval a
+    // structured target rather than relying on the chunker to happen to keep Q
+    // and A adjacent. Pairs are embedded into the context store (trusted
+    // ground truth), not the Q&A store (AI-generated answers only).
+    //
+    // Fire-and-forget: failure here is non-fatal.
+    if let (Some(context_blob), Ok(embedder)) =
+        (context_blob_opt, state.require_embedder())
+    {
+        let pairs = extract_qa_pairs_from_text(&context_blob);
+        if !pairs.is_empty() {
+            let store = Arc::clone(&state.vector_store);
+            tokio::spawn(async move {
+                let result: anyhow::Result<()> = async {
+                    let pair_refs: Vec<&str> = pairs.iter().map(|s| s.as_str()).collect();
+                    let embeddings = tokio::task::spawn_blocking({
+                        let pair_refs: Vec<String> = pairs.clone();
+                        move || {
+                            let refs: Vec<&str> = pair_refs.iter().map(|s| s.as_str()).collect();
+                            embedder
+                                .embed_batch(&refs)
+                                .context("batch embed Q&A pairs failed")
+                        }
+                    })
+                    .await
+                    .context("embed_batch task panicked")?
+                    .context("embed_batch failed")?;
+                    let _ = pair_refs; // consumed above
+                    let chunks: Vec<crate::interfaces::vector::Chunk> = pairs
+                        .into_iter()
+                        .zip(embeddings)
+                        .map(|(text, embedding)| crate::interfaces::vector::Chunk {
+                            id: uuid::Uuid::new_v4(),
+                            text,
+                            embedding,
+                            session_id: sid,
+                        })
+                        .collect();
+                    store
+                        .ingest_context(sid, chunks)
+                        .await
+                        .context("ingest user Q&A pairs into context store failed")?;
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = result {
+                    tracing::warn!(
+                        session_id = %sid,
+                        error = %e,
+                        "user Q&A pair embedding skipped (non-fatal)"
+                    );
+                }
+            });
+        }
+    }
+
     // Kick off a background Tavily sweep for company/role context so results
     // are in session RAG before the user reaches rehearsal or mock interview.
     if let Ok(embedder) = state.require_embedder() {
@@ -1448,6 +1539,122 @@ pub async fn return_to_session_design(
 // Phase 5.5.3 — Question bank
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Extract question-like lines from raw context text without an LLM call.
+///
+/// A line is treated as a question when it ends with `?` after stripping
+/// whitespace, bullet markers (`-`, `*`, `•`), and numbering (`1.`, `a)`).
+/// This runs in O(lines) and produces zero LLM tokens — it is the safety net
+/// for large explicitly-pasted question banks that exceed the digest token budget.
+fn extract_questions_from_text(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|raw| {
+            // Strip leading list markers before checking content.
+            let stripped = raw
+                .trim()
+                .trim_start_matches(|c: char| {
+                    c == '-' || c == '*' || c == '•' || c == '⭐' || c == '#'
+                })
+                .trim();
+
+            // Strip leading numbering: "1.", "1)", "a.", "a)" etc.
+            let content = {
+                let mut chars = stripped.chars().peekable();
+                let mut prefix_len = 0;
+                // Consume up to 3 alphanumeric chars followed by a `.` or `)`.
+                let mut count = 0;
+                while let Some(&c) = chars.peek() {
+                    if count >= 3 {
+                        break;
+                    }
+                    if c.is_alphanumeric() {
+                        chars.next();
+                        count += 1;
+                        prefix_len += c.len_utf8();
+                    } else if (c == '.' || c == ')') && count > 0 {
+                        chars.next();
+                        prefix_len += c.len_utf8();
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                let remainder = stripped[prefix_len..].trim();
+                if remainder.is_empty() {
+                    stripped
+                } else {
+                    remainder
+                }
+            };
+
+            if content.ends_with('?') && content.len() > 5 {
+                Some(content.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract "Q: ...\nA: ..." pairs from raw context text for embedding.
+///
+/// Scans for lines starting with "Q:" (case-insensitive, optionally "Question:")
+/// followed by one or more "A:" lines. Blank lines between pairs are tolerated.
+/// Returns each pair formatted as "Q: {question}\nA: {answer}" for embedding
+/// into the context vector store.
+///
+/// Only called from `confirm_digest` to extract trusted user-curated Q&A content
+/// that should be retrievable at inference time.
+fn extract_qa_pairs_from_text(text: &str) -> Vec<String> {
+    let mut pairs: Vec<String> = Vec::new();
+    let mut current_q: Option<String> = None;
+    let mut current_a_lines: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+
+        let is_q_line = lower.starts_with("q:") || lower.starts_with("question:");
+        let is_a_line = lower.starts_with("a:") || lower.starts_with("answer:");
+
+        if is_q_line {
+            // Flush previous pair if complete.
+            if let Some(q) = current_q.take() {
+                let a = current_a_lines.join(" ").trim().to_string();
+                if !a.is_empty() {
+                    pairs.push(format!("Q: {q}\nA: {a}"));
+                }
+                current_a_lines.clear();
+            }
+            let q_text = trimmed
+                .trim_start_matches(|c: char| c.is_alphabetic() || c == ':')
+                .trim()
+                .to_string();
+            if !q_text.is_empty() {
+                current_q = Some(q_text);
+            }
+        } else if is_a_line {
+            let a_text = trimmed
+                .trim_start_matches(|c: char| c.is_alphabetic() || c == ':')
+                .trim()
+                .to_string();
+            current_a_lines.push(a_text);
+        } else if !trimmed.is_empty() && current_q.is_some() && !current_a_lines.is_empty() {
+            // Continuation of the current answer.
+            current_a_lines.push(trimmed.to_string());
+        }
+    }
+
+    // Flush last pair.
+    if let Some(q) = current_q {
+        let a = current_a_lines.join(" ").trim().to_string();
+        if !a.is_empty() {
+            pairs.push(format!("Q: {q}\nA: {a}"));
+        }
+    }
+
+    pairs
+}
+
 /// Return the question bank for a session.
 ///
 /// Returns digest `likely_questions` merged with any user-added questions,
@@ -1468,13 +1675,17 @@ pub async fn get_question_bank(
         return Ok(persisted);
     }
 
-    // First call: seed from digest likely_questions.
+    // First call: seed from the persisted digest for this specific session.
+    // We intentionally query SQLite rather than the in-memory `session_digest`
+    // to guarantee the seed belongs to `sid` — the in-memory value is a shared
+    // mutable slot that may still hold a previous session's data at the moment
+    // `get_question_bank` is first called.
     let seed: Vec<String> = state
-        .session_digest
-        .read()
-        .await
-        .as_ref()
-        .map(|d| d.likely_questions.clone())
+        .persistence
+        .load_session_digest(sid)
+        .ok()
+        .flatten()
+        .map(|d| d.likely_questions)
         .unwrap_or_default();
 
     if !seed.is_empty() {
@@ -3082,13 +3293,27 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 /// Abort the mock interview and transition to REHEARSING.
+/// Stop the mock interview session.
+///
+/// `finish: true` — end early and emit `mock_ended` for the summary screen.
+/// `finish: false` (default) — cancel without summary; user can restart from the picker.
 ///
 /// Valid from: `MOCK_INTERVIEW`.
 #[tauri::command]
-pub async fn stop_mock(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn stop_mock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    finish: Option<bool>,
+) -> Result<(), String> {
+    let finish = finish.unwrap_or(false);
     // Signal conductor to stop.
     if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-        let _ = handles.conductor.cmd_tx.send(ConductorCommand::Abort).await;
+        let cmd = if finish {
+            ConductorCommand::FinishEarly
+        } else {
+            ConductorCommand::Abort
+        };
+        let _ = handles.conductor.cmd_tx.send(cmd).await;
     }
 
     // Shutdown mic capture.

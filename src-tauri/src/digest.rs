@@ -130,11 +130,15 @@ pub async fn extract_digest(context_text: &str, llm: &dyn LLMProvider) -> Result
 
     debug!(provider = llm.name(), "firing digest extraction LLM call");
 
+    // 4096 tokens lets the LLM faithfully reproduce large explicitly-listed
+    // question banks (100+ questions at ~10 words each ≈ 1500 tokens of JSON).
+    // The prior 1024 limit caused the model to stop around question 10; 2048
+    // handled ~25; 4096 covers virtually all realistic structured question lists.
     let raw = llm
         .complete(
             prompt,
             crate::llm::provider::CompletionConfig {
-                max_tokens: Some(1024),
+                max_tokens: Some(4096),
                 temperature: 0.0,
                 stream: false,
             },

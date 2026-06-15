@@ -198,11 +198,28 @@ fn build_prompt(
         .collect::<Vec<_>>()
         .join("\n\n");
 
+    // Q&A section: only injected when past answers qualify (score ≥ 0.80).
+    // The label ensures the model distinguishes these from ground-truth context.
+    let qa_section = if ctx.qa_chunks.is_empty() {
+        String::new()
+    } else {
+        let qa_text = ctx
+            .qa_chunks
+            .iter()
+            .map(|c| c.chunk.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        format!(
+            "\n\n[How you answered a similar question earlier — use as a reference, not verbatim]\n{qa_text}"
+        )
+    };
+
     let key_skills = ctx.digest.key_skills.join(", ");
 
     Ok(template
         .replace("{session_domain}", &ctx.digest.domain)
         .replace("{rag_chunks}", &rag_text)
+        .replace("{qa_chunks}", &qa_section)
         .replace(
             "{rolling_summary_if_compressed}",
             &ctx.memory_ctx.rolling_summary,

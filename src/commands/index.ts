@@ -645,7 +645,8 @@ export const endMockTurn = (): Promise<void> => invoke<void>("end_mock_turn");
 
 export const skipMockTurn = (): Promise<void> => invoke<void>("skip_mock_turn");
 
-export const stopMock = (): Promise<void> => invoke<void>("stop_mock");
+export const stopMock = (finish = false): Promise<void> =>
+  invoke<void>("stop_mock", { finish });
 
 export const getMockTurns = (): Promise<MockTurn[]> =>
   invoke<MockTurn[]>("get_mock_turns");

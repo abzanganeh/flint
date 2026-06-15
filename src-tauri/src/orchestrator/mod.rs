@@ -42,12 +42,14 @@ use crate::events::{
     InferenceSuspendedPayload, RagChunkPayload, RagChunksUpdatePayload, ResponseMetadataPayload,
     ThreadStatusPayload, TokenUsageUpdatePayload, TurnStartedPayload,
 };
-use crate::interfaces::vector::{ScoredChunk, VectorInterface};
+use crate::interfaces::vector::{
+    PromptChunks, QA_EMBED_CONFIDENCE_THRESHOLD, ScoredChunk, VectorInterface,
+};
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::LLMProvider;
 use crate::orchestrator::prewarm::PreWarmCache;
 use crate::rag::embedder::Embedder;
-use crate::rag::retriever::retrieve;
+use crate::rag::retriever::retrieve_for_prompt;
 use crate::session::memory::{ContextBudget, ConversationMemory, MemoryContext, Turn};
 use crate::session::persistence::{Response, ResponseType, SessionPersistence};
 use crate::state::TurnCancelFlag;
@@ -68,7 +70,11 @@ const SILENCE_DEBOUNCE: Duration = Duration::from_millis(600);
 pub struct OrchestrationContext {
     pub session_id: Uuid,
     pub question: String,
+    /// Context store chunks (JD, resume, notes). Always filled; 1–6 items.
     pub rag_chunks: Vec<ScoredChunk>,
+    /// Q&A store chunks (past answers, score ≥ 0.80). May be empty.
+    /// When present, prompt templates inject a labelled section.
+    pub qa_chunks: Vec<ScoredChunk>,
     pub digest: Arc<Digest>,
     pub memory_ctx: MemoryContext,
     /// True if this response was served from the pre-warm cache.
@@ -461,14 +467,16 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         );
     }
 
-    let rag_chunks = retrieve_rag(&cfg, &embedding).await?;
+    let prompt_chunks = retrieve_rag(&cfg, &embedding).await?;
     let rag_latency_ms = rag_start.elapsed().as_millis() as u64;
 
     emit_rag_chunks_update(
         &app,
         RagChunksUpdatePayload {
-            chunks: rag_chunks
+            chunks: prompt_chunks
+                .context
                 .iter()
+                .chain(prompt_chunks.qa.iter())
                 .take(10)
                 .map(|c| RagChunkPayload {
                     text: c.chunk.text.clone(),
@@ -477,6 +485,8 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
                 .collect(),
         },
     );
+    let rag_chunks = prompt_chunks.context.clone();
+    let qa_chunks = prompt_chunks.qa.clone();
 
     if from_cache {
         emit_response_metadata(&app, ResponseMetadataPayload { pre_prepared: true });
@@ -518,6 +528,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         session_id: cfg.session_id,
         question: cfg.question_text.clone(),
         rag_chunks: rag_chunks.clone(),
+        qa_chunks: qa_chunks.clone(),
         digest: Arc::clone(&cfg.digest),
         memory_ctx,
         from_cache,
@@ -577,13 +588,16 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     }
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
-    if clarifying_emitted {
+    // Confidence is computed once and reused by both the UI event (step 6)
+    // and the Q&A embedding gate (step 7b).
+    let (confidence_score, confidence_level) = if clarifying_emitted {
         emit_confidence_score(
             &app,
             ConfidenceScorePayload {
                 level: ConfidenceLevel::Grey.as_str().to_string(),
             },
         );
+        (0.0_f32, ConfidenceLevel::Grey)
     } else {
         let rag_texts: Vec<String> = rag_chunks
             .iter()
@@ -600,13 +614,13 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
             local_fallback_active: cfg.failover.is_using_local(),
             turn_number: cfg.turn_number,
         };
-        let (confidence_score, confidence_level) = compute_confidence(&signals);
+        let (score, level) = compute_confidence(&signals);
 
         log_confidence_computed(
             cfg.session_id,
             cfg.turn_number,
-            confidence_score,
-            confidence_level,
+            score,
+            level,
             cfg.failover.active_provider_name(),
             from_cache,
             rag_latency_ms,
@@ -616,10 +630,12 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         emit_confidence_score(
             &app,
             ConfidenceScorePayload {
-                level: confidence_level.as_str().to_string(),
+                level: level.as_str().to_string(),
             },
         );
-    }
+        (score, level)
+    };
+    let _ = confidence_level; // used implicitly via QA_EMBED_CONFIDENCE_THRESHOLD
 
     // ── 7. Persist responses — crash-recovery insurance ───────────────────
     persist_thread_response(
@@ -634,6 +650,66 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         ResponseType::Depth,
         &depth_text,
     );
+
+    // ── 7b. Quality-gated Q&A embedding ──────────────────────────────────
+    // If the directional answer reached confidence ≥ QA_EMBED_CONFIDENCE_THRESHOLD
+    // (green or blue), embed the Q&A pair into the session's Q&A vector store
+    // so it can be retrieved as a supplemental slot in future turns.
+    //
+    // This is intentionally fire-and-forget: a failure here must never block
+    // the turn. Low-confidence answers (amber/grey/red) are skipped to
+    // prevent contaminating future retrievals.
+    {
+        let should_embed = !clarifying_emitted
+            && confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD
+            && !directional_text.trim().is_empty();
+
+        if should_embed {
+            let qa_text = format!(
+                "Q: {}\nA: {}",
+                cfg.question_text.trim(),
+                directional_text.trim()
+            );
+            let embedder = Arc::clone(&cfg.embedder);
+            let store = Arc::clone(&cfg.vector_store);
+            let session_id = cfg.session_id;
+            // Spawn detached — failure logged but never propagated.
+            tokio::spawn(async move {
+                let result: anyhow::Result<()> = async {
+                    let text_clone = qa_text.clone();
+                    let embedding = tokio::task::spawn_blocking(move || {
+                        embedder
+                            .embed_one(&text_clone)
+                            .context("Q&A pair embedding failed")
+                    })
+                    .await
+                    .context("embed task panicked")?
+                    .context("embed failed")?;
+
+                    let chunk = crate::interfaces::vector::Chunk {
+                        id: uuid::Uuid::new_v4(),
+                        text: qa_text,
+                        embedding,
+                        session_id,
+                    };
+                    store
+                        .ingest_qa(session_id, vec![chunk])
+                        .await
+                        .context("ingest_qa failed")?;
+                    Ok(())
+                }
+                .await;
+
+                if let Err(e) = result {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "Q&A pair embedding skipped (non-fatal)"
+                    );
+                }
+            });
+        }
+    }
 
     // ── 8. Update conversation memory ─────────────────────────────────────
     {
@@ -747,16 +823,10 @@ pub async fn dispatch_turn<R: Runtime>(
     .await
 }
 
-async fn retrieve_rag(cfg: &OrchestratorTurnConfig, embedding: &[f32]) -> Result<Vec<ScoredChunk>> {
-    let chunks = retrieve(
-        cfg.vector_store.as_ref(),
-        cfg.session_id,
-        embedding,
-        10,
-        0.7,
-    )
-    .await
-    .context("RAG retrieval failed")?;
+async fn retrieve_rag(cfg: &OrchestratorTurnConfig, embedding: &[f32]) -> Result<PromptChunks> {
+    let chunks = retrieve_for_prompt(cfg.vector_store.as_ref(), cfg.session_id, embedding)
+        .await
+        .context("slot-allocated RAG retrieval failed")?;
     Ok(chunks)
 }
 

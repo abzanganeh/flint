@@ -159,7 +159,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           setPhase(paceRef.current === "guided" ? "ready" : "reviewing");
         }),
         onMockEnded(() => {
-          void stopMock()
+          void stopMock(false)
             .catch(() => undefined)
             .finally(() => {
               onComplete();
@@ -225,14 +225,36 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     }
   };
 
-  const handleAbort = async () => {
-    unlistenAll();
+  const resetToPicker = useCallback(() => {
+    setPhase("idle");
+    setTurn(emptyTurn());
+    setRecording(false);
+    setError(null);
+    setStarting(false);
+  }, []);
+
+  const handleFinishEarly = async () => {
+    setError(null);
     try {
-      await stopMock();
+      if (phase === "answering" && recording) {
+        setRecording(false);
+        setTurn((t) => ({ ...t, coachLoading: true }));
+        await endMockTurn();
+      }
+      await stopMock(true);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleCancel = async () => {
+    setError(null);
+    try {
+      await stopMock(false);
     } catch {
       // best effort
     }
-    onAbort();
+    resetToPicker();
   };
 
   const showSuggested =
@@ -282,20 +304,61 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             </span>
           )}
         </div>
-        <button
-          onClick={() => void handleAbort()}
-          style={{
-            background: "none",
-            border: "1px solid #374151",
-            color: "#94a3b8",
-            borderRadius: 5,
-            padding: "4px 10px",
-            fontSize: "12px",
-            cursor: "pointer",
-          }}
-        >
-          Exit
-        </button>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {phase !== "idle" && (
+            <>
+              <button
+                type="button"
+                data-testid="mock-finish-early-button"
+                onClick={() => void handleFinishEarly()}
+                style={{
+                  background: "none",
+                  border: "1px solid #7c3aed",
+                  color: "#c4b5fd",
+                  borderRadius: 5,
+                  padding: "4px 10px",
+                  fontSize: "12px",
+                  cursor: "pointer",
+                }}
+              >
+                End & review
+              </button>
+              <button
+                type="button"
+                data-testid="mock-cancel-button"
+                onClick={() => void handleCancel()}
+                style={{
+                  background: "none",
+                  border: "1px solid #374151",
+                  color: "#94a3b8",
+                  borderRadius: 5,
+                  padding: "4px 10px",
+                  fontSize: "12px",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </>
+          )}
+          {phase === "idle" && (
+            <button
+              type="button"
+              onClick={() => onAbort()}
+              style={{
+                background: "none",
+                border: "1px solid #374151",
+                color: "#94a3b8",
+                borderRadius: 5,
+                padding: "4px 10px",
+                fontSize: "12px",
+                cursor: "pointer",
+              }}
+            >
+              Back to rehearsal
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -343,7 +406,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
-                SESSION STYLE
+                MODE — ASKING VS PREPARING
               </span>
               <label
                 style={{
@@ -364,11 +427,11 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   style={{ marginTop: 3 }}
                 />
                 <span>
-                  <strong style={{ color: "#e2e8f0" }}>Practice (recommended)</strong>
+                  <strong style={{ color: "#e2e8f0" }}>Practice — answer yourself</strong>
                   <br />
                   <span style={{ fontSize: "12px", color: "#94a3b8" }}>
-                    Answer in your own words first. Suggested answer and coach feedback appear
-                    after you finish.
+                    Suggested answer stays hidden until you finish. Coach scores content and
+                    delivery.
                   </span>
                 </span>
               </label>
@@ -391,17 +454,18 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   style={{ marginTop: 3 }}
                 />
                 <span>
-                  <strong style={{ color: "#e2e8f0" }}>Study</strong>
+                  <strong style={{ color: "#e2e8f0" }}>Study — see suggested answers</strong>
                   <br />
                   <span style={{ fontSize: "12px", color: "#94a3b8" }}>
-                    Read the suggested script aloud. Coach scores your delivery, not content depth.
+                    Full script streams while you answer. Coach scores delivery (pace, filler),
+                    not content depth.
                   </span>
                 </span>
               </label>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
-                PACE
+                PACE — ONE QUESTION AT A TIME VS CONTINUOUS
               </span>
               <label
                 style={{
@@ -422,10 +486,11 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   style={{ marginTop: 3 }}
                 />
                 <span>
-                  <strong style={{ color: "#e2e8f0" }}>Step by step</strong>
+                  <strong style={{ color: "#e2e8f0" }}>One question at a time</strong>
                   <br />
                   <span style={{ fontSize: "12px", color: "#94a3b8" }}>
-                    You click &quot;Ask question&quot; for each prompt, then answer at your pace.
+                    Click &quot;Ask question&quot; for each prompt. End anytime with &quot;End &amp;
+                    review&quot; or cancel to pick options again.
                   </span>
                 </span>
               </label>
