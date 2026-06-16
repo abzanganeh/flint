@@ -21,14 +21,17 @@
 //! Store an OpenAI API key via the Flint settings panel — no extra config needed.
 
 use anyhow::{bail, Context, Result};
-use secrecy::ExposeSecret;
-use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tracing::{instrument, warn};
 
-use crate::keychain;
+#[cfg(target_os = "linux")]
+use {
+    crate::keychain,
+    secrecy::ExposeSecret,
+    std::path::{Path, PathBuf},
+    tokio::io::AsyncWriteExt,
+};
 
 /// Speak `text` using the platform TTS engine and wait for it to finish.
 ///
