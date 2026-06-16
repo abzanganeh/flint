@@ -21,9 +21,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use rubato::{FftFixedOut, Resampler};
 use tokio::sync::mpsc;
-#[cfg(target_os = "linux")]
-use tracing::info;
-use tracing::{debug, error};
+use tracing::{debug, error, info};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
