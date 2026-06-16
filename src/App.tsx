@@ -21,6 +21,7 @@ import {
   parseFlintImportToken,
   persistCompanyIntel,
 } from "./lib/smartResumeImport";
+import { useFeatureFlag } from "./hooks/useFeatureFlag";
 import { SessionState } from "./types";
 import "./App.css";
 import "./components/rehearsal-enrichment.css";
@@ -146,6 +147,7 @@ function App() {
   >("api-keys");
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
+  const postSessionSummaryEnabled = useFeatureFlag("post_session_summary", true);
 
   const openSettings = (
     returnTo: AppScreen = screen,
@@ -423,7 +425,12 @@ function App() {
       <LiveOverlay
         sessionId={sessionId}
         onEnded={() => {
-          setScreen("session-summary");
+          if (postSessionSummaryEnabled) {
+            setScreen("session-summary");
+          } else {
+            setSessionId(null);
+            setScreen("session-list");
+          }
         }}
         onReturnToSetup={() => void handleReturnToSessionDesign()}
       />
