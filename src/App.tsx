@@ -9,6 +9,7 @@ import {
   getPendingImportToken,
   getSessionSnapshot,
   importFromSmartResume,
+  reopenSession,
   restoreDraftSession,
   returnToSessionDesign,
   stopSession,
@@ -497,9 +498,25 @@ function App() {
               setScreen(screenForDraftState(resumeState));
             }
           }}
+          onReopenSession={(id) => {
+            void reopenSession(id)
+              .then((snapshot) => {
+                applyDraftSnapshot(snapshot, setSessionId, setSessionPreFill, setScreen);
+              })
+              .catch((err: unknown) => {
+                setImportError(String(err));
+              });
+          }}
           onStartSimilar={(preFill) => {
-            setSessionPreFill(preFill);
-            setScreen("session-design");
+            void (async () => {
+              const snapshot = await getSessionSnapshot().catch(() => null);
+              if (snapshot && snapshot.state !== SessionState.IDLE) {
+                await abandonSessionDraft().catch(() => undefined);
+              }
+              setSessionId(null);
+              setSessionPreFill(preFill);
+              setScreen("session-design");
+            })();
           }}
         />
       </Shell>

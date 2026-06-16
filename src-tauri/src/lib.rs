@@ -172,6 +172,7 @@ pub fn run() {
             commands::import_from_smart_resume,
             commands::get_pending_import_token,
             commands::get_session_context,
+            commands::reopen_session,
             commands::get_session_snapshot,
             commands::restore_draft_session,
             commands::get_rehearsal_completed,
