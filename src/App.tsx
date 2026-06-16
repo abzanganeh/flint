@@ -30,6 +30,8 @@ import LiveOverlay from "./screens/LiveOverlay";
 import Onboarding from "./screens/Onboarding";
 import { Recovery } from "./screens/Recovery";
 import Rehearsal from "./screens/Rehearsal";
+import MockInterview from "./screens/MockInterview";
+import MockSummary from "./screens/MockSummary";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
@@ -46,6 +48,8 @@ type AppScreen =
   | "settings"
   | "digest-review"
   | "rehearsal"
+  | "mock-interview"
+  | "mock-summary"
   | "live"
   | "session-summary";
 
@@ -60,6 +64,8 @@ const SHELL_SCREENS: AppScreen[] = [
   "settings",
   "digest-review",
   "rehearsal",
+  "mock-interview",
+  "mock-summary",
   "session-summary",
 ];
 
@@ -98,6 +104,7 @@ function screenForDraftState(state: string): AppScreen {
     case SessionState.PRE_WARMING:
       return "digest-review";
     case SessionState.REHEARSING:
+    case SessionState.MOCK_INTERVIEW:
     case SessionState.READY:
       return "rehearsal";
     default:
@@ -563,7 +570,28 @@ function App() {
           onComplete={() => setScreen("live")}
           onReturnToSetup={() => void handleReturnToSessionDesign()}
           onOpenSettings={() => openSettings("rehearsal", "api-keys")}
+          onStartMock={() => setScreen("mock-interview")}
         />
+      </Shell>
+    );
+  }
+
+  if (screen === "mock-interview") {
+    return (
+      <Shell nav={nav}>
+        <MockInterview
+          sessionId={sessionId ?? ""}
+          onComplete={() => setScreen("mock-summary")}
+          onAbort={() => setScreen("rehearsal")}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "mock-summary") {
+    return (
+      <Shell nav={nav}>
+        <MockSummary onContinue={() => setScreen("rehearsal")} />
       </Shell>
     );
   }

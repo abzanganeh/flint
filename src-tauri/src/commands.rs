@@ -3,9 +3,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as AnyhowContext;
 use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Emitter, Manager, State};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::audio::capture::AudioCapture;
@@ -16,19 +17,25 @@ use crate::dto::{
     SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
-    emit_session_state_change, emit_token_usage_update, SessionStateChangePayload,
-    TokenUsageUpdatePayload,
+    emit_mock_coach_feedback, emit_mock_suggested_token, emit_session_state_change,
+    emit_token_usage_update, MockCoachFeedbackPayload, MockSuggestedTokenPayload,
+    SessionStateChangePayload, TokenUsageUpdatePayload,
 };
 use crate::health::{checks, hardware};
 use crate::interfaces::auth::AuthToken;
 use crate::interfaces::vector::Chunk;
 use crate::keychain;
+use crate::knowledge::packs_for_role;
 use crate::llm::failover::FailoverManager;
 use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
+use crate::mock::coach::{coach_failure_payload, run_coach};
+use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
+use crate::mock::mic_capture::MicCapture;
+use crate::mock::rag::query_mock_rag;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
@@ -36,12 +43,15 @@ use crate::research::{self, tavily, ResearchSource};
 
 /// Approximate base chars added to a research prompt (template + labels).
 const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
+
+/// Number of Tavily results to fetch per enrichment query.
+const ENRICHMENT_RESULTS_PER_QUERY: usize = 4;
 use crate::session::draft;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
-use crate::state::{AppState, LiveTaskHandles};
+use crate::state::{AppState, LiveTaskHandles, MockTaskHandles};
 use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
 
@@ -692,9 +702,111 @@ pub async fn get_session_context_fields(
         .map_err(|e| e.to_string())
 }
 
+/// Fire-and-forget background task that runs targeted Tavily searches for the
+/// company + role, then ingests the results into the session RAG store.
+///
+/// Silently skips when no Tavily API key is present.  Results are available
+/// in both rehearsal prep-chat and mock interview RAG by the time the user
+/// navigates to either screen.
+fn spawn_company_enrichment(
+    session_id: Uuid,
+    company: String,
+    role: String,
+    domain: String,
+    embedder: Arc<crate::rag::embedder::Embedder>,
+    vector_store: Arc<dyn crate::interfaces::vector::VectorInterface>,
+) {
+    tokio::spawn(async move {
+        let web = match tavily::resolve_tavily() {
+            Some(t) => t,
+            None => {
+                tracing::debug!(session_id = %session_id, "no Tavily key; skipping company enrichment");
+                return;
+            }
+        };
+
+        let queries = [
+            format!("{company} software engineering interview questions {role}"),
+            format!("{company} engineering culture values {domain}"),
+        ];
+
+        let mut combined = String::new();
+        for query in &queries {
+            match web.search(query, ENRICHMENT_RESULTS_PER_QUERY).await {
+                Ok(results) => {
+                    for r in &results {
+                        combined.push_str(&format!("## {}\n{}\n\n", r.title, r.snippet));
+                    }
+                    tracing::debug!(session_id = %session_id, query = %query, results = results.len(), "company enrichment search done");
+                }
+                Err(e) => {
+                    warn!(session_id = %session_id, query = %query, error = %e, "company enrichment search failed")
+                }
+            }
+        }
+
+        if combined.trim().is_empty() {
+            return;
+        }
+
+        let raw_chunks = chunk_text(&combined, 200, 50);
+        if raw_chunks.is_empty() {
+            return;
+        }
+
+        let embeddings = {
+            let chunks_clone = raw_chunks.clone();
+            let emb = Arc::clone(&embedder);
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = chunks_clone.iter().map(String::as_str).collect();
+                emb.embed_batch(&refs)
+            })
+            .await
+        };
+
+        let embeddings = match embeddings {
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => {
+                warn!(session_id = %session_id, error = %e, "company enrichment embedding failed");
+                return;
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "company enrichment embedder task panicked");
+                return;
+            }
+        };
+
+        let chunks: Vec<Chunk> = raw_chunks
+            .into_iter()
+            .zip(embeddings)
+            .filter(|(_, emb)| !emb.is_empty())
+            .map(|(text, embedding)| Chunk {
+                id: Uuid::new_v4(),
+                text,
+                embedding,
+                session_id,
+            })
+            .collect();
+
+        let count = chunks.len();
+        if count == 0 {
+            return;
+        }
+
+        match vector_store.ingest(session_id, chunks).await {
+            Ok(()) => {
+                info!(session_id = %session_id, chunks = count, company = %company, "company enrichment ingested into session RAG")
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "company enrichment ingest failed")
+            }
+        }
+    });
+}
+
 /// Accept the (possibly edited) digest and trigger pre-warming.
 ///
-/// Valid from: `DIGEST_REVIEW`.  
+/// Valid from: `DIGEST_REVIEW`.
 /// Emits: `PRE_WARMING` immediately, then `REHEARSING` when complete.
 #[tauri::command]
 pub async fn confirm_digest(
@@ -720,6 +832,110 @@ pub async fn confirm_digest(
     *state.session_digest.write().await = Some(digest_rust.clone());
     if let Err(e) = state.persistence.store_session_digest(sid, &digest_rust) {
         warn!(session_id = %sid, error = %e, "failed to persist confirmed digest");
+    }
+
+    // Sync the question bank to the newly confirmed digest. This is essential
+    // when the user returns to Session Design and re-extracts — without this
+    // the bank retains stale questions from the previous extraction run.
+    //
+    // We also scan the raw context text for question-lines (ending with `?`)
+    // and merge them in. This is the safety net for large structured question
+    // banks that exceed the LLM digest token budget: the model can only fit
+    // ~25–30 questions in its JSON output at 4096 tokens, but a user may paste
+    // 100+ staged questions. The regex path costs zero LLM tokens and runs in
+    // O(lines).
+    let context_blob_opt = state.persistence.get_session_context(sid).ok();
+    {
+        let mut bank: Vec<String> = digest_rust.likely_questions.clone();
+
+        if let Some(ref context_blob) = context_blob_opt {
+            let extracted = extract_questions_from_text(context_blob);
+            let bank_lower: Vec<String> = bank.iter().map(|q| q.to_lowercase()).collect();
+            for q in extracted {
+                if !bank_lower
+                    .iter()
+                    .any(|existing| *existing == q.to_lowercase())
+                {
+                    bank.push(q);
+                }
+            }
+        }
+
+        if let Err(e) = state.persistence.store_question_bank(sid, &bank) {
+            warn!(session_id = %sid, error = %e, "failed to reset question bank on confirm_digest");
+        } else {
+            debug!(session_id = %sid, count = bank.len(), "question bank synced on confirm_digest");
+        }
+    }
+
+    // Embed user-provided Q&A pairs into the context store (Phase 9).
+    //
+    // If the user pasted structured "Q: X\nA: Y" content, we extract and
+    // re-embed each pair as a unified chunk. This gives semantic retrieval a
+    // structured target rather than relying on the chunker to happen to keep Q
+    // and A adjacent. Pairs are embedded into the context store (trusted
+    // ground truth), not the Q&A store (AI-generated answers only).
+    //
+    // Fire-and-forget: failure here is non-fatal.
+    if let (Some(context_blob), Ok(embedder)) = (context_blob_opt, state.require_embedder()) {
+        let pairs = extract_qa_pairs_from_text(&context_blob);
+        if !pairs.is_empty() {
+            let store = Arc::clone(&state.vector_store);
+            tokio::spawn(async move {
+                let result: anyhow::Result<()> = async {
+                    let pair_refs: Vec<&str> = pairs.iter().map(|s| s.as_str()).collect();
+                    let embeddings = tokio::task::spawn_blocking({
+                        let pair_refs: Vec<String> = pairs.clone();
+                        move || {
+                            let refs: Vec<&str> = pair_refs.iter().map(|s| s.as_str()).collect();
+                            embedder
+                                .embed_batch(&refs)
+                                .context("batch embed Q&A pairs failed")
+                        }
+                    })
+                    .await
+                    .context("embed_batch task panicked")?
+                    .context("embed_batch failed")?;
+                    let _ = pair_refs; // consumed above
+                    let chunks: Vec<crate::interfaces::vector::Chunk> = pairs
+                        .into_iter()
+                        .zip(embeddings)
+                        .map(|(text, embedding)| crate::interfaces::vector::Chunk {
+                            id: uuid::Uuid::new_v4(),
+                            text,
+                            embedding,
+                            session_id: sid,
+                        })
+                        .collect();
+                    store
+                        .ingest_context(sid, chunks)
+                        .await
+                        .context("ingest user Q&A pairs into context store failed")?;
+                    Ok(())
+                }
+                .await;
+                if let Err(e) = result {
+                    tracing::warn!(
+                        session_id = %sid,
+                        error = %e,
+                        "user Q&A pair embedding skipped (non-fatal)"
+                    );
+                }
+            });
+        }
+    }
+
+    // Kick off a background Tavily sweep for company/role context so results
+    // are in session RAG before the user reaches rehearsal or mock interview.
+    if let Ok(embedder) = state.require_embedder() {
+        spawn_company_enrichment(
+            sid,
+            digest_rust.company.clone(),
+            digest_rust.role.clone(),
+            digest_rust.domain.clone(),
+            embedder,
+            Arc::clone(&state.vector_store),
+        );
     }
 
     // Transition → PRE_WARMING.
@@ -1330,6 +1546,122 @@ pub async fn return_to_session_design(
 // Phase 5.5.3 — Question bank
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Extract question-like lines from raw context text without an LLM call.
+///
+/// A line is treated as a question when it ends with `?` after stripping
+/// whitespace, bullet markers (`-`, `*`, `•`), and numbering (`1.`, `a)`).
+/// This runs in O(lines) and produces zero LLM tokens — it is the safety net
+/// for large explicitly-pasted question banks that exceed the digest token budget.
+fn extract_questions_from_text(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|raw| {
+            // Strip leading list markers before checking content.
+            let stripped = raw
+                .trim()
+                .trim_start_matches(|c: char| {
+                    c == '-' || c == '*' || c == '•' || c == '⭐' || c == '#'
+                })
+                .trim();
+
+            // Strip leading numbering: "1.", "1)", "a.", "a)" etc.
+            let content = {
+                let mut chars = stripped.chars().peekable();
+                let mut prefix_len = 0;
+                // Consume up to 3 alphanumeric chars followed by a `.` or `)`.
+                let mut count = 0;
+                while let Some(&c) = chars.peek() {
+                    if count >= 3 {
+                        break;
+                    }
+                    if c.is_alphanumeric() {
+                        chars.next();
+                        count += 1;
+                        prefix_len += c.len_utf8();
+                    } else if (c == '.' || c == ')') && count > 0 {
+                        chars.next();
+                        prefix_len += c.len_utf8();
+                        break;
+                    } else {
+                        break;
+                    }
+                }
+                let remainder = stripped[prefix_len..].trim();
+                if remainder.is_empty() {
+                    stripped
+                } else {
+                    remainder
+                }
+            };
+
+            if content.ends_with('?') && content.len() > 5 {
+                Some(content.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract "Q: ...\nA: ..." pairs from raw context text for embedding.
+///
+/// Scans for lines starting with "Q:" (case-insensitive, optionally "Question:")
+/// followed by one or more "A:" lines. Blank lines between pairs are tolerated.
+/// Returns each pair formatted as "Q: {question}\nA: {answer}" for embedding
+/// into the context vector store.
+///
+/// Only called from `confirm_digest` to extract trusted user-curated Q&A content
+/// that should be retrievable at inference time.
+fn extract_qa_pairs_from_text(text: &str) -> Vec<String> {
+    let mut pairs: Vec<String> = Vec::new();
+    let mut current_q: Option<String> = None;
+    let mut current_a_lines: Vec<String> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+
+        let is_q_line = lower.starts_with("q:") || lower.starts_with("question:");
+        let is_a_line = lower.starts_with("a:") || lower.starts_with("answer:");
+
+        if is_q_line {
+            // Flush previous pair if complete.
+            if let Some(q) = current_q.take() {
+                let a = current_a_lines.join(" ").trim().to_string();
+                if !a.is_empty() {
+                    pairs.push(format!("Q: {q}\nA: {a}"));
+                }
+                current_a_lines.clear();
+            }
+            let q_text = trimmed
+                .trim_start_matches(|c: char| c.is_alphabetic() || c == ':')
+                .trim()
+                .to_string();
+            if !q_text.is_empty() {
+                current_q = Some(q_text);
+            }
+        } else if is_a_line {
+            let a_text = trimmed
+                .trim_start_matches(|c: char| c.is_alphabetic() || c == ':')
+                .trim()
+                .to_string();
+            current_a_lines.push(a_text);
+        } else if !trimmed.is_empty() && current_q.is_some() && !current_a_lines.is_empty() {
+            // Continuation of the current answer.
+            current_a_lines.push(trimmed.to_string());
+        }
+    }
+
+    // Flush last pair.
+    if let Some(q) = current_q {
+        let a = current_a_lines.join(" ").trim().to_string();
+        if !a.is_empty() {
+            pairs.push(format!("Q: {q}\nA: {a}"));
+        }
+    }
+
+    pairs
+}
+
 /// Return the question bank for a session.
 ///
 /// Returns digest `likely_questions` merged with any user-added questions,
@@ -1350,13 +1682,17 @@ pub async fn get_question_bank(
         return Ok(persisted);
     }
 
-    // First call: seed from digest likely_questions.
+    // First call: seed from the persisted digest for this specific session.
+    // We intentionally query SQLite rather than the in-memory `session_digest`
+    // to guarantee the seed belongs to `sid` — the in-memory value is a shared
+    // mutable slot that may still hold a previous session's data at the moment
+    // `get_question_bank` is first called.
     let seed: Vec<String> = state
-        .session_digest
-        .read()
-        .await
-        .as_ref()
-        .map(|d| d.likely_questions.clone())
+        .persistence
+        .load_session_digest(sid)
+        .ok()
+        .flatten()
+        .map(|d| d.likely_questions)
         .unwrap_or_default();
 
     if !seed.is_empty() {
@@ -2631,4 +2967,416 @@ pub async fn get_feature_flags_snapshot(
     state: State<'_, AppState>,
 ) -> Result<crate::flags::ClientSnapshot, String> {
     Ok(state.feature_flags.snapshot())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Phase 8 — Mock Interview commands
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Transition to MOCK_INTERVIEW and start the conductor + mic capture loop.
+///
+/// Valid from: `REHEARSING` or `READY`.
+///
+/// `READY` is allowed because draft recovery and the Rehearsal screen both
+/// surface mock entry while the persisted state is already READY (user
+/// completed rehearsal but has not gone live yet).
+///
+/// Steps:
+/// 1. REHEARSING → MOCK_INTERVIEW.
+/// 2. Build (or reuse) FailoverManager.
+/// 3. Retrieve session digest (must be confirmed before calling this).
+/// 4. Retrieve RAG chunks for the question bank.
+/// 5. Start `MicCapture` and `Conductor`.
+/// 6. Store `MockTaskHandles` in AppState.
+#[tauri::command]
+pub async fn start_mock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    guided: Option<bool>,
+    mode: Option<String>,
+) -> Result<(), String> {
+    let guided = guided.unwrap_or(false);
+    let mock_mode = MockMode::parse(mode.as_deref().unwrap_or("practice"));
+    let pace = if guided {
+        MockPace::Guided
+    } else {
+        MockPace::Continuous
+    };
+    // Guard: must be in REHEARSING. If we are already in MOCK_INTERVIEW with an
+    // active session, treat this as idempotent so React StrictMode double-mounts
+    // and re-navigation to the screen do not blow up the conductor.
+    {
+        let machine = state.state_machine.lock().await;
+        match machine.current() {
+            SessionState::Rehearsing | SessionState::Ready => {}
+            SessionState::MockInterview if state.mock_tasks.lock().await.is_some() => {
+                return Ok(());
+            }
+            current => {
+                return Err(format!(
+                    "start_mock is only valid from REHEARSING or READY (current: {current})"
+                ));
+            }
+        }
+    }
+
+    let session_id = {
+        let machine = state.state_machine.lock().await;
+        machine.session_id().ok_or("no active session")?
+    };
+
+    let digest = state
+        .session_digest
+        .read()
+        .await
+        .clone()
+        .ok_or("digest not set — confirm session design first")?;
+    let digest = Arc::new(digest);
+    if digest.likely_questions.is_empty() {
+        return Err(
+            "No practice questions in session digest — complete Digest Review first.".to_string(),
+        );
+    }
+
+    // Build FailoverManager.
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+
+    let embedder = state.require_embedder()?;
+    let suggested_buffer = Arc::new(std::sync::RwLock::new(String::new()));
+
+    // Create audio directory.
+    let audio_dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("mock_audio"))
+        .unwrap_or_else(|_| PathBuf::from("mock_audio"));
+    std::fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
+
+    // Initialise WhisperEngine.
+    let profile = hardware::assess_hardware();
+    let model_path = whisper_model_path(&profile);
+    let whisper =
+        Arc::new(WhisperEngine::new(&model_path, profile.tier).map_err(|e| e.to_string())?);
+
+    let mic_capture = MicCapture::start(
+        app.clone(),
+        session_id,
+        audio_dir.clone(),
+        Arc::clone(&whisper),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let role_packs = packs_for_role(&digest.domain, &digest.role);
+
+    let conductor = Conductor::start(
+        app.clone(),
+        session_id,
+        Arc::clone(&digest),
+        Arc::clone(&failover),
+        Arc::clone(&state.persistence),
+        prompts_base_dir(),
+        embedder,
+        Arc::clone(&state.vector_store),
+        Arc::clone(&state.global_kb),
+        role_packs.clone(),
+        Arc::clone(&suggested_buffer),
+        pace,
+        mock_mode,
+    );
+
+    // REHEARSING → MOCK_INTERVIEW.
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine
+            .transition(SessionState::MockInterview)
+            .map_err(session_error)?;
+    }
+    emit_state(&app, SessionState::MockInterview);
+
+    *state.mock_tasks.lock().await = Some(MockTaskHandles {
+        conductor,
+        mic_capture,
+        current_turn: 0,
+        guided,
+        mode: mock_mode,
+        suggested_text: suggested_buffer,
+        role_packs,
+    });
+
+    info!(
+        session_id = %session_id,
+        guided,
+        mode = mock_mode.as_str(),
+        "mock interview started"
+    );
+    Ok(())
+}
+
+/// Ask the conductor to speak the next question (guided mode only).
+#[tauri::command]
+pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
+    if !handles.guided {
+        return Err("ask_mock_question is only valid in guided (step-by-step) mode".to_string());
+    }
+    handles
+        .conductor
+        .cmd_tx
+        .send(ConductorCommand::AskQuestion)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Start recording the user's microphone for the current mock turn.
+///
+/// Call after the frontend has confirmed the AI question has been spoken.
+#[tauri::command]
+pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.mock_tasks.lock().await;
+    let handles = guard.as_mut().ok_or("no active mock session")?;
+    handles.current_turn += 1;
+    let turn_n = handles.current_turn;
+    handles
+        .mic_capture
+        .start_turn(turn_n)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Stop recording, run coach LLM, persist results, and signal the conductor.
+///
+/// Coach runs before the conductor advances so `mock_coach_feedback` is emitted
+/// before the next `mock_question_started` resets the UI.
+#[tauri::command]
+pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    // Pull the turn number and queue the `EndTurn` command while holding the
+    // mock_tasks guard, then drop it before the (potentially long) await on
+    // the reply so concurrent commands like `stop_mock` are not blocked.
+    let (turn_n, reply_rx) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let turn_n = handles.current_turn;
+        let reply_rx = handles
+            .mic_capture
+            .send_end_turn()
+            .await
+            .map_err(|e| e.to_string())?;
+        (turn_n, reply_rx)
+    };
+
+    // Give the user up to 120 s to finish answering; in practice they stop
+    // manually well before that.
+    let (transcript, audio_path) =
+        crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
+            .await
+            .map_err(|e| e.to_string())?;
+
+    let (mock_mode, suggested_answer, role_packs) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let suggested = handles
+            .suggested_text
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        (handles.mode, suggested, handles.role_packs.clone())
+    };
+
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let persistence = Arc::clone(&state.persistence);
+    let question = persistence
+        .load_mock_turns(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.turn_n == turn_n)
+        .map(|t| t.question)
+        .unwrap_or_default();
+
+    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
+        query_mock_rag(
+            session_id,
+            &question,
+            &embedder,
+            state.vector_store.as_ref(),
+            Some((state.global_kb.as_ref(), &role_packs)),
+            8,
+        )
+        .await
+    } else {
+        vec![]
+    };
+    let prompts = prompts_base_dir();
+
+    let (coach_json, score) = match run_coach(
+        app.clone(),
+        session_id,
+        turn_n,
+        question,
+        transcript.clone(),
+        suggested_answer.clone(),
+        rag_chunks,
+        mock_mode,
+        failover,
+        &prompts,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, turn_n, "coach LLM failed");
+            let (json, score) = coach_failure_payload(
+                "Coach analysis failed — check your Groq key or rate limits.",
+            );
+            emit_mock_coach_feedback(
+                &app,
+                MockCoachFeedbackPayload {
+                    turn_n,
+                    coach_json: json.clone(),
+                    score,
+                },
+            );
+            (json, score)
+        }
+    };
+
+    if mock_mode == MockMode::Practice && !suggested_answer.is_empty() {
+        emit_mock_suggested_token(
+            &app,
+            MockSuggestedTokenPayload {
+                token: suggested_answer,
+            },
+        );
+    }
+
+    if let Some(turn_id) = persistence
+        .load_mock_turns(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.turn_n == turn_n)
+        .map(|t| t.id)
+    {
+        if let Err(e) = persistence.update_mock_turn_coach(turn_id, &coach_json, score) {
+            warn!(error = %e, "failed to persist mock turn coach feedback");
+        }
+    }
+
+    // Signal the conductor to advance to the next question.
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles
+            .conductor
+            .cmd_tx
+            .send(ConductorCommand::TurnComplete {
+                user_text: transcript,
+                audio_path,
+            })
+            .await;
+    }
+
+    Ok(())
+}
+
+/// Skip the current mock turn without recording an answer.
+#[tauri::command]
+pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles
+            .conductor
+            .cmd_tx
+            .send(ConductorCommand::TurnComplete {
+                user_text: String::new(),
+                audio_path: String::new(),
+            })
+            .await;
+    }
+    Ok(())
+}
+
+/// Abort the mock interview and transition to REHEARSING.
+/// Stop the mock interview session.
+///
+/// `finish: true` — end early and emit `mock_ended` for the summary screen.
+/// `finish: false` (default) — cancel without summary; user can restart from the picker.
+///
+/// Valid from: `MOCK_INTERVIEW`.
+#[tauri::command]
+pub async fn stop_mock(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    finish: Option<bool>,
+) -> Result<(), String> {
+    let finish = finish.unwrap_or(false);
+    // Signal conductor to stop.
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let cmd = if finish {
+            ConductorCommand::FinishEarly
+        } else {
+            ConductorCommand::Abort
+        };
+        let _ = handles.conductor.cmd_tx.send(cmd).await;
+    }
+
+    // Shutdown mic capture.
+    if let Some(handles) = state.mock_tasks.lock().await.take() {
+        handles.mic_capture.shutdown().await;
+    }
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        if *machine.current() == SessionState::MockInterview {
+            machine
+                .transition(SessionState::Rehearsing)
+                .map_err(session_error)?;
+        }
+    }
+    emit_state(&app, SessionState::Rehearsing);
+
+    Ok(())
+}
+
+/// Return all completed mock turns for the session (used by Summary screen).
+#[tauri::command]
+pub async fn get_mock_turns(state: State<'_, AppState>) -> Result<Vec<MockTurnDto>, String> {
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+    let turns = state
+        .persistence
+        .load_mock_turns(session_id)
+        .map_err(|e| e.to_string())?;
+    Ok(turns
+        .into_iter()
+        .map(|t| MockTurnDto {
+            id: t.id.to_string(),
+            turn_n: t.turn_n,
+            question: t.question,
+            user_text: t.user_text,
+            audio_path: t.audio_path,
+            coach_json: t.coach_json,
+            suggested: t.suggested,
+            score: t.score,
+        })
+        .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct MockTurnDto {
+    pub id: String,
+    pub turn_n: u32,
+    pub question: String,
+    pub user_text: String,
+    pub audio_path: String,
+    pub coach_json: String,
+    pub suggested: String,
+    pub score: u8,
 }

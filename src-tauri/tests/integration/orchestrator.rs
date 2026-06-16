@@ -95,6 +95,7 @@ fn test_context(question: &str) -> OrchestrationContext {
         session_id: Uuid::new_v4(),
         question: question.to_string(),
         rag_chunks: vec![],
+        qa_chunks: vec![],
         digest: Arc::new(test_digest()),
         memory_ctx: MemoryContext {
             rolling_summary: String::new(),

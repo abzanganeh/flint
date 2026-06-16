@@ -278,10 +278,21 @@ mod tests {
 
     #[async_trait]
     impl VectorInterface for StubVectorStore {
-        async fn ingest(&self, _session_id: Uuid, _chunks: Vec<Chunk>) -> Result<()> {
+        async fn ingest_context(&self, _session_id: Uuid, _chunks: Vec<Chunk>) -> Result<()> {
             Ok(())
         }
-        async fn query(
+        async fn query_context(
+            &self,
+            _session_id: Uuid,
+            _embedding: &[f32],
+            _top_k: usize,
+        ) -> Result<Vec<crate::interfaces::vector::ScoredChunk>> {
+            Ok(Vec::new())
+        }
+        async fn ingest_qa(&self, _session_id: Uuid, _chunks: Vec<Chunk>) -> Result<()> {
+            Ok(())
+        }
+        async fn query_qa(
             &self,
             _session_id: Uuid,
             _embedding: &[f32],

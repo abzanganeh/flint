@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
+import type { MockStudyMode } from "../events";
+
 export type UserPlan = "free" | "premium";
 
 export interface UserDto {
@@ -599,3 +601,52 @@ export const appendResearchToContext = (
     answer,
     webSources,
   });
+
+// ── Phase 8 — Mock Interview ──────────────────────────────────────────────────
+
+export interface MockTurn {
+  id: string;
+  turn_n: number;
+  question: string;
+  user_text: string;
+  audio_path: string;
+  coach_json: string;
+  suggested: string;
+  score: number;
+}
+
+export interface GrammarIssue {
+  original: string;
+  fix: string;
+  why: string;
+}
+
+export interface CoachFeedback {
+  grammar_issues: GrammarIssue[];
+  tone: { assessment: string; suggestion: string };
+  context_gaps: string[];
+  corrected_answer: string;
+  score: number;
+}
+
+export type { MockStudyMode } from "../events";
+
+export const startMock = (
+  guided = false,
+  mode: MockStudyMode = "practice",
+): Promise<void> => invoke<void>("start_mock", { guided, mode });
+
+export const askMockQuestion = (): Promise<void> =>
+  invoke<void>("ask_mock_question");
+
+export const startMockTurn = (): Promise<void> => invoke<void>("start_mock_turn");
+
+export const endMockTurn = (): Promise<void> => invoke<void>("end_mock_turn");
+
+export const skipMockTurn = (): Promise<void> => invoke<void>("skip_mock_turn");
+
+export const stopMock = (finish = false): Promise<void> =>
+  invoke<void>("stop_mock", { finish });
+
+export const getMockTurns = (): Promise<MockTurn[]> =>
+  invoke<MockTurn[]>("get_mock_turns");

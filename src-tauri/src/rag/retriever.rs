@@ -16,7 +16,9 @@
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::interfaces::vector::{ScoredChunk, VectorInterface};
+use crate::interfaces::vector::{
+    PromptChunks, ScoredChunk, VectorInterface, QA_RETRIEVAL_THRESHOLD,
+};
 
 /// Dot product of two equal-length vectors.
 ///
@@ -151,6 +153,61 @@ pub async fn retrieve(
     );
 
     Ok(selected)
+}
+
+/// Slot-allocated retrieval for prompt construction (design doc §16.5.3).
+///
+/// Fills two independent slot budgets from the dual vector stores:
+///
+/// - **Context slots (6 max):** JD, resume, notes, user-provided Q&A. Always
+///   filled first. Subject to MMR de-duplication with λ = 0.7.
+/// - **Q&A slots (2 max):** AI-generated Q&A pairs from past turns. Only
+///   included when cosine similarity ≥ [`QA_RETRIEVAL_THRESHOLD`] (0.80).
+///   Not subject to MMR — they are appended after context.
+///
+/// If the Q&A store is empty or no pairs clear the threshold, only context
+/// chunks are returned and [`PromptChunks::has_qa`] is false (prompt label
+/// is suppressed).
+pub async fn retrieve_for_prompt(
+    store: &dyn VectorInterface,
+    session_id: Uuid,
+    query_embedding: &[f32],
+) -> Result<PromptChunks> {
+    const CONTEXT_SLOTS: usize = 6;
+    const QA_SLOTS: usize = 2;
+    const QA_CANDIDATES: usize = 5;
+    const MMR_LAMBDA: f32 = 0.7;
+
+    // Context retrieval — MMR via the existing retrieve() function.
+    let context = retrieve(
+        store,
+        session_id,
+        query_embedding,
+        CONTEXT_SLOTS,
+        MMR_LAMBDA,
+    )
+    .await?;
+
+    // Q&A retrieval — raw top-k then threshold filter, no MMR (past answers
+    // are short and dissimilar from each other; MMR would not add value).
+    let qa_candidates = store
+        .query_qa(session_id, query_embedding, QA_CANDIDATES)
+        .await?;
+
+    let qa: Vec<ScoredChunk> = qa_candidates
+        .into_iter()
+        .filter(|r| r.score >= QA_RETRIEVAL_THRESHOLD)
+        .take(QA_SLOTS)
+        .collect();
+
+    tracing::debug!(
+        session_id = %session_id,
+        context_chunks = context.len(),
+        qa_chunks = qa.len(),
+        "slot-allocated retrieval complete",
+    );
+
+    Ok(PromptChunks { context, qa })
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

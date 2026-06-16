@@ -6,9 +6,9 @@
 
 ---
 
-## Current Status (audited 2026-06-10 — `feature/strategy-b-phase1b-clean-slate`)
+## Current Status (audited 2026-06-11 — `feature/mock-interview`)
 
-> **You are here:** Phase 1 fully signed off (1.A + 1.B manual test confirmed). Phase 2 code complete — pending manual device test + Chrome Web Store submission. Next code track: **Strategy B Phase 3** — Supabase SSO + unified credit ledger.
+> **You are here:** Phase 8 Mock Interview code complete on `feature/mock-interview` (not merged to `main`). Strategy B Phase 1 signed off; Phase 2 code complete — pending manual device test + Chrome Web Store submission. **Next:** merge mock-interview PR → manual Phase 8 gate → Strategy B Phase 3 (SSO + credit ledger).
 
 | Phase | Code on `main` | Review gate | Notes |
 |-------|----------------|-------------|-------|
@@ -19,8 +19,9 @@
 | 5.5 v1.5 | ✅ Complete | ⏳ Open | Merged via PR #11 — question bank, checklist, research chat, settings, stack layout |
 | 6 Post-session | ✅ Complete | ⏳ Open | Summary screen + `get_digest` fallback added in this branch |
 | 7 Hardening | 🔄 Partial | ⏳ Open | eval baseline committed; 7.1 coverage + 7.8 installers + NFR run still open |
+| **8 Mock Interview** | ⏳ Branch only | ⏳ Open | `feature/mock-interview` @ `3c2aea3` — TTS + coach + mic capture; manual E2E pending |
 | Strategy B Ph1 | ✅ Code + manual | ✅ Signed off | 1.A 2026-06-09; 1.B 2026-06-10 |
-| Strategy B Ph2 | ✅ Code complete | ⏳ Open | Manual device test + Store submission pending |
+| Strategy B Ph2 | ✅ On `main` (ext) | ⏳ Open | API gate passed 2026-06-11; Chrome manual + Store submission pending |
 
 ### Cross-cutting gaps (not phase-complete)
 
@@ -36,12 +37,13 @@
 
 ### What to implement next
 
-1. **Merge `feature/strategy-b-phase1b-clean-slate`** → closes all ROADMAP.md code gaps + Phase 1.B ✅ signed off
-2. **Merge `feature/extension-mvp`** (flint-extension) + smart-resume test move → Phase 2 code-complete
-3. **Manual Phase 2 gate** — load extension in Chrome, LinkedIn job → Save JD → Open in Flint → verify pre-fill; then submit to Chrome Web Store
-4. **Strategy B Phase 3** — Supabase SSO migration + unified credit ledger (5–7 weeks)
-5. Close Phase 3/4/5 manual review gates in parallel
-6. **7.8** signed installers before extension public beta
+1. **Merge `feature/mock-interview`** → Phase 8 code on `main`; run Phase 8 manual gate (checklist below)
+2. **Phase 8 follow-ups** (post-merge) — dynamic follow-up questions, mock summary/replay UI, Piper/ElevenLabs TTS
+3. **Merge `feature/extension-mvp`** (flint-extension) + smart-resume test move → Phase 2 code-complete
+4. **Manual Phase 2 gate** — load extension in Chrome, LinkedIn job → Save JD → Open in Flint → verify pre-fill; then submit to Chrome Web Store
+5. **Strategy B Phase 3** — Supabase SSO migration + unified credit ledger (5–7 weeks)
+6. Close Phase 3/4/5 manual review gates in parallel
+7. **7.8** signed installers before extension public beta
 
 Companion integration track: `docs/STRATEGY_B_INTEGRATION_PLAN.md`
 
@@ -468,6 +470,150 @@ Comprehensive audit run 2026-06-03 against `.cursor/rules` and `docs/flint_syste
 - [ ] Installers signed and tested on clean macOS/Windows/Linux VMs (7.8)
 - [ ] Stealth: not detected by 3 different screen capture tools tested
 - [ ] Settings UI: provider keys, cost cap, GDPR delete/export (cross-cutting — blocks v1 UX)
+
+---
+
+## Phase 8 — Guided Mock Interview
+
+**Goal:** Mic-only practice mode where an AI interviewer asks digest questions via TTS, the user answers aloud, and Flint streams a suggested answer plus structured coach feedback (grammar, tone, gaps, polished rewrite, score).  
+**Duration:** ~1 week (Phase 1 slice)  
+**Branch:** `feature/mock-interview` @ `3c2aea3` — **not merged to `main`**  
+**Status:** ✅ Code complete — ⏳ manual device gate open
+
+### Architecture (implemented)
+
+| Layer | Module / file | Role |
+|-------|---------------|------|
+| State | `session/state.rs` | `MOCK_INTERVIEW` state; `REHEARSING ↔ MOCK_INTERVIEW → READY` |
+| Persistence | `session/persistence.rs` v8 | `mock_turns` table — question, user_text, audio_path, coach_json, suggested, score |
+| TTS | `mock/tts.rs` | Platform TTS: macOS `say`, Linux `espeak-ng`/`espeak`, Windows PowerShell |
+| Conductor | `mock/conductor.rs` | Sequences `digest.likely_questions`; speaks question; streams suggested answer |
+| Mic | `mock/mic_capture.rs` | Mic-only VAD + Whisper; emits `mock_user_transcribed` |
+| Audio | `mock/audio_writer.rs` | Per-turn WAV under `{app_data}/mock_audio/` |
+| Coach | `mock/coach.rs` | Post-answer LLM → `CoachFeedback` JSON |
+| Commands | `commands.rs` | `start_mock`, `start_mock_turn`, `end_mock_turn`, `skip_mock_turn`, `stop_mock`, `get_mock_turns` |
+| Events | `events.rs` + `src/events/index.ts` | `mock_question_started`, `mock_user_transcribed`, `mock_suggested_token`, `mock_coach_feedback`, `mock_ended` |
+| Prompts | `prompts/mock_coach/`, `prompts/mock_suggested/` | Coach JSON schema + 120-word suggested answer |
+| UI | `MockInterview.tsx`, `SuggestedAnswerPanel.tsx`, `CoachPanel.tsx` | Turn loop + merged guidance panels |
+| Entry | `Rehearsal.tsx` | Purple **Mock Interview** button → `App.tsx` `mock-interview` screen |
+
+### Tasks
+
+| # | Task | Agent | Review? | Status |
+|---|---|---|---|---|
+| 8.1 | `MOCK_INTERVIEW` state + transitions in `session/state.rs` | Cursor Agent | State machine tests | [x] Complete — 5 transition tests |
+| 8.2 | SQLite v8 `mock_turns` + persistence helpers | Cursor Agent | Migration test on fresh DB | [x] Complete — `SCHEMA_VERSION = 8` |
+| 8.3 | Platform TTS for AI interviewer questions | Cursor Agent | Hear question spoken on each OS | [x] Complete — `mock/tts.rs`; Piper/ElevenLabs deferred |
+| 8.4 | Conductor — question sequencer + suggested-answer LLM stream | Cursor Agent (Opus) | Questions from `likely_questions` only | [x] Complete — no dynamic follow-ups yet |
+| 8.5 | Mic-only capture + per-turn WAV writer | Cursor Agent — reference Phase 3 VAD/Whisper | WAV file exists after turn | [x] Complete — `mock/mic_capture.rs`, `audio_writer.rs` |
+| 8.6 | Coach LLM thread — structured JSON feedback + score | Cursor Agent | Coach JSON parser unit tests | [x] Complete — `mock/coach.rs` |
+| 8.7 | Tauri commands + events + frontend screen | Cursor Agent | No raw `invoke()` in components | [x] Complete — IPC via `commands/index.ts` |
+| 8.8 | Rehearsal entry point — **Mock Interview** button | Cursor Agent | Button visible from REHEARSING | [x] Complete |
+| 8.9 | Dynamic follow-up questions (LLM-generated after each answer) | Cursor Agent (Opus) | Conductor generates next Q from context | [ ] Not started — Phase 8.2 |
+| 8.10 | Mock session summary + audio replay in `SessionSummary` | Cursor Agent | Replay WAV per turn from summary | [ ] Not started — `get_mock_turns` exists; UI pending |
+| 8.11 | Upgrade TTS — Piper (local) or ElevenLabs (cloud) | Cursor Agent | Voice quality vs platform TTS | [ ] Not started — platform TTS is Phase 8.1 default |
+| 8.12 | Merge PR + CI green on all platforms | Shell agent | `cargo test`, `vitest`, clippy | [ ] Pending — branch pushed, PR not opened |
+
+### Phase 8 Manual Test Checklist
+
+Prerequisites: Groq API key in Settings; digest confirmed with ≥1 `likely_questions`; mic permission granted; Linux: `espeak-ng` or `espeak` installed for TTS.
+
+- [ ] **Entry** — From Rehearsal, purple **Mock Interview** button visible; click → `MockInterview` screen loads
+- [ ] **State** — Session state transitions to `MOCK_INTERVIEW` (check via devtools / `session_state_change` event)
+- [ ] **TTS** — First question spoken aloud (platform voice); question text shown in interviewer bubble
+- [ ] **Suggested answer** — Tokens stream into Suggested Answer panel while question is displayed
+- [ ] **Start answering** — Click **Start Answering** → REC indicator; speak 10–20 s; live transcript appears in Your Answer panel
+- [ ] **Done answering** — Click **Done Answering** → coach panel shows "Analyzing…" then score + tone/gaps/grammar/polished rewrite
+- [ ] **Skip** — On a later turn, **Skip** advances without recording; conductor moves to next question
+- [ ] **Full run** — Complete all `likely_questions` → `mock_ended` fires → returns to Rehearsal
+- [ ] **Exit** — Mid-session **Exit** → `stop_mock` → back to Rehearsal, state `REHEARSING`
+- [ ] **Persistence** — After a turn, `{app_data}/mock_audio/session_*_turn_*.wav` exists; `mock_turns` row in SQLite has coach_json + score
+- [ ] **Draft recovery** — Kill app during mock → restart → draft session restores to Rehearsal (mock state in `DRAFT_STATES`)
+
+### Phase 8 Review Gate
+
+- [x] `cargo test --lib` passes (380 tests incl. mock state, TTS, WAV, coach JSON, mock-turn persistence race)
+- [x] `cargo clippy -- -D warnings` passes
+- [x] `npx vitest run` passes (31 tests)
+- [ ] Manual checklist above passes on Linux (primary dev platform)
+- [ ] Manual checklist passes on macOS and Windows (TTS path differs per OS)
+- [ ] No regression: Rehearsal → Go live still works after mock session
+- [ ] PR merged to `main`
+
+---
+
+## Phase 9 — Dual Vector Store Q&A Embedding
+
+**Goal:** Embed quality-gated AI answers into a per-session Q&A vector store (`session_qa_<id>`) separate from the context store (`session_context_<id>`). Use slot-allocated retrieval (6 context + 2 Q&A chunks) at live/rehearsal time. Embed user-provided Q&A pairs directly into the context store at confirm_digest time.  
+**Branch:** `feature/qa-pair-embedding`  
+**Duration:** 3–4 days  
+**Design reference:** `docs/flint_system_design_v3.md` Section 16.5, `docs/QA_RETRIEVAL_AND_QUESTION_BANK.md`  
+**Depends on:** Phase 5.5 complete ✅
+
+### Background — Bug Fixes Applied Before Phase 9 (June 2026)
+
+The following bugs were identified and fixed during active use of the question bank feature. Phase 9 builds on top of these already-merged fixes.
+
+| Bug | Root cause | Fix merged |
+|-----|-----------|------------|
+| Previous session questions shown in rehearsal | `get_question_bank` seeded from global in-memory `session_digest` | Seed from SQLite-scoped `load_session_digest(sid)` |
+| Question count capped at ~10 | `max_tokens: 1024` on digest LLM call | Raised to `max_tokens: 4096` |
+| Question count capped at ~25 even with 4096 tokens | Prompt said "up to 20 interview questions" | Removed cap in prompt; added "no upper limit" instruction |
+| Bank not reset after re-extraction | `confirm_digest` did not sync question bank | Added bank re-sync block in `confirm_digest` |
+| Large question lists truncated | LLM output budget finite | Added `extract_questions_from_text()` regex fallback; runs O(lines), zero LLM cost |
+
+### Architecture (Phase 9)
+
+See `docs/flint_system_design_v3.md` Section 16.5 for full dual-store design. Summary:
+
+- Two sqlite-vec tables per session: `session_context_<id>` (unchanged) and `session_qa_<id>` (new)
+- User-provided Q&A pairs embedded into context store (trusted, ground-truth)
+- AI-generated answers embedded into Q&A store only when confidence ≥ 0.65
+- Retrieval: 6 context slots (always filled) + 2 Q&A slots (score ≥ 0.80 threshold, empty if none qualify)
+- Prompt labels distinguish context chunks from Q&A chunks
+
+### Tasks
+
+| # | Task | Agent | Review? | Status |
+|---|---|---|---|---|
+| 9.1 | Extend `VectorInterface` trait: `ingest_context`, `ingest_qa`, `query_context`, `query_qa` + deprecate generic `ingest`/`query` | Cursor Agent (Sonnet) | All call sites updated | [ ] Not started |
+| 9.2 | `rag/store.rs`: SQLite migration v9 — create `session_qa_<id>` virtual table alongside `session_context_<id>`; update `VectorStore` impl | Cursor Agent | Two-table isolation integration test | [ ] Not started |
+| 9.3 | `rag/retriever.rs`: `retrieve_for_prompt(session_id, question_embedding)` — 6 context + 2 Q&A slots with MMR on context | Cursor Agent | Verify Q&A never displaces context slots | [ ] Not started |
+| 9.4 | `orchestrator/directional.rs` + `depth.rs`: after turn completes, if confidence ≥ 0.65 embed Q&A pair into `session_qa_<id>` | Cursor Agent (Sonnet) | Confirm low-confidence answers not embedded | [ ] Not started |
+| 9.5 | `commands.rs` `confirm_digest`: embed user-provided Q&A pairs (from question_bank) into `session_context_<id>` | Cursor Agent | Round-trip: embed → query → assert retrieval | [ ] Not started |
+| 9.6 | Prompt templates: add `[How you answered a similar question earlier]` label section; load from `/prompts/` | Cursor Agent | Labels present only when Q&A chunks non-empty | [ ] Not started |
+| 9.7 | Integration tests: dual-table isolation, slot allocation, confidence gate, context store Q&A embedding | `best-of-n-runner` (3 attempts) | — | [ ] Not started |
+| 9.8 | `delete_session` extended: drops both tables | Cursor Agent | Verify no orphaned Q&A table | [ ] Not started |
+
+### Phase 9 Review Gate
+
+- [ ] Two sqlite-vec tables per session — integration test confirms session A Q&A does not appear in session B context queries
+- [ ] Confidence gate: answer with score 0.64 not embedded; score 0.65 embedded — unit test
+- [ ] Slot allocation: context query always returns ≥ 6 chunks (or all available if < 6); Q&A returns 0–2 — unit test
+- [ ] User-provided Q&A pairs in context store: paste "Q: X\nA: Y" → confirm digest → query → assert chunk retrieved with score ≥ 0.80
+- [ ] Prompt labels: Q&A label present when Q&A chunks non-empty; absent when Q&A store is empty
+- [ ] `cargo test --test rag_dual_store` passes
+- [ ] Retrieval P95 < 50ms for both stores combined (NFR gate)
+
+---
+
+## Phase 9.5 — Shared Question Bank (Deferred)
+
+**Gate:** Phase 9 shipped + ≥ 500 quality-gated Q&A pairs per domain accumulated from production sessions  
+**Duration:** 4–6 weeks  
+**Design reference:** `docs/QA_RETRIEVAL_AND_QUESTION_BANK.md` Sections 4–7
+
+**Goal:** A shared global repository of curated interview questions with canonical answers, enriched continuously from real session signal and accessible across users. Quality controlled by an automated agent pipeline (Generator → Critic → Synthesiser → Validator). User contributions opt-in only.
+
+**Not detailed here until gate met.** See `docs/QA_RETRIEVAL_AND_QUESTION_BANK.md` for full architecture.
+
+| Task | Notes |
+|------|-------|
+| Smart Resume `services/questions/` module | REST API: `GET /api/interview-questions?company=&role=&domain=` |
+| Flint integration: query shared bank at session start | Merge with local bank; local takes priority on conflicts |
+| Agent enrichment pipeline | Generator → Critic → Synthesiser → Validator; run offline; curated canonical answers |
+| Privacy opt-in flow | Per-session consent dialog; BYOK defaults to opt-out; Supabase RLS on contribution rows |
+| Admin panel: question corpus management | Tag, review, promote, demote canonical answers |
 
 ---
 
