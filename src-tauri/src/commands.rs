@@ -25,17 +25,17 @@ use crate::health::{checks, hardware};
 use crate::interfaces::auth::AuthToken;
 use crate::interfaces::vector::Chunk;
 use crate::keychain;
+use crate::knowledge::packs_for_role;
 use crate::llm::failover::FailoverManager;
 use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
 use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::rate_limiter::RateLimiter;
-use crate::knowledge::packs_for_role;
 use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
-use crate::mock::rag::query_mock_rag;
 use crate::mock::mic_capture::MicCapture;
+use crate::mock::rag::query_mock_rag;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
@@ -739,7 +739,9 @@ fn spawn_company_enrichment(
                     }
                     tracing::debug!(session_id = %session_id, query = %query, results = results.len(), "company enrichment search done");
                 }
-                Err(e) => warn!(session_id = %session_id, query = %query, error = %e, "company enrichment search failed"),
+                Err(e) => {
+                    warn!(session_id = %session_id, query = %query, error = %e, "company enrichment search failed")
+                }
             }
         }
 
@@ -792,8 +794,12 @@ fn spawn_company_enrichment(
         }
 
         match vector_store.ingest(session_id, chunks).await {
-            Ok(()) => info!(session_id = %session_id, chunks = count, company = %company, "company enrichment ingested into session RAG"),
-            Err(e) => warn!(session_id = %session_id, error = %e, "company enrichment ingest failed"),
+            Ok(()) => {
+                info!(session_id = %session_id, chunks = count, company = %company, "company enrichment ingested into session RAG")
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "company enrichment ingest failed")
+            }
         }
     });
 }
@@ -846,7 +852,10 @@ pub async fn confirm_digest(
             let extracted = extract_questions_from_text(context_blob);
             let bank_lower: Vec<String> = bank.iter().map(|q| q.to_lowercase()).collect();
             for q in extracted {
-                if !bank_lower.iter().any(|existing| *existing == q.to_lowercase()) {
+                if !bank_lower
+                    .iter()
+                    .any(|existing| *existing == q.to_lowercase())
+                {
                     bank.push(q);
                 }
             }
@@ -868,9 +877,7 @@ pub async fn confirm_digest(
     // ground truth), not the Q&A store (AI-generated answers only).
     //
     // Fire-and-forget: failure here is non-fatal.
-    if let (Some(context_blob), Ok(embedder)) =
-        (context_blob_opt, state.require_embedder())
-    {
+    if let (Some(context_blob), Ok(embedder)) = (context_blob_opt, state.require_embedder()) {
         let pairs = extract_qa_pairs_from_text(&context_blob);
         if !pairs.is_empty() {
             let store = Arc::clone(&state.vector_store);

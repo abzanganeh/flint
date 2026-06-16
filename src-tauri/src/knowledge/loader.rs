@@ -57,7 +57,11 @@ impl GlobalKnowledgeBase {
         embedder_slot: Arc<StdRwLock<Option<Arc<Embedder>>>>,
         packs_dir: PathBuf,
     ) -> Self {
-        Self { store, embedder_slot, packs_dir }
+        Self {
+            store,
+            embedder_slot,
+            packs_dir,
+        }
     }
 
     /// Spawn a background task that waits for the embedder then loads every pack.
@@ -76,7 +80,10 @@ impl GlobalKnowledgeBase {
             };
             for &pack in PackId::all() {
                 if kb.store.chunk_count(pack.uuid()) > 0 {
-                    debug!(pack = pack.dir_name(), "knowledge pack already embedded; skipping");
+                    debug!(
+                        pack = pack.dir_name(),
+                        "knowledge pack already embedded; skipping"
+                    );
                     continue;
                 }
                 if let Err(e) = kb.load_pack(pack, &embedder).await {
@@ -113,7 +120,11 @@ impl GlobalKnowledgeBase {
             }
         }
 
-        all.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        all.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         all.truncate(top_k);
         all
     }
@@ -145,9 +156,7 @@ impl GlobalKnowledgeBase {
         let mut combined = String::new();
         let mut entries: Vec<_> = std::fs::read_dir(&dir)?
             .flatten()
-            .filter(|e| {
-                e.path().extension().and_then(|x| x.to_str()) == Some("txt")
-            })
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("txt"))
             .collect();
         entries.sort_by_key(|e| e.file_name());
 
@@ -157,7 +166,9 @@ impl GlobalKnowledgeBase {
                     combined.push_str(&text);
                     combined.push_str("\n\n");
                 }
-                Err(e) => warn!(path = %entry.path().display(), error = %e, "failed to read pack file"),
+                Err(e) => {
+                    warn!(path = %entry.path().display(), error = %e, "failed to read pack file")
+                }
             }
         }
 
@@ -168,7 +179,10 @@ impl GlobalKnowledgeBase {
 
         let raw_chunks = chunk_text(&combined, CHUNK_TOKENS, OVERLAP_TOKENS);
         if raw_chunks.is_empty() {
-            warn!(pack = pack.dir_name(), "no chunks produced; skipping ingest");
+            warn!(
+                pack = pack.dir_name(),
+                "no chunks produced; skipping ingest"
+            );
             return Ok(());
         }
 
@@ -185,7 +199,10 @@ impl GlobalKnowledgeBase {
 
             for (text, embedding) in batch.iter().zip(embeddings) {
                 if embedding.is_empty() {
-                    warn!(pack = pack.dir_name(), "empty embedding for chunk; skipping");
+                    warn!(
+                        pack = pack.dir_name(),
+                        "empty embedding for chunk; skipping"
+                    );
                     continue;
                 }
                 chunks.push(Chunk {
@@ -199,11 +216,18 @@ impl GlobalKnowledgeBase {
 
         let n = chunks.len();
         if n == 0 {
-            warn!(pack = pack.dir_name(), "all chunks produced empty embeddings; skipping ingest");
+            warn!(
+                pack = pack.dir_name(),
+                "all chunks produced empty embeddings; skipping ingest"
+            );
             return Ok(());
         }
         self.store.ingest(pack_uuid, chunks).await?;
-        info!(pack = pack.dir_name(), chunks = n, "knowledge pack embedded and stored");
+        info!(
+            pack = pack.dir_name(),
+            chunks = n,
+            "knowledge pack embedded and stored"
+        );
         Ok(())
     }
 }

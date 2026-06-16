@@ -43,7 +43,7 @@ use crate::events::{
     ThreadStatusPayload, TokenUsageUpdatePayload, TurnStartedPayload,
 };
 use crate::interfaces::vector::{
-    PromptChunks, QA_EMBED_CONFIDENCE_THRESHOLD, ScoredChunk, VectorInterface,
+    PromptChunks, ScoredChunk, VectorInterface, QA_EMBED_CONFIDENCE_THRESHOLD,
 };
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::LLMProvider;

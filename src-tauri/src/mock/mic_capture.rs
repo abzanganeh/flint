@@ -168,8 +168,7 @@ fn run_cpal_mic_thread(
     // frames (same path as live audio capture). Raw cpal buffers are often
     // not multiples of 480 and may be stereo — chunking them directly breaks
     // RNNoise and the 48→16 kHz downsampler.
-    let stream =
-        build_resampled_mono_stream(&device, frame_tx).context("build mock mic stream")?;
+    let stream = build_resampled_mono_stream(&device, frame_tx).context("build mock mic stream")?;
     stream.play().context("start mock mic stream")?;
 
     let _ = ready_tx.send(Ok(()));

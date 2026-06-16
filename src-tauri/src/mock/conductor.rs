@@ -182,9 +182,8 @@ async fn conductor_loop<R: Runtime>(
         let turn_n = turns_completed + 1;
         // When in the follow-up phase the current question has already been
         // popped from the queue, so add 1 back to get the real total count.
-        let total_questions_now = scripted_count as u32
-            + followup_queue.len() as u32
-            + u32::from(is_followup);
+        let total_questions_now =
+            scripted_count as u32 + followup_queue.len() as u32 + u32::from(is_followup);
 
         if pace == MockPace::Guided {
             match wait_for_ask_question(&mut cmd_rx, session_id).await {
@@ -316,7 +315,10 @@ async fn conductor_loop<R: Runtime>(
         question_idx += 1;
 
         // When scripted questions are done, collect follow-up results concurrently.
-        if question_idx >= scripted_count && followup_queue.is_empty() && !followup_handles.is_empty() {
+        if question_idx >= scripted_count
+            && followup_queue.is_empty()
+            && !followup_handles.is_empty()
+        {
             let results = futures::future::join_all(followup_handles.drain(..)).await;
             for result in results {
                 if let Ok(Some(q)) = result {
@@ -366,8 +368,12 @@ async fn generate_follow_up<R: Runtime>(
         return Ok(None);
     }
 
-    let template = load_prompt("mock_followup", failover.active_provider_name(), prompts_dir)
-        .context("follow-up prompt not found")?;
+    let template = load_prompt(
+        "mock_followup",
+        failover.active_provider_name(),
+        prompts_dir,
+    )
+    .context("follow-up prompt not found")?;
 
     let prompt = template
         .replace("{domain}", &digest.domain)

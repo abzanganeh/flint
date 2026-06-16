@@ -1,7 +1,6 @@
 pub mod audio;
 mod auth_session;
 mod commands;
-pub mod knowledge;
 pub mod confidence;
 pub mod cost;
 pub mod deep_link;
@@ -14,6 +13,7 @@ mod health;
 mod hotkeys;
 pub mod interfaces;
 mod keychain;
+pub mod knowledge;
 pub mod llm;
 pub mod mock;
 pub mod orchestrator;

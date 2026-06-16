@@ -171,7 +171,10 @@ async fn run_openai_tts(text: &str, api_key: &str) -> Result<()> {
         bail!("OpenAI TTS HTTP {code}: {body}");
     }
 
-    let mp3_bytes = resp.bytes().await.context("read OpenAI TTS response body")?;
+    let mp3_bytes = resp
+        .bytes()
+        .await
+        .context("read OpenAI TTS response body")?;
     let mp3_path = std::env::temp_dir().join("flint_tts.mp3");
     tokio::fs::write(&mp3_path, &mp3_bytes)
         .await

@@ -562,7 +562,10 @@ mod tests {
         let emb = require_embedder!();
 
         let ctx_chunk = make_chunk("Identity and access management fundamentals", session, emb);
-        store.ingest_context(session, vec![ctx_chunk]).await.unwrap();
+        store
+            .ingest_context(session, vec![ctx_chunk])
+            .await
+            .unwrap();
 
         let qa_chunk = make_chunk(
             "Q: Tell me about yourself\nA: I am an IAM architect with 8 years experience",
@@ -612,7 +615,10 @@ mod tests {
         let emb = require_embedder!();
 
         let ctx_chunk = make_chunk("Rust ownership and borrowing", session, emb);
-        store.ingest_context(session, vec![ctx_chunk]).await.unwrap();
+        store
+            .ingest_context(session, vec![ctx_chunk])
+            .await
+            .unwrap();
 
         let qa_chunk = make_chunk(
             "Q: What is ownership?\nA: Ownership is a set of rules that govern memory",
@@ -628,8 +634,14 @@ mod tests {
         let query = emb.embed_one("Rust ownership").unwrap();
         let ctx_results = store.query_context(session, &query, 5).await.unwrap();
         let qa_results = store.query_qa(session, &query, 5).await.unwrap();
-        assert!(ctx_results.is_empty(), "context store must be empty after delete");
-        assert!(qa_results.is_empty(), "Q&A store must be empty after delete");
+        assert!(
+            ctx_results.is_empty(),
+            "context store must be empty after delete"
+        );
+        assert!(
+            qa_results.is_empty(),
+            "Q&A store must be empty after delete"
+        );
     }
 
     #[tokio::test]
@@ -653,10 +665,7 @@ mod tests {
             "product management and roadmaps",
             "distributed systems architecture",
         ];
-        let chunks: Vec<Chunk> = texts
-            .iter()
-            .map(|t| make_chunk(t, session, emb))
-            .collect();
+        let chunks: Vec<Chunk> = texts.iter().map(|t| make_chunk(t, session, emb)).collect();
         store.ingest_context(session, chunks).await.unwrap();
 
         let query = emb

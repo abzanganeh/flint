@@ -16,7 +16,9 @@
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::interfaces::vector::{PromptChunks, QA_RETRIEVAL_THRESHOLD, ScoredChunk, VectorInterface};
+use crate::interfaces::vector::{
+    PromptChunks, ScoredChunk, VectorInterface, QA_RETRIEVAL_THRESHOLD,
+};
 
 /// Dot product of two equal-length vectors.
 ///
@@ -177,7 +179,14 @@ pub async fn retrieve_for_prompt(
     const MMR_LAMBDA: f32 = 0.7;
 
     // Context retrieval — MMR via the existing retrieve() function.
-    let context = retrieve(store, session_id, query_embedding, CONTEXT_SLOTS, MMR_LAMBDA).await?;
+    let context = retrieve(
+        store,
+        session_id,
+        query_embedding,
+        CONTEXT_SLOTS,
+        MMR_LAMBDA,
+    )
+    .await?;
 
     // Q&A retrieval — raw top-k then threshold filter, no MMR (past answers
     // are short and dissimilar from each other; MMR would not add value).

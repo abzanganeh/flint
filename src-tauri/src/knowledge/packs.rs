@@ -27,26 +27,26 @@ impl PackId {
     /// will never collide with real v4 session UUIDs.
     pub fn uuid(self) -> Uuid {
         match self {
-            Self::Algorithms    => Uuid::from_u128(0xf17f_ffff_0000_0000_0001_0000_0000_0000),
-            Self::SystemDesign  => Uuid::from_u128(0xf17f_ffff_0000_0000_0002_0000_0000_0000),
-            Self::DesignPatterns=> Uuid::from_u128(0xf17f_ffff_0000_0000_0003_0000_0000_0000),
-            Self::Behavioral    => Uuid::from_u128(0xf17f_ffff_0000_0000_0004_0000_0000_0000),
-            Self::MlPlatform    => Uuid::from_u128(0xf17f_ffff_0000_0000_0005_0000_0000_0000),
-            Self::WebBackend    => Uuid::from_u128(0xf17f_ffff_0000_0000_0006_0000_0000_0000),
-            Self::Frontend      => Uuid::from_u128(0xf17f_ffff_0000_0000_0007_0000_0000_0000),
+            Self::Algorithms => Uuid::from_u128(0xf17f_ffff_0000_0000_0001_0000_0000_0000),
+            Self::SystemDesign => Uuid::from_u128(0xf17f_ffff_0000_0000_0002_0000_0000_0000),
+            Self::DesignPatterns => Uuid::from_u128(0xf17f_ffff_0000_0000_0003_0000_0000_0000),
+            Self::Behavioral => Uuid::from_u128(0xf17f_ffff_0000_0000_0004_0000_0000_0000),
+            Self::MlPlatform => Uuid::from_u128(0xf17f_ffff_0000_0000_0005_0000_0000_0000),
+            Self::WebBackend => Uuid::from_u128(0xf17f_ffff_0000_0000_0006_0000_0000_0000),
+            Self::Frontend => Uuid::from_u128(0xf17f_ffff_0000_0000_0007_0000_0000_0000),
         }
     }
 
     /// Subdirectory name under the knowledge base root directory.
     pub fn dir_name(self) -> &'static str {
         match self {
-            Self::Algorithms    => "algorithms",
-            Self::SystemDesign  => "system_design",
-            Self::DesignPatterns=> "design_patterns",
-            Self::Behavioral    => "behavioral",
-            Self::MlPlatform    => "ml_platform",
-            Self::WebBackend    => "web_backend",
-            Self::Frontend      => "frontend",
+            Self::Algorithms => "algorithms",
+            Self::SystemDesign => "system_design",
+            Self::DesignPatterns => "design_patterns",
+            Self::Behavioral => "behavioral",
+            Self::MlPlatform => "ml_platform",
+            Self::WebBackend => "web_backend",
+            Self::Frontend => "frontend",
         }
     }
 
@@ -71,30 +71,68 @@ impl PackId {
 pub fn packs_for_role(domain: &str, role: &str) -> Vec<PackId> {
     let combined = format!("{domain} {role}").to_lowercase();
 
-    let is_ml = ["ml", "ai ", " ai", "machine learning", "data science", "llm",
-                 "nlp", "mlops", "platform engineer", "ai engineer", "deep learning",
-                 "computer vision", "recommender"]
-        .iter()
-        .any(|kw| combined.contains(kw));
+    let is_ml = [
+        "ml",
+        "ai ",
+        " ai",
+        "machine learning",
+        "data science",
+        "llm",
+        "nlp",
+        "mlops",
+        "platform engineer",
+        "ai engineer",
+        "deep learning",
+        "computer vision",
+        "recommender",
+    ]
+    .iter()
+    .any(|kw| combined.contains(kw));
 
-    let is_frontend = ["frontend", "front-end", "react", "vue", "angular",
-                       "ui engineer", "ux engineer", "css", " html"]
-        .iter()
-        .any(|kw| combined.contains(kw));
+    let is_frontend = [
+        "frontend",
+        "front-end",
+        "react",
+        "vue",
+        "angular",
+        "ui engineer",
+        "ux engineer",
+        "css",
+        " html",
+    ]
+    .iter()
+    .any(|kw| combined.contains(kw));
 
-    let is_backend = ["backend", "back-end", "api", "server", "microservice",
-                      "cloud", "devops", "infrastructure", "sre", "platform",
-                      "distributed"]
-        .iter()
-        .any(|kw| combined.contains(kw));
+    let is_backend = [
+        "backend",
+        "back-end",
+        "api",
+        "server",
+        "microservice",
+        "cloud",
+        "devops",
+        "infrastructure",
+        "sre",
+        "platform",
+        "distributed",
+    ]
+    .iter()
+    .any(|kw| combined.contains(kw));
 
-    const GENERAL_SW_PACKS: &[PackId] =
-        &[PackId::SystemDesign, PackId::WebBackend, PackId::DesignPatterns];
+    const GENERAL_SW_PACKS: &[PackId] = &[
+        PackId::SystemDesign,
+        PackId::WebBackend,
+        PackId::DesignPatterns,
+    ];
 
     let mut packs = vec![PackId::Algorithms, PackId::Behavioral];
 
     if is_ml {
-        packs.extend_from_slice(&[PackId::MlPlatform, PackId::SystemDesign, PackId::DesignPatterns]);
+        packs.extend_from_slice(&[
+            PackId::MlPlatform,
+            PackId::SystemDesign,
+            PackId::DesignPatterns,
+        ]);
     }
 
     if is_frontend {

@@ -59,8 +59,11 @@ pub async fn query_mock_rag(
 
     // Merge + re-rank: combine both sets, sort by score, deduplicate by chunk id.
     session_chunks.extend(kb_chunks);
-    session_chunks
-        .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    session_chunks.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut seen = std::collections::HashSet::new();
     session_chunks.retain(|c| seen.insert(c.chunk.id));

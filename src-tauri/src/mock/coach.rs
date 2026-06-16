@@ -194,7 +194,9 @@ fn apply_coach_guardrails(
             .iter()
             .any(|g| g.contains("No answer recorded"))
         {
-            feedback.context_gaps.insert(0, "No answer recorded".to_string());
+            feedback
+                .context_gaps
+                .insert(0, "No answer recorded".to_string());
         }
         return;
     }
@@ -505,7 +507,12 @@ mod tests {
             score: 80,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, "um", "full suggested script here", MockMode::Practice);
+        apply_coach_guardrails(
+            &mut fb,
+            "um",
+            "full suggested script here",
+            MockMode::Practice,
+        );
         assert_eq!(fb.score, 0);
     }
 
@@ -518,11 +525,10 @@ mod tests {
         };
         apply_coach_guardrails(&mut fb, script, script, MockMode::Practice);
         assert_eq!(fb.score, ECHO_SCORE_CAP);
-        assert!(
-            fb.context_gaps
-                .iter()
-                .any(|g| g.contains("read the suggested answer"))
-        );
+        assert!(fb
+            .context_gaps
+            .iter()
+            .any(|g| g.contains("read the suggested answer")));
     }
 
     #[test]
