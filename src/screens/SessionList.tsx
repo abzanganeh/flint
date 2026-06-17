@@ -5,8 +5,10 @@ import {
   demoteSession,
   getDigest,
   getSessionContext,
+  getSessionContextFields,
   listSessions,
   promoteSession,
+  type SessionContextFields,
 } from "../commands";
 import type { SessionPreFill } from "./SessionDesign";
 import "./SessionList.css";
@@ -19,6 +21,12 @@ interface Props {
   activeSessionId?: string;
   /** Called when user clicks Resume for the active in-progress session. */
   onResumeSession?: (sessionId: string, sessionState: string) => void;
+  /** Called when user reopens an ENDED session at Rehearsal. */
+  onReopenSession?: (sessionId: string) => Promise<void>;
+}
+
+function hasStructuredFields(fields: SessionContextFields): boolean {
+  return Object.values(fields).some((value) => value.trim().length > 0);
 }
 
 function digestToContextText(digest: DigestDto): string {
@@ -82,6 +90,7 @@ export const SessionList: React.FC<Props> = ({
   onStartSimilar,
   activeSessionId,
   onResumeSession,
+  onReopenSession,
 }) => {
   const [sessions, setSessions] = useState<SessionSummaryDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -89,6 +98,7 @@ export const SessionList: React.FC<Props> = ({
   const [actionInFlight, setActionInFlight] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cloning, setCloning] = useState<string | null>(null);
+  const [reopening, setReopening] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -141,6 +151,12 @@ export const SessionList: React.FC<Props> = ({
     };
 
     try {
+      const fields = await getSessionContextFields(session.id);
+      if (hasStructuredFields(fields)) {
+        onStartSimilar({ ...base, contextFields: fields });
+        return;
+      }
+
       const stored = await getSessionContext(session.id);
       if (stored.trim().length > 0) {
         onStartSimilar({ ...base, contextText: stored.trim() });
@@ -159,6 +175,22 @@ export const SessionList: React.FC<Props> = ({
       setCloning(null);
     }
   }, [onStartSimilar]);
+
+  const handleReopen = useCallback(
+    async (session: SessionSummaryDto) => {
+      if (!onReopenSession) return;
+      setReopening(session.id);
+      setError(null);
+      try {
+        await onReopenSession(session.id);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setReopening(null);
+      }
+    },
+    [onReopenSession],
+  );
 
   const handleDelete = useCallback(async (id: string) => {
     setActionInFlight(id + ":delete");
@@ -251,6 +283,17 @@ export const SessionList: React.FC<Props> = ({
                       Resume
                     </button>
                   )}
+                  {isSelected && session.state === "ENDED" && onReopenSession && (
+                    <button
+                      className="sl-action-btn sl-action-btn--resume"
+                      onClick={() => void handleReopen(session)}
+                      disabled={busy || reopening === session.id}
+                      type="button"
+                      title="Return to Rehearsal with this session's question bank and digest"
+                    >
+                      {reopening === session.id ? "Opening…" : "Reopen"}
+                    </button>
+                  )}
                   {isSelected && onStartSimilar && (
                     <button
                       className="sl-action-btn sl-action-btn--clone"
@@ -297,7 +340,8 @@ export const SessionList: React.FC<Props> = ({
 
         {sessions.length > 0 && (
           <p className="sl-footer-note">
-            Sessions are kept for 30 days. Pin a session to exempt it from automatic deletion.
+            Click a session to reveal actions. Sessions are kept for 30 days. Pin a session to
+            exempt it from automatic deletion.
           </p>
         )}
       </main>

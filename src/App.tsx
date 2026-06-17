@@ -10,6 +10,7 @@ import {
   getSessionSnapshot,
   importFromSmartResume,
   restoreDraftSession,
+  reopenPastSession,
   returnToSessionDesign,
   stopSession,
   type RecoveryOffer,
@@ -493,6 +494,12 @@ function App() {
           onStartSimilar={(preFill) => {
             setSessionPreFill(preFill);
             setScreen("session-design");
+          }}
+          onReopenSession={async (pastSessionId) => {
+            const snapshot = await reopenPastSession(pastSessionId);
+            setSessionId(snapshot.sessionId);
+            setSessionPreFill(preFillFromSnapshot(snapshot));
+            setScreen("rehearsal");
           }}
         />
       </Shell>

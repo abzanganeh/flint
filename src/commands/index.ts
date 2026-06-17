@@ -291,6 +291,10 @@ export const getSessionContext = (sessionId: string): Promise<string> =>
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");
 
+/** Reopen an ENDED session at Rehearsal (Past Sessions). */
+export const reopenPastSession = (sessionId: string): Promise<SessionSnapshotDto> =>
+  invoke<SessionSnapshotDto>("reopen_past_session", { sessionId });
+
 /** Restore the most recent pre-live draft from SQLite (startup). */
 export const restoreDraftSession = (): Promise<boolean> =>
   invoke<boolean>("restore_draft_session");

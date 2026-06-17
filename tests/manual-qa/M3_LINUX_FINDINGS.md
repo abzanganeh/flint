@@ -88,6 +88,20 @@ Loop messages as each sub-block passes.
 - [ ] **m3-gmail-sso** Google OAuth (not built)
 - [ ] **8-gate-manual-macos-windows** platform TTS paths
 
+## Session recovery after sign-out (2026-06-16)
+
+**Sign out does not delete local sessions.** Auth token is cleared only; SQLite keeps all session rows.
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| No Reopen on past session | ENDED sessions had no reopen UI; Resume only for in-progress active draft | **Reopen** button added (select row → Reopen) |
+| Start similar empty fields | Clone path used legacy `context_text` blob only; digest fallback requires active session | Fixed: loads structured `contextFields` first |
+| Wrong session after login | `restoreDraftSession` picks most recent REHEARSING draft (not Fisher ENDED) | Use **Reopen** on Fisher row, or abandon other draft |
+| 139 Q bank missing on Start similar | Start similar creates new session — bank not copied | Use **Reopen** to keep same session + bank |
+
+Verified in SQLite (Linux):
+- `Fisher Investments IAM Architect` — ENDED, 139 questions, context intact at `~/.local/share/com.flint.app/flint.db`
+
 ## Open Backlog (non-blockers)
 
 | Item | Severity | Notes |

@@ -173,6 +173,7 @@ pub fn run() {
             commands::get_pending_import_token,
             commands::get_session_context,
             commands::get_session_snapshot,
+            commands::reopen_past_session,
             commands::restore_draft_session,
             commands::get_rehearsal_completed,
             commands::run_rehearsal_turn,

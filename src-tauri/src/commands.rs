@@ -1162,6 +1162,69 @@ pub async fn get_session_snapshot(
     })
 }
 
+/// Reopen a completed (ENDED) session at Rehearsal with its digest and question bank intact.
+#[tauri::command]
+pub async fn reopen_past_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionSnapshotDto, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+
+    let meta = state
+        .persistence
+        .get_session_metadata(sid)
+        .map_err(|e| e.to_string())?;
+
+    if meta.state != SessionState::Ended {
+        return Err(format!(
+            "Only ended sessions can be reopened (current: {})",
+            meta.state
+        ));
+    }
+
+    {
+        let machine = state.state_machine.lock().await;
+        let current = *machine.current();
+        if matches!(
+            current,
+            SessionState::Live | SessionState::Ending | SessionState::MockInterview
+        ) {
+            return Err(format!(
+                "Stop the active {} session before reopening a past session.",
+                current
+            ));
+        }
+    }
+
+    if let Some(digest) = state
+        .persistence
+        .load_session_digest(sid)
+        .map_err(|e| e.to_string())?
+    {
+        *state.session_digest.write().await = Some(digest);
+    } else {
+        *state.session_digest.write().await = None;
+    }
+    *state.prewarm_cache.lock().await = PreWarmCache::new();
+    *state.rehearsal_turn.lock().await = 0;
+    *state.session_memory.lock().await = None;
+
+    state
+        .persistence
+        .write_state_transition(sid, &SessionState::Rehearsing)
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine.restore_state_for_recovery(SessionState::Rehearsing, sid);
+    }
+
+    emit_state(&app, SessionState::Rehearsing);
+
+    get_session_snapshot(state).await
+}
+
 /// Re-anchor the state machine to the most recent pre-live draft in SQLite.
 ///
 /// Called once at startup (after crash recovery check). Returns `true` when a
