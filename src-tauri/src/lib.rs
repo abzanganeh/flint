@@ -227,6 +227,7 @@ pub fn run() {
             commands::end_mock_turn,
             commands::skip_mock_turn,
             commands::stop_mock,
+            commands::read_mock_audio_data_url,
             commands::get_mock_turns,
         ])
         .run(tauri::generate_context!())

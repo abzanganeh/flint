@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { getMockTurns, type CoachFeedback, type MockTurn } from "../commands";
+import { getMockTurns, readMockAudioDataUrl, type CoachFeedback, type MockTurn } from "../commands";
 import "./MockSummary.css";
 
 interface Props {
@@ -37,9 +36,44 @@ const scoreClass = (score: number): string => {
 function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
   const [expanded, setExpanded] = useState(index === 0);
   const [audioError, setAudioError] = useState(false);
+  const [audioSrc, setAudioSrc] = useState<string | null>(null);
+  const [audioLoading, setAudioLoading] = useState(false);
   const coach = parseCoach(turn.coach_json);
   const skipped = isSkippedTurn(turn);
-  const audioSrc = turn.audio_path ? convertFileSrc(turn.audio_path) : null;
+
+  useEffect(() => {
+    if (!turn.audio_path || skipped) {
+      setAudioSrc(null);
+      setAudioError(false);
+      setAudioLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setAudioLoading(true);
+    setAudioError(false);
+    void readMockAudioDataUrl(turn.audio_path)
+      .then((url) => {
+        if (!cancelled) {
+          setAudioSrc(url);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAudioError(true);
+          setAudioSrc(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAudioLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [turn.audio_path, skipped]);
 
   return (
     <div className="ms-turn-card" data-expanded={expanded}>
@@ -87,6 +121,20 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
                   onError={() => setAudioError(true)}
                 />
               )}
+            </div>
+          )}
+
+          {!audioSrc && turn.audio_path && !skipped && audioLoading && (
+            <div className="ms-section">
+              <div className="ms-section-label">RECORDING</div>
+              <p className="ms-body-text">Loading recording…</p>
+            </div>
+          )}
+
+          {!audioSrc && turn.audio_path && !skipped && audioError && (
+            <div className="ms-section">
+              <div className="ms-section-label">RECORDING</div>
+              <p className="ms-audio-error">Could not play recording. The file may have been moved or removed.</p>
             </div>
           )}
 

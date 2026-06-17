@@ -666,3 +666,6 @@ export const stopMock = (finish = false): Promise<void> =>
 
 export const getMockTurns = (): Promise<MockTurn[]> =>
   invoke<MockTurn[]>("get_mock_turns");
+
+export const readMockAudioDataUrl = (path: string): Promise<string> =>
+  invoke<string>("read_mock_audio_data_url", { path });

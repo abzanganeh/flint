@@ -3100,6 +3100,42 @@ pub async fn get_feature_flags_snapshot(
 // Phase 8 — Mock Interview commands
 // ──────────────────────────────────────────────────────────────────────────────
 
+fn mock_audio_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("mock_audio"))
+        .unwrap_or_else(|_| PathBuf::from("mock_audio"))
+}
+
+fn validate_mock_audio_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("mock audio path must be absolute".to_string());
+    }
+    let audio_dir = mock_audio_dir(app);
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let dir_canonical = audio_dir
+        .canonicalize()
+        .unwrap_or_else(|_| audio_dir.clone());
+    if !canonical.starts_with(&dir_canonical) {
+        return Err("mock audio path is outside the session audio directory".to_string());
+    }
+    Ok(canonical)
+}
+
+async fn signal_mock_turn_complete(state: &AppState, user_text: String, audio_path: String) {
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles
+            .conductor
+            .cmd_tx
+            .send(ConductorCommand::TurnComplete {
+                user_text,
+                audio_path,
+            })
+            .await;
+    }
+}
+
 /// Transition to MOCK_INTERVIEW and start the conductor + mic capture loop.
 ///
 /// Valid from: `REHEARSING` or `READY`.
@@ -3174,11 +3210,7 @@ pub async fn start_mock(
     let suggested_buffer = Arc::new(std::sync::RwLock::new(String::new()));
 
     // Create audio directory.
-    let audio_dir = app
-        .path()
-        .app_data_dir()
-        .map(|d| d.join("mock_audio"))
-        .unwrap_or_else(|_| PathBuf::from("mock_audio"));
+    let audio_dir = mock_audio_dir(&app);
     std::fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
 
     // Initialise WhisperEngine.
@@ -3321,27 +3353,32 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .map_err(|e| e.to_string())?;
     mic_recording.store(false, Ordering::SeqCst);
 
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+
     if transcript.trim().is_empty() {
-        let session_id = state
-            .state_machine
-            .lock()
-            .await
-            .session_id()
-            .ok_or("no active session")?;
-        state
-            .persistence
-            .mark_mock_turn_skipped(session_id, turn_n)
-            .map_err(|e| e.to_string())?;
-        if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-            let _ = handles
-                .conductor
-                .cmd_tx
-                .send(ConductorCommand::TurnComplete {
-                    user_text: String::new(),
-                    audio_path: String::new(),
-                })
-                .await;
+        if audio_path.is_empty() {
+            state
+                .persistence
+                .mark_mock_turn_skipped(session_id, turn_n)
+                .map_err(|e| e.to_string())?;
+        } else {
+            state
+                .persistence
+                .update_mock_turn_user_answer_by_turn_n(
+                    session_id,
+                    turn_n,
+                    "",
+                    &audio_path,
+                    "",
+                )
+                .map_err(|e| e.to_string())?;
         }
+        signal_mock_turn_complete(&state, transcript, audio_path).await;
         return Ok(());
     }
 
@@ -3371,6 +3408,16 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .find(|t| t.turn_n == turn_n)
         .map(|t| t.question)
         .unwrap_or_default();
+
+    if let Err(e) = persistence.update_mock_turn_user_answer_by_turn_n(
+        session_id,
+        turn_n,
+        &transcript,
+        &audio_path,
+        &suggested_answer,
+    ) {
+        warn!(error = %e, turn_n, "failed to persist mock turn user answer");
+    }
 
     let rag_chunks = if let Ok(embedder) = state.require_embedder() {
         query_mock_rag(
@@ -3452,18 +3499,24 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
     }
 
     // Signal the conductor to advance to the next question.
-    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-        let _ = handles
-            .conductor
-            .cmd_tx
-            .send(ConductorCommand::TurnComplete {
-                user_text: transcript,
-                audio_path,
-            })
-            .await;
-    }
+    signal_mock_turn_complete(&state, transcript, audio_path).await;
 
     Ok(())
+}
+
+/// Return a data URL for a mock turn WAV so the summary screen can play it
+/// without relying on the asset protocol scope.
+#[tauri::command]
+pub fn read_mock_audio_data_url(app: AppHandle, path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let canonical = validate_mock_audio_path(&app, &path)?;
+    let bytes = std::fs::read(&canonical).map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Err("recording file is empty".to_string());
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:audio/wav;base64,{encoded}"))
 }
 
 /// Skip the current mock turn without recording an answer.
