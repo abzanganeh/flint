@@ -2392,27 +2392,38 @@ pub async fn trigger_response(
     Ok(())
 }
 
-/// Cancel any running inference — valid only from LIVE.
+/// Cancel any running inference — valid from LIVE or REHEARSING.
 ///
 /// Sets the active turn's cancellation flag so in-flight token streams stop.
 #[tauri::command]
 pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> {
-    {
+    let current = {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Live {
-            return Err(format!(
-                "cancel_inference is only valid from LIVE (current: {})",
-                machine.current()
-            ));
-        }
-    }
+        *machine.current()
+    };
 
-    let guard = state.live_tasks.lock().await;
-    if let Some(handles) = guard.as_ref() {
-        let slot = handles.turn_cancel.lock().await;
-        if let Some(flag) = slot.as_ref() {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-            info!("cancel_inference: active turn cancelled");
+    match current {
+        SessionState::Live => {
+            let guard = state.live_tasks.lock().await;
+            if let Some(handles) = guard.as_ref() {
+                let slot = handles.turn_cancel.lock().await;
+                if let Some(flag) = slot.as_ref() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                    info!("cancel_inference: live turn cancelled");
+                }
+            }
+        }
+        SessionState::Rehearsing => {
+            let slot = state.rehearsal_turn_cancel.lock().await;
+            if let Some(flag) = slot.as_ref() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                info!("cancel_inference: rehearsal turn cancelled");
+            }
+        }
+        other => {
+            return Err(format!(
+                "cancel_inference is only valid from LIVE or REHEARSING (current: {other})"
+            ));
         }
     }
 

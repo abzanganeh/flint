@@ -84,13 +84,14 @@ export function useHotkeys(
       chordActiveRef.current = false;
       holdFiredRef.current = false;
       setAnswerNowMode(false);
+      clearStreamingBuffers();
       void cancelInference();
       return false;
     }
 
     lastPressRef.current = now;
     return true;
-  }, [clearHoldTimer, enabled, sessionId, setAnswerNowMode]);
+  }, [clearHoldTimer, clearStreamingBuffers, enabled, sessionId, setAnswerNowMode]);
 
   /** OS-global shortcut (X11 / macOS / Windows) — single fire on press, tap only. */
   const handleGlobalShortcut = useCallback(() => {
