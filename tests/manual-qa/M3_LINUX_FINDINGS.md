@@ -59,6 +59,8 @@ Run after rebuild (`npm run tauri dev`). One block at a time; report pass/fail b
 - [ ] **A1** Skipped turns show "Skipped" badge on summary cards + skipped count in header
 - [ ] **A2** Play button plays WAV (no Error state)
 
+**A1 fail (2026-06-16):** Skip on Q1 was scored (20 · Weak) with no answer; Q2 recording failed. Root cause: mic `current_turn` counter drifted from conductor `turn_n`, so coach/audio landed on wrong rows. Fixed in `56e30b6+` — sync via `active_turn_n`, skip clears row, empty transcript skips coach, summary treats no text+audio as skipped.
+
 Loop message when both pass:
 ```
 /flint-loop resume — 8.10-summary fixed, re-test MockSummary playback + skip label passed (Linux)

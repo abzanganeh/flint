@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -112,6 +113,7 @@ impl Conductor {
         pace: MockPace,
         mode: MockMode,
         shuffle: bool,
+        active_turn_n: Arc<AtomicU32>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConductorCommand>(8);
         tokio::spawn(conductor_loop(
@@ -129,6 +131,7 @@ impl Conductor {
             pace,
             mode,
             shuffle,
+            active_turn_n,
             cmd_rx,
         ));
         Self { cmd_tx }
@@ -156,6 +159,7 @@ async fn conductor_loop<R: Runtime>(
     pace: MockPace,
     mode: MockMode,
     shuffle: bool,
+    active_turn_n: Arc<AtomicU32>,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
     let mut base_questions: Vec<String> = digest
@@ -248,6 +252,8 @@ async fn conductor_loop<R: Runtime>(
                 Uuid::new_v4()
             }
         };
+
+        active_turn_n.store(turn_n, Ordering::SeqCst);
 
         emit_mock_question_started(
             &app,

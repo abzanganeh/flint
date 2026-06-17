@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -3197,6 +3197,8 @@ pub async fn start_mock(
 
     let role_packs = packs_for_role(&digest.domain, &digest.role);
 
+    let active_turn_n = Arc::new(AtomicU32::new(0));
+
     let conductor = Conductor::start(
         app.clone(),
         session_id,
@@ -3212,6 +3214,7 @@ pub async fn start_mock(
         pace,
         mock_mode,
         shuffle,
+        Arc::clone(&active_turn_n),
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -3226,7 +3229,7 @@ pub async fn start_mock(
     *state.mock_tasks.lock().await = Some(MockTaskHandles {
         conductor,
         mic_capture,
-        current_turn: 0,
+        active_turn_n,
         guided,
         mode: mock_mode,
         suggested_text: suggested_buffer,
@@ -3264,10 +3267,12 @@ pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String>
 /// Call after the frontend has confirmed the AI question has been spoken.
 #[tauri::command]
 pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.mock_tasks.lock().await;
-    let handles = guard.as_mut().ok_or("no active mock session")?;
-    handles.current_turn += 1;
-    let turn_n = handles.current_turn;
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
+    let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+    if turn_n == 0 {
+        return Err("No mock question is active yet.".to_string());
+    }
     handles
         .mic_capture
         .start_turn(turn_n)
@@ -3287,7 +3292,10 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
     let (turn_n, reply_rx) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
-        let turn_n = handles.current_turn;
+        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+        if turn_n == 0 {
+            return Err("No mock question is active.".to_string());
+        }
         let reply_rx = handles
             .mic_capture
             .send_end_turn()
@@ -3302,6 +3310,30 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
             .await
             .map_err(|e| e.to_string())?;
+
+    if transcript.trim().is_empty() {
+        let session_id = state
+            .state_machine
+            .lock()
+            .await
+            .session_id()
+            .ok_or("no active session")?;
+        state
+            .persistence
+            .mark_mock_turn_skipped(session_id, turn_n)
+            .map_err(|e| e.to_string())?;
+        if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+            let _ = handles
+                .conductor
+                .cmd_tx
+                .send(ConductorCommand::TurnComplete {
+                    user_text: String::new(),
+                    audio_path: String::new(),
+                })
+                .await;
+        }
+        return Ok(());
+    }
 
     let (mock_mode, suggested_answer, role_packs) = {
         let guard = state.mock_tasks.lock().await;
@@ -3433,11 +3465,32 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         .await
         .session_id()
         .ok_or("no active session")?;
-    let (turn_n, persistence) = {
+
+    let (turn_n, persistence, conductor_tx) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
-        (handles.current_turn, Arc::clone(&state.persistence))
+        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+        if turn_n == 0 {
+            return Err("No mock question is active.".to_string());
+        }
+        (
+            turn_n,
+            Arc::clone(&state.persistence),
+            handles.conductor.cmd_tx.clone(),
+        )
     };
+
+    // Stop mic capture if the user started answering then skipped.
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
+            let _ = crate::mock::mic_capture::await_end_turn_reply(
+                reply_rx,
+                Duration::from_secs(3),
+            )
+            .await;
+        }
+    }
+
     if let Some(question) = persistence
         .load_mock_turns(session_id)
         .unwrap_or_default()
@@ -3455,16 +3508,17 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         );
     }
 
-    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-        let _ = handles
-            .conductor
-            .cmd_tx
-            .send(ConductorCommand::TurnComplete {
-                user_text: String::new(),
-                audio_path: String::new(),
-            })
-            .await;
-    }
+    persistence
+        .mark_mock_turn_skipped(session_id, turn_n)
+        .map_err(|e| e.to_string())?;
+
+    let _ = conductor_tx
+        .send(ConductorCommand::TurnComplete {
+            user_text: String::new(),
+            audio_path: String::new(),
+        })
+        .await;
+
     Ok(())
 }
 

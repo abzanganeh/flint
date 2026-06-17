@@ -1480,6 +1480,19 @@ impl SessionPersistence {
         Ok(())
     }
 
+    /// Clear answer, coach, and score for a skipped turn.
+    pub fn mark_mock_turn_skipped(&self, session_id: Uuid, turn_n: u32) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "UPDATE mock_turns
+             SET user_text = '', audio_path = '', coach_json = '', suggested = '', score = 0
+             WHERE session_id = ?1 AND turn_n = ?2",
+            params![session_id.to_string(), turn_n],
+        )
+        .context("mark mock turn skipped")?;
+        Ok(())
+    }
+
     /// Load all turns for a session in order, for replay and summary.
     pub fn load_mock_turns(&self, session_id: Uuid) -> Result<Vec<MockTurn>> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");

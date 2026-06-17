@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -43,8 +43,8 @@ pub struct MockTaskHandles {
     pub conductor: Conductor,
     /// Mic capture task — manages cpal stream and VAD+Whisper loop.
     pub mic_capture: MicCapture,
-    /// Current turn number. Incremented by `start_mock_turn`.
-    pub current_turn: u32,
+    /// Conductor's active question turn (1-based). Updated when each question starts.
+    pub active_turn_n: Arc<AtomicU32>,
     /// When true, questions are gated on `ask_mock_question`.
     pub guided: bool,
     /// Practice hides suggested answer until after the user responds.

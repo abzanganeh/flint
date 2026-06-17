@@ -18,7 +18,7 @@ function parseCoach(raw: string): CoachFeedback | null {
 }
 
 function isSkippedTurn(turn: MockTurn): boolean {
-  return !turn.user_text.trim() && turn.score === 0 && !turn.audio_path;
+  return !turn.user_text.trim() && !turn.audio_path;
 }
 
 const scoreLabel = (score: number): string => {

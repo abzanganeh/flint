@@ -744,12 +744,17 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
         )}
 
         {phase === "answering" && (
-          <button
-            onClick={() => void handleStopAnswering()}
-            style={{ ...primaryBtn, background: "#ef4444" }}
-          >
-            Done Answering
-          </button>
+          <>
+            <button onClick={() => void handleSkip()} style={ghostBtn}>
+              Skip
+            </button>
+            <button
+              onClick={() => void handleStopAnswering()}
+              style={{ ...primaryBtn, background: "#ef4444" }}
+            >
+              Done Answering
+            </button>
+          </>
         )}
 
         {phase === "reviewing" && pace === "continuous" && (
