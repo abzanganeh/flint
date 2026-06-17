@@ -87,15 +87,19 @@ fn fire_trigger<R: Runtime>(app: &AppHandle<R>) {
 fn toggle_overlay<R: Runtime>(app: &AppHandle<R>) {
     use crate::events::{emit_overlay_visibility, OverlayVisibilityPayload};
 
-    if let Some(win) = app.get_webview_window("main") {
-        let visible = win.is_visible().unwrap_or(true);
-        if visible {
-            let _ = win.hide();
-            emit_overlay_visibility(app, OverlayVisibilityPayload { hidden: true });
-        } else {
-            let _ = win.show();
-            let _ = win.set_focus();
-            emit_overlay_visibility(app, OverlayVisibilityPayload { hidden: false });
-        }
-    }
+    let Some(state) = app.try_state::<crate::state::AppState>() else {
+        return;
+    };
+    let mut hidden = state
+        .overlay_panic_hidden
+        .lock()
+        .expect("overlay_panic_hidden lock poisoned");
+    *hidden = !*hidden;
+    emit_overlay_visibility(
+        app,
+        OverlayVisibilityPayload {
+            hidden: *hidden,
+        },
+    );
+    info!(hidden = *hidden, event = "overlay_panic_toggled");
 }

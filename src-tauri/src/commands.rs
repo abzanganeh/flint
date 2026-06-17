@@ -2431,29 +2431,28 @@ pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> 
 }
 
 /// Toggle overlay visibility (panic hotkey path).
+///
+/// Hides panel content via `overlay_visibility` only — does not close the window,
+/// so the restore chord still works on Wayland.
 #[tauri::command]
-pub async fn panic_hide_overlay(app: AppHandle) -> Result<bool, String> {
+pub async fn panic_hide_overlay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
     use crate::events::{emit_overlay_visibility, OverlayVisibilityPayload};
 
-    if let Some(window) = app.get_webview_window("main") {
-        let visible = window.is_visible().unwrap_or(true);
-        if visible {
-            window
-                .hide()
-                .map_err(|e| format!("Failed to hide overlay: {e}"))?;
-            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: true });
-            Ok(true)
-        } else {
-            window
-                .show()
-                .map_err(|e| format!("Failed to show overlay: {e}"))?;
-            let _ = window.set_focus();
-            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: false });
-            Ok(false)
-        }
-    } else {
-        Ok(false)
-    }
+    let mut hidden = state
+        .overlay_panic_hidden
+        .lock()
+        .map_err(|e| format!("overlay_panic_hidden lock poisoned: {e}"))?;
+    *hidden = !*hidden;
+    emit_overlay_visibility(
+        &app,
+        OverlayVisibilityPayload {
+            hidden: *hidden,
+        },
+    );
+    Ok(*hidden)
 }
 
 /// Switch the active LLM provider.

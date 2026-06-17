@@ -156,6 +156,10 @@ pub struct AppState {
     /// and clears it. The warm path (second click, Flint already running) still
     /// uses the `smart_resume_import_token` event emitted by `single_instance`.
     pub pending_import_token: Mutex<Option<String>>,
+
+    /// Panic-hide toggles `overlay_visibility` in React only — the main window
+    /// stays alive so Wayland can still receive the restore chord.
+    pub overlay_panic_hidden: std::sync::Mutex<bool>,
 }
 
 impl AppState {
@@ -248,6 +252,7 @@ impl AppState {
             feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
             embedder_cache_dir,
             pending_import_token,
+            overlay_panic_hidden: std::sync::Mutex::new(false),
         })
     }
 
