@@ -56,8 +56,10 @@ Run after rebuild (`npm run tauri dev`). One block at a time; report pass/fail b
 
 ### Block A — 8.10 MockSummary
 
-- [ ] **A1** Skipped turns show "Skipped" badge on summary cards + skipped count in header
-- [ ] **A2** Play button plays WAV (no Error state)
+- [x] **A1** Skipped turns show "Skipped" badge on summary cards + skipped count in header
+- [x] **A2** Play button plays WAV (no Error state)
+
+**A1+A2 pass (2026-06-17):** Recording via data URL (`ae1dd6f`). Stale turns from prior runs on summary fixed — clear mock_turns on `start_mock`.
 
 **A1 fail (2026-06-16):** Skip on Q1 scored without answer; Q2 recording failed — turn_n drift (fixed `f233de5`).
 

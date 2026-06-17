@@ -138,7 +138,7 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
             </div>
           )}
 
-          {coach && (
+          {coach && !skipped && (
             <>
               {coach.tone?.suggestion && (
                 <div className="ms-section">
@@ -171,7 +171,7 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
             </>
           )}
 
-          {turn.suggested && !coach?.corrected_answer && (
+          {turn.suggested && !skipped && !coach?.corrected_answer && (
             <div className="ms-section">
               <div className="ms-section-label">SUGGESTED ANSWER</div>
               <p className="ms-suggested">{turn.suggested}</p>

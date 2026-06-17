@@ -3190,6 +3190,13 @@ pub async fn start_mock(
         machine.session_id().ok_or("no active session")?
     };
 
+    // Each mock run starts fresh — drop turns and WAV files from prior runs on
+    // this session so End & review only reflects the current interview.
+    state
+        .persistence
+        .delete_mock_turns(session_id)
+        .map_err(|e| e.to_string())?;
+
     let digest = state
         .session_digest
         .read()
