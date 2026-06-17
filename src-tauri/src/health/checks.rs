@@ -496,18 +496,34 @@ async fn check_supabase_connection(supabase_url: Option<&str>) -> HealthCheckRes
 }
 
 fn check_global_hotkey() -> HealthCheckResult {
+    #[cfg(target_os = "linux")]
+    if is_wayland_session() {
+        return warn(
+            HealthCheck::GlobalHotkey,
+            "Wayland session — Ctrl+Alt+Space works while Flint is focused; true global capture requires a desktop shortcut or X11.",
+            "On GNOME/KDE: Settings → Keyboard → Custom Shortcuts to run a Flint trigger command, or use the in-app Ask button. While testing, click the Flint window first, then press Ctrl+Alt+Space.",
+        );
+    }
     warn(
         HealthCheck::GlobalHotkey,
         "Global hotkey registration is verified at session start.",
-        "Default: Ctrl+Alt+Space to trigger a response. Hotkeys are registered when you enter a live session — retry if registration fails.",
+        "Default: Ctrl+Alt+Space to trigger a response. Hotkeys are registered when the app starts — retry if registration fails.",
     )
 }
 
 fn check_panic_hotkey() -> HealthCheckResult {
+    #[cfg(target_os = "linux")]
+    if is_wayland_session() {
+        return warn(
+            HealthCheck::PanicHotkey,
+            "Wayland session — Ctrl+Alt+Shift+Space hides the overlay while Flint is focused.",
+            "Bind a desktop shortcut if you need panic hide when another app has focus.",
+        );
+    }
     warn(
         HealthCheck::PanicHotkey,
         "Panic hotkey registration is verified at session start.",
-        "Default: Ctrl+Alt+Shift+H to hide the overlay. The hotkey is registered when you enter a live session.",
+        "Default: Ctrl+Alt+Shift+Space to hide the overlay.",
     )
 }
 
