@@ -82,7 +82,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
 
   useTokenUsage();
   useCostCap();
-  useHotkeys(sessionId, lastManualQuestion || question, asking);
+  useHotkeys(sessionId, lastManualQuestion || question, !asking);
   useRagChunks(sessionId);
   useOrchestratorStreams();
 
@@ -192,6 +192,15 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
   );
 
   const handleComplete = async () => {
+    if (!hasResponse) {
+      const proceed = window.confirm(
+        "You have not asked a practice question this session.\n\n" +
+          "Rehearsal and Mock Interview help Flint ground answers in your prep. " +
+          "Going live without practicing may produce incomplete or less accurate responses.\n\n" +
+          "Go live anyway?",
+      );
+      if (!proceed) return;
+    }
     try {
       await completeRehearsal(sessionId);
     } catch (e) {
@@ -543,16 +552,23 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
             gap: 12,
           }}
         >
-          <span style={{ color: "#52525b", fontSize: "11px" }}>
+          <span
+            style={{
+              color: hasResponse ? "#52525b" : "#f59e0b",
+              fontSize: "11px",
+              lineHeight: 1.5,
+              maxWidth: 420,
+            }}
+          >
             {hasResponse
-              ? "Review the panels above, then go live when ready."
-              : "Optional: ask a practice question, or go live without rehearsing."}
+              ? "Review the panels above. Mock Interview trains delivery — go live when you feel ready."
+              : "Ask at least one practice question and try Mock Interview before going live — better prep means sharper answers in the real session."}
           </span>
           {onStartMock && (
             <button
               data-testid="start-mock-button"
               onClick={onStartMock}
-              title="Practice with AI interviewer"
+              title="Strongly recommended — practice with AI interviewer before going live"
               style={{
                 padding: "8px 20px",
                 backgroundColor: "#7c3aed",
@@ -571,12 +587,16 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
           <button
             data-testid="rehearsal-complete-button"
             onClick={() => void handleComplete()}
-            title="Continue to live session"
+            title={
+              hasResponse
+                ? "Continue to live session"
+                : "Not recommended — practice first for better live answers"
+            }
             style={{
               padding: "8px 20px",
-              backgroundColor: "#22c55e",
-              color: "#fff",
-              border: "none",
+              backgroundColor: hasResponse ? "#22c55e" : "transparent",
+              color: hasResponse ? "#fff" : "#94a3b8",
+              border: hasResponse ? "none" : "1px solid #374151",
               borderRadius: 6,
               fontSize: "13px",
               fontWeight: 600,
@@ -584,7 +604,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
               flexShrink: 0,
             }}
           >
-            {hasResponse ? "Complete Rehearsal →" : "Skip rehearsal → Go live"}
+            {hasResponse ? "Complete Rehearsal →" : "Go live without rehearsing"}
           </button>
         </div>
       </div>
