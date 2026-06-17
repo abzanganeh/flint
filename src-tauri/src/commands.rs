@@ -3385,6 +3385,25 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
                 )
                 .map_err(|e| e.to_string())?;
         }
+        let (coach_json, score) = coach_failure_payload(
+            "No speech detected — speak for a few seconds before finishing your answer.",
+        );
+        emit_mock_coach_feedback(
+            &app,
+            MockCoachFeedbackPayload {
+                turn_n,
+                coach_json: coach_json.clone(),
+                score,
+            },
+        );
+        if let Err(e) = state.persistence.update_mock_turn_coach_by_turn_n(
+            session_id,
+            turn_n,
+            &coach_json,
+            score,
+        ) {
+            warn!(error = %e, turn_n, "failed to persist empty-transcript coach feedback");
+        }
         signal_mock_turn_complete(&state, transcript, audio_path).await;
         return Ok(());
     }

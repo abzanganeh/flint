@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 
 import OverlayLayout from "../components/OverlayLayout";
 import PanicRestoreShell from "../components/PanicRestoreShell";
@@ -40,6 +40,10 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   useCostCap();
   useOrchestratorStreams();
   useHotkeys(sessionId, lastManualQuestion, !starting);
+
+  useLayoutEffect(() => {
+    useUIStore.getState().resetOrchestratorPanels();
+  }, [sessionId]);
 
   useEffect(() => {
     let active = true;
