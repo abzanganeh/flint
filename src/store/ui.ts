@@ -228,7 +228,7 @@ export const useUIStore = create<UIStore>((set) => ({
         confidenceLevel: null,
         depthPrePrepared: false,
         clarifyingQuestions: [],
-        answerNowMode: false,
+        answerNowMode: s.answerNowMode,
       };
     }),
 
