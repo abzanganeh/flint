@@ -93,10 +93,24 @@ impl PreWarmCache {
     }
 
     /// Insert an entry into the cache. Returns the assigned key.
-    pub fn insert(&mut self, entry: PreWarmEntry) -> Uuid {
+    ///
+    /// Skips insertion when both responses fail the digest-JSON poison check.
+    pub fn insert(&mut self, entry: PreWarmEntry) -> Option<Uuid> {
+        let dir_ok = is_plausible_cached_response(&entry.directional_response);
+        let dep_ok = is_plausible_cached_response(&entry.depth_response);
+        if !dir_ok && !dep_ok {
+            return None;
+        }
+        let mut entry = entry;
+        if !dir_ok {
+            entry.directional_response.clear();
+        }
+        if !dep_ok {
+            entry.depth_response.clear();
+        }
         let key = Uuid::new_v4();
         self.entries.insert(key, entry);
-        key
+        Some(key)
     }
 
     /// Drop every cached entry. Called from `gdpr::delete_account` after the
@@ -117,6 +131,10 @@ impl PreWarmCache {
         let (best_entry, best_sim) = self
             .entries
             .values()
+            .filter(|entry| {
+                is_plausible_cached_response(&entry.directional_response)
+                    || is_plausible_cached_response(&entry.depth_response)
+            })
             .filter_map(|entry| {
                 if entry.embedding.len() != embedding.len() {
                     return None;
@@ -147,6 +165,25 @@ impl PreWarmCache {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Response quality guards
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Reject cache entries that look like raw digest JSON rather than an answer.
+pub fn is_plausible_cached_response(text: &str) -> bool {
+    let t = text.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('{')
+        && (t.contains("\"likely_questions\"")
+            || (t.contains("\"role\"") && t.contains("\"company\"")))
+    {
+        return false;
+    }
+    true
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -212,6 +249,11 @@ pub async fn run_prewarm(
     embedder: Arc<Embedder>,
     cache: Arc<Mutex<PreWarmCache>>,
 ) -> Result<()> {
+    if !crate::digest::digest_is_prewarm_eligible(digest) {
+        warn!("digest not eligible for pre-warm — skipping");
+        return Ok(());
+    }
+
     let questions: Vec<String> = digest.likely_questions.iter().take(5).cloned().collect();
 
     if questions.is_empty() {
@@ -320,6 +362,20 @@ pub async fn run_prewarm(
                 return;
             }
 
+            let directional_response = if is_plausible_cached_response(&directional_response) {
+                directional_response
+            } else {
+                String::new()
+            };
+            let depth_response = if is_plausible_cached_response(&depth_response) {
+                depth_response
+            } else {
+                String::new()
+            };
+            if directional_response.is_empty() && depth_response.is_empty() {
+                return;
+            }
+
             let entry = PreWarmEntry {
                 question: question_str.clone(),
                 directional_response,
@@ -329,7 +385,9 @@ pub async fn run_prewarm(
             };
 
             let mut c = cache_handle.lock().await;
-            c.insert(entry);
+            if c.insert(entry).is_none() {
+                warn!(question_idx, "pre-warm entry rejected (digest-shaped response)");
+            }
             #[cfg(debug_assertions)]
             debug!(
                 question_idx,

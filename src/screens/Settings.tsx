@@ -5,6 +5,7 @@ import {
   exportUserData,
   getCostStatus,
   liftCostSuspension,
+  logout,
   resetCostTracker,
   setCostCap,
   type CostStatusDto,
@@ -16,6 +17,7 @@ type Tab = "api-keys" | "usage-cap" | "privacy";
 
 interface Props {
   onBack?: () => void;
+  onLoggedOut?: () => void;
   initialTab?: Tab;
 }
 
@@ -165,13 +167,27 @@ function CostCapTab() {
 
 // ── Privacy Tab ───────────────────────────────────────────────────────────────
 
-function PrivacyTab() {
+function PrivacyTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
   const [report, setReport] = useState<DeleteAccountReport | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [exportDone, setExportDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const confirmRef = useRef<HTMLInputElement>(null);
+
+  const handleLogout = async () => {
+    setLoggingOut(true);
+    setError(null);
+    try {
+      await logout();
+      onLoggedOut?.();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoggingOut(false);
+    }
+  };
 
   const handleExport = async () => {
     setExporting(true);
@@ -250,6 +266,21 @@ function PrivacyTab() {
       )}
 
       <section className="settings-tab__section">
+        <h4 className="settings-tab__subheading">Sign out</h4>
+        <p className="settings-tab__description">
+          Sign out of your Flint account on this device. Local sessions and API keys
+          in your OS keychain are kept until you delete your account.
+        </p>
+        <button
+          className="settings-tab__btn"
+          disabled={loggingOut}
+          onClick={() => void handleLogout()}
+        >
+          {loggingOut ? "Signing out…" : "Sign out"}
+        </button>
+      </section>
+
+      <section className="settings-tab__section">
         <h4 className="settings-tab__subheading">Export</h4>
         <p className="settings-tab__description">
           Download all your sessions, transcripts, and responses as JSON.
@@ -301,7 +332,7 @@ const TAB_LABELS: Record<Tab, string> = {
   privacy: "Privacy",
 };
 
-export default function Settings({ onBack, initialTab = "api-keys" }: Props) {
+export default function Settings({ onBack, onLoggedOut, initialTab = "api-keys" }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   return (
@@ -332,7 +363,7 @@ export default function Settings({ onBack, initialTab = "api-keys" }: Props) {
       <div className="settings-screen__panel" role="tabpanel">
         {activeTab === "api-keys" && <ProviderSettings />}
         {activeTab === "usage-cap" && <CostCapTab />}
-        {activeTab === "privacy" && <PrivacyTab />}
+        {activeTab === "privacy" && <PrivacyTab onLoggedOut={onLoggedOut} />}
       </div>
     </div>
   );

@@ -17,6 +17,10 @@ function parseCoach(raw: string): CoachFeedback | null {
   }
 }
 
+function isSkippedTurn(turn: MockTurn): boolean {
+  return !turn.user_text.trim() && turn.score === 0 && !turn.audio_path;
+}
+
 const scoreLabel = (score: number): string => {
   if (score >= 80) return "Strong";
   if (score >= 60) return "Good";
@@ -32,7 +36,9 @@ const scoreClass = (score: number): string => {
 
 function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
   const [expanded, setExpanded] = useState(index === 0);
+  const [audioError, setAudioError] = useState(false);
   const coach = parseCoach(turn.coach_json);
+  const skipped = isSkippedTurn(turn);
   const audioSrc = turn.audio_path ? convertFileSrc(turn.audio_path) : null;
 
   return (
@@ -44,7 +50,8 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
       >
         <span className="ms-turn-num">Q{turn.turn_n}</span>
         <span className="ms-turn-question">{turn.question}</span>
-        {turn.score > 0 && (
+        {skipped && <span className="ms-skipped-badge">Skipped</span>}
+        {!skipped && turn.score > 0 && (
           <span className={`ms-score ${scoreClass(turn.score)}`}>
             {turn.score} · {scoreLabel(turn.score)}
           </span>
@@ -54,6 +61,10 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
 
       {expanded && (
         <div className="ms-turn-body">
+          {skipped && (
+            <p className="ms-skipped-note">You skipped this question — it is excluded from your average score.</p>
+          )}
+
           {turn.user_text && (
             <div className="ms-section">
               <div className="ms-section-label">YOUR ANSWER</div>
@@ -64,13 +75,18 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
           {audioSrc && (
             <div className="ms-section">
               <div className="ms-section-label">RECORDING</div>
-              <audio
-                className="ms-audio"
-                controls
-                src={audioSrc}
-                preload="none"
-                aria-label={`Recording for question ${turn.turn_n}`}
-              />
+              {audioError ? (
+                <p className="ms-audio-error">Could not play recording. The file may have been moved or removed.</p>
+              ) : (
+                <audio
+                  className="ms-audio"
+                  controls
+                  src={audioSrc}
+                  preload="metadata"
+                  aria-label={`Recording for question ${turn.turn_n}`}
+                  onError={() => setAudioError(true)}
+                />
+              )}
             </div>
           )}
 
@@ -140,6 +156,7 @@ export function MockSummary({ onContinue }: Props) {
       });
   }, []);
 
+  const skippedTurns = turns.filter(isSkippedTurn);
   const scoredTurns = turns.filter((t) => t.score > 0);
   const avgScore =
     scoredTurns.length > 0
@@ -174,6 +191,12 @@ export function MockSummary({ onContinue }: Props) {
             <span className="ms-stat-value">{turns.length}</span>
             <span className="ms-stat-label">questions</span>
           </span>
+          {skippedTurns.length > 0 && (
+            <span className="ms-stat">
+              <span className="ms-stat-value">{skippedTurns.length}</span>
+              <span className="ms-stat-label">skipped</span>
+            </span>
+          )}
           {avgScore > 0 && (
             <span className={`ms-stat ms-stat--score ${scoreClass(avgScore)}`}>
               <span className="ms-stat-value">{avgScore}</span>
@@ -185,7 +208,7 @@ export function MockSummary({ onContinue }: Props) {
 
       <section className="ms-turns">
         {turns.map((turn, i) => (
-          <TurnCard key={turn.id} turn={turn} index={i} />
+          <TurnCard key={`${turn.turn_n}-${turn.id}`} turn={turn} index={i} />
         ))}
       </section>
 

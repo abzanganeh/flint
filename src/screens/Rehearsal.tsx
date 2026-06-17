@@ -6,6 +6,7 @@ import FirstRunRehearsalModal, {
 import AddContextPanel from "../components/AddContextPanel";
 import StoryEditor from "../components/StoryEditor";
 import OverlayLayout from "../components/OverlayLayout";
+import PanicRestoreShell from "../components/PanicRestoreShell";
 import PrepChecklist from "../components/PrepChecklist";
 import QuestionBank from "../components/QuestionBank";
 import ResearchChat from "../components/ResearchChat";
@@ -75,6 +76,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
   } = useUIStore();
 
   const [lastAskedQuestion, setLastAskedQuestion] = useState("");
+  const [bankRefreshKey, setBankRefreshKey] = useState(0);
   const [weakContext, setWeakContext] = useState(false);
   const [costBlocked, setCostBlocked] = useState<string | null>(null);
 
@@ -163,6 +165,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
         setError(String(e));
       } finally {
         setAsking(false);
+        setBankRefreshKey((k) => k + 1);
       }
     },
     [
@@ -218,7 +221,8 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
   };
 
   return (
-    <>
+    <PanicRestoreShell>
+      <>
       {showFirstRunModal && (
         <FirstRunRehearsalModal
           fields={contextFields}
@@ -514,6 +518,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
                       sessionId={sessionId}
                       onAskQuestion={handleBankAsk}
                       asking={asking}
+                      refreshKey={bankRefreshKey}
                     />
                   )}
                   {sideTab === "research" && (
@@ -608,7 +613,8 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
           </button>
         </div>
       </div>
-    </>
+      </>
+    </PanicRestoreShell>
   );
 };
 

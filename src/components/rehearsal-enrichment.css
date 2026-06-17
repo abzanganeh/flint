@@ -34,6 +34,39 @@
   font-size: 10px;
   color: #a78bfa;
 }
+.question-bank__shuffle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #9ca3af;
+  cursor: pointer;
+}
+.question-bank__shuffle input {
+  margin: 0;
+}
+.question-bank__item--completed {
+  opacity: 0.75;
+}
+.question-bank__score {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #86efac;
+  background: #14532d;
+  border-radius: 8px;
+  padding: 1px 6px;
+}
+.question-bank__section-label {
+  margin-top: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+.question-bank__list--completed {
+  margin-top: 4px;
+}
 .question-bank__error {
   color: #ef4444;
   font-size: 11px;

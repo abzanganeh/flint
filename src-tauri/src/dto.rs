@@ -381,3 +381,14 @@ mod tests {
         assert!(!rendered.contains("Culture:"));
     }
 }
+
+/// One question in the Rehearsal bank with practice history for this session.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionBankEntryDto {
+    pub question: String,
+    pub satisfied: bool,
+    pub confidence_score: f32,
+    pub coach_score: u8,
+    pub last_source: Option<String>,
+}

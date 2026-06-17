@@ -505,6 +505,10 @@ function App() {
         <Settings
           initialTab={settingsInitialTab}
           onBack={() => setScreen(settingsReturnScreen)}
+          onLoggedOut={() => {
+            setOnboardingStep("auth");
+            setScreen("onboarding");
+          }}
         />
       </Shell>
     );

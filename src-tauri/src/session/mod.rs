@@ -6,5 +6,7 @@
 pub mod draft;
 pub mod memory;
 pub mod persistence;
+pub mod question_attempts;
 pub mod recovery;
+pub mod shuffle;
 pub mod state;

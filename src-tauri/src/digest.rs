@@ -184,6 +184,23 @@ pub async fn extract_digest(context_text: &str, llm: &dyn LLMProvider) -> Result
     Ok(digest)
 }
 
+/// True when the digest has enough structured context to pre-warm safely.
+///
+/// Placeholder `Unknown` role/company or empty `key_skills` means the LLM
+/// did not extract real session context — caching responses against that digest
+/// produces poisoned cache hits (raw digest JSON served as answers).
+pub fn digest_is_prewarm_eligible(digest: &Digest) -> bool {
+    let role = digest.role.trim();
+    let company = digest.company.trim();
+    if role.is_empty() || role.eq_ignore_ascii_case("unknown") {
+        return false;
+    }
+    if company.is_empty() || company.eq_ignore_ascii_case("unknown") {
+        return false;
+    }
+    !digest.key_skills.is_empty()
+}
+
 /// Remove ` ```json … ``` ` or ` ``` … ``` ` wrapping that some LLMs add
 /// despite being instructed not to.
 fn strip_markdown_fences(s: &str) -> &str {
@@ -425,5 +442,47 @@ mod tests {
             content.contains("{pasted_context}"),
             "prompt must contain the {{pasted_context}} placeholder"
         );
+    }
+
+    #[test]
+    fn test_digest_is_prewarm_eligible_rejects_unknown_placeholders() {
+        let digest = Digest {
+            role: "Unknown".into(),
+            company: "Acme".into(),
+            domain: "swe".into(),
+            key_skills: vec!["Rust".into()],
+            seniority: "mid".into(),
+            likely_questions: vec!["Q1".into()],
+            topics_to_avoid: vec![],
+        };
+        assert!(!digest_is_prewarm_eligible(&digest));
+    }
+
+    #[test]
+    fn test_digest_is_prewarm_eligible_requires_key_skills() {
+        let digest = Digest {
+            role: "Engineer".into(),
+            company: "Acme".into(),
+            domain: "swe".into(),
+            key_skills: vec![],
+            seniority: "mid".into(),
+            likely_questions: vec!["Q1".into()],
+            topics_to_avoid: vec![],
+        };
+        assert!(!digest_is_prewarm_eligible(&digest));
+    }
+
+    #[test]
+    fn test_digest_is_prewarm_eligible_accepts_filled_digest() {
+        let digest = Digest {
+            role: "Engineer".into(),
+            company: "Acme".into(),
+            domain: "swe".into(),
+            key_skills: vec!["Rust".into()],
+            seniority: "mid".into(),
+            likely_questions: vec!["Q1".into()],
+            topics_to_avoid: vec![],
+        };
+        assert!(digest_is_prewarm_eligible(&digest));
     }
 }

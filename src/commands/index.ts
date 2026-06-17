@@ -565,8 +565,19 @@ export const clearProviderKey = (provider: ApiKeyProvider): Promise<void> =>
 
 // ── Phase 5.5.3 — Question bank ──────────────────────────────────────────────
 
-export const getQuestionBank = (sessionId: string): Promise<string[]> =>
-  invoke<string[]>("get_question_bank", { sessionId });
+export interface QuestionBankEntry {
+  question: string;
+  satisfied: boolean;
+  confidenceScore: number;
+  coachScore: number;
+  lastSource: string | null;
+}
+
+export const getQuestionBank = (
+  sessionId: string,
+  shuffle = true,
+): Promise<QuestionBankEntry[]> =>
+  invoke<QuestionBankEntry[]>("get_question_bank", { sessionId, shuffle });
 
 export const addToQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
   invoke<string[]>("add_to_question_bank", { sessionId, question });
@@ -634,7 +645,8 @@ export type { MockStudyMode } from "../events";
 export const startMock = (
   guided = false,
   mode: MockStudyMode = "practice",
-): Promise<void> => invoke<void>("start_mock", { guided, mode });
+  shuffle = false,
+): Promise<void> => invoke<void>("start_mock", { guided, mode, shuffle });
 
 export const askMockQuestion = (): Promise<void> =>
   invoke<void>("ask_mock_question");

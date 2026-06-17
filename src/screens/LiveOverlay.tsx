@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import OverlayLayout from "../components/OverlayLayout";
+import PanicRestoreShell from "../components/PanicRestoreShell";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
 import {
@@ -140,6 +141,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   }
 
   return (
+    <PanicRestoreShell>
     <div
       data-testid="live-overlay"
       style={{
@@ -218,6 +220,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
 
       <TokenBudgetIndicator />
     </div>
+    </PanicRestoreShell>
   );
 };
 

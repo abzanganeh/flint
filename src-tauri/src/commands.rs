@@ -954,10 +954,18 @@ pub async fn confirm_digest(
     let embedder = state.require_embedder()?;
     let cache = Arc::clone(&state.prewarm_cache);
 
-    if let Err(e) = run_prewarm(&digest_rust, llm, embedder, cache).await {
-        // Pre-warm failures are non-fatal — the session can still proceed
-        // without cached responses.
-        warn!(session_id = %sid, error = %e, "pre-warm failed; continuing without cache");
+    if crate::digest::digest_is_prewarm_eligible(&digest_rust) {
+        if let Err(e) = run_prewarm(&digest_rust, llm, embedder, cache).await {
+            // Pre-warm failures are non-fatal — the session can still proceed
+            // without cached responses.
+            warn!(session_id = %sid, error = %e, "pre-warm failed; continuing without cache");
+        }
+    } else {
+        cache.lock().await.clear();
+        warn!(
+            session_id = %sid,
+            "digest has placeholder role/company or empty skills — pre-warm skipped"
+        );
     }
 
     // Transition → REHEARSING.
@@ -1670,39 +1678,84 @@ fn extract_qa_pairs_from_text(text: &str) -> Vec<String> {
 pub async fn get_question_bank(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<Vec<String>, String> {
-    let sid = validate_session_id(&state, &session_id).await?;
+    shuffle: Option<bool>,
+) -> Result<Vec<crate::dto::QuestionBankEntryDto>, String> {
+    use crate::session::question_attempts::normalize_question_key;
+    use std::collections::HashMap;
 
-    let persisted = state
+    let sid = validate_session_id(&state, &session_id).await?;
+    let shuffle = shuffle.unwrap_or(false);
+
+    let mut bank = state
         .persistence
         .load_question_bank(sid)
         .map_err(|e| e.to_string())?;
 
-    if !persisted.is_empty() {
-        return Ok(persisted);
-    }
-
-    // First call: seed from the persisted digest for this specific session.
-    // We intentionally query SQLite rather than the in-memory `session_digest`
-    // to guarantee the seed belongs to `sid` — the in-memory value is a shared
-    // mutable slot that may still hold a previous session's data at the moment
-    // `get_question_bank` is first called.
-    let seed: Vec<String> = state
-        .persistence
-        .load_session_digest(sid)
-        .ok()
-        .flatten()
-        .map(|d| d.likely_questions)
-        .unwrap_or_default();
-
-    if !seed.is_empty() {
-        state
+    if bank.is_empty() {
+        bank = state
             .persistence
-            .store_question_bank(sid, &seed)
-            .map_err(|e| e.to_string())?;
+            .load_session_digest(sid)
+            .ok()
+            .flatten()
+            .map(|d| d.likely_questions)
+            .unwrap_or_default();
+
+        if !bank.is_empty() {
+            state
+                .persistence
+                .store_question_bank(sid, &bank)
+                .map_err(|e| e.to_string())?;
+        }
     }
 
-    Ok(seed)
+    let attempts = state
+        .persistence
+        .load_question_attempts(sid)
+        .map_err(|e| e.to_string())?;
+
+    let entries: Vec<crate::dto::QuestionBankEntryDto> = bank
+        .iter()
+        .map(|q| {
+            let key = normalize_question_key(q);
+            if let Some(a) = attempts.get(&key) {
+                crate::dto::QuestionBankEntryDto {
+                    question: q.clone(),
+                    satisfied: a.satisfied,
+                    confidence_score: a.confidence_score,
+                    coach_score: a.coach_score,
+                    last_source: Some(a.last_source.clone()),
+                }
+            } else {
+                crate::dto::QuestionBankEntryDto {
+                    question: q.clone(),
+                    satisfied: false,
+                    confidence_score: 0.0,
+                    coach_score: 0,
+                    last_source: None,
+                }
+            }
+        })
+        .collect();
+
+    let (mut pending, completed): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(|e| !e.satisfied);
+
+    if shuffle && pending.len() > 1 {
+        let mut order: Vec<String> = pending.iter().map(|e| e.question.clone()).collect();
+        crate::session::shuffle::shuffle_strings(
+            &mut order,
+            crate::session::shuffle::session_shuffle_seed(sid),
+        );
+        let rank: HashMap<String, usize> = order
+            .into_iter()
+            .enumerate()
+            .map(|(i, q)| (q, i))
+            .collect();
+        pending.sort_by_key(|e| rank.get(&e.question).copied().unwrap_or(0));
+    }
+
+    pending.extend(completed);
+    Ok(pending)
 }
 
 /// Add a question to the session question bank (dedup by lowercase trim).
@@ -3004,8 +3057,10 @@ pub async fn start_mock(
     state: State<'_, AppState>,
     guided: Option<bool>,
     mode: Option<String>,
+    shuffle: Option<bool>,
 ) -> Result<(), String> {
     let guided = guided.unwrap_or(false);
+    let shuffle = shuffle.unwrap_or(false);
     let mock_mode = MockMode::parse(mode.as_deref().unwrap_or("practice"));
     let pace = if guided {
         MockPace::Guided
@@ -3093,6 +3148,7 @@ pub async fn start_mock(
         Arc::clone(&suggested_buffer),
         pace,
         mock_mode,
+        shuffle,
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -3117,6 +3173,7 @@ pub async fn start_mock(
     info!(
         session_id = %session_id,
         guided,
+        shuffle,
         mode = mock_mode.as_str(),
         "mock interview started"
     );
@@ -3229,7 +3286,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         app.clone(),
         session_id,
         turn_n,
-        question,
+        question.clone(),
         transcript.clone(),
         suggested_answer.clone(),
         rag_chunks,
@@ -3266,15 +3323,26 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         );
     }
 
-    if let Some(turn_id) = persistence
-        .load_mock_turns(session_id)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|t| t.turn_n == turn_n)
-        .map(|t| t.id)
-    {
-        if let Err(e) = persistence.update_mock_turn_coach(turn_id, &coach_json, score) {
-            warn!(error = %e, "failed to persist mock turn coach feedback");
+    if let Err(e) = persistence.update_mock_turn_coach_by_turn_n(
+        session_id,
+        turn_n,
+        &coach_json,
+        score,
+    ) {
+        warn!(error = %e, "failed to persist mock turn coach feedback");
+    }
+
+    if !question.is_empty() {
+        let satisfied = crate::session::question_attempts::mock_attempt_satisfied(score, false);
+        if let Err(e) = persistence.upsert_question_attempt(
+            session_id,
+            &question,
+            "mock",
+            0.0,
+            score,
+            satisfied,
+        ) {
+            warn!(error = %e, "failed to record mock question attempt");
         }
     }
 
@@ -3296,6 +3364,34 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
 /// Skip the current mock turn without recording an answer.
 #[tauri::command]
 pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+    let (turn_n, persistence) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        (handles.current_turn, Arc::clone(&state.persistence))
+    };
+    if let Some(question) = persistence
+        .load_mock_turns(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.turn_n == turn_n)
+        .map(|t| t.question)
+    {
+        let _ = persistence.upsert_question_attempt(
+            session_id,
+            &question,
+            "mock",
+            0.0,
+            0,
+            false,
+        );
+    }
+
     if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
         let _ = handles
             .conductor

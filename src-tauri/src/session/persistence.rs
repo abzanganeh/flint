@@ -93,6 +93,17 @@ pub struct RecoveryData {
     pub responses: Vec<Response>,
 }
 
+/// Latest practice outcome for a question within a session.
+#[derive(Debug, Clone)]
+pub struct QuestionAttempt {
+    pub question: String,
+    pub question_key: String,
+    pub last_source: String,
+    pub confidence_score: f32,
+    pub coach_score: u8,
+    pub satisfied: bool,
+}
+
 /// One turn in a mock interview session.
 #[derive(Debug, Clone)]
 pub struct MockTurn {
@@ -162,7 +173,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 10;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -334,7 +345,136 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         info!("sqlite schema migrated to version 8");
     }
 
+    if current < 9 {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS question_attempts (
+                session_id        TEXT    NOT NULL,
+                question_key      TEXT    NOT NULL,
+                question          TEXT    NOT NULL,
+                last_source       TEXT    NOT NULL DEFAULT 'rehearsal',
+                confidence_score  REAL    NOT NULL DEFAULT 0,
+                coach_score       INTEGER NOT NULL DEFAULT 0,
+                satisfied         INTEGER NOT NULL DEFAULT 0,
+                updated_at        INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                PRIMARY KEY (session_id, question_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_qa_session ON question_attempts(session_id);
+
+            PRAGMA user_version = 9;
+            ",
+        )
+        .context("schema migration v9")?;
+        info!("sqlite schema migrated to version 9");
+    }
+
+    if current < 10 {
+        dedupe_mock_turns(conn)?;
+        conn.execute_batch(
+            "
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_mock_turns_session_turn
+                ON mock_turns(session_id, turn_n);
+
+            PRAGMA user_version = 10;
+            ",
+        )
+        .context("schema migration v10")?;
+        info!("sqlite schema migrated to version 10");
+    }
+
     Ok(())
+}
+
+/// Merge duplicate `mock_turns` rows (same session + turn_n) before adding the
+/// unique index. Keeps the richest field values from each duplicate.
+fn dedupe_mock_turns(conn: &rusqlite::Connection) -> Result<()> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, session_id, turn_n, question, user_text,
+                    audio_path, coach_json, suggested, score
+             FROM mock_turns ORDER BY turn_n ASC",
+        )
+        .context("prepare mock_turns dedupe")?;
+    let rows: Vec<MockTurn> = stmt
+        .query_map([], |r| {
+            Ok(MockTurn {
+                id: Uuid::parse_str(&r.get::<_, String>(0)?).unwrap_or_default(),
+                session_id: Uuid::parse_str(&r.get::<_, String>(1)?).unwrap_or_default(),
+                turn_n: r.get(2)?,
+                question: r.get(3)?,
+                user_text: r.get(4)?,
+                audio_path: r.get(5)?,
+                coach_json: r.get(6)?,
+                suggested: r.get(7)?,
+                score: r.get(8)?,
+            })
+        })
+        .context("query mock_turns for dedupe")?
+        .collect::<Result<Vec<_>, _>>()
+        .context("collect mock_turns for dedupe")?;
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let merged = merge_mock_turn_rows(rows);
+    conn.execute("DELETE FROM mock_turns", [])
+        .context("clear mock_turns for dedupe")?;
+    for turn in &merged {
+        conn.execute(
+            "INSERT INTO mock_turns
+             (id, session_id, turn_n, question, user_text, audio_path, coach_json, suggested, score)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                turn.id.to_string(),
+                turn.session_id.to_string(),
+                turn.turn_n,
+                turn.question,
+                turn.user_text,
+                turn.audio_path,
+                turn.coach_json,
+                turn.suggested,
+                turn.score,
+            ],
+        )
+        .context("reinsert deduped mock turn")?;
+    }
+    Ok(())
+}
+
+fn merge_mock_turn_fields(acc: &mut MockTurn, other: &MockTurn) {
+    if other.audio_path.len() > acc.audio_path.len() {
+        acc.audio_path.clone_from(&other.audio_path);
+        acc.id = other.id;
+    }
+    if other.coach_json.len() > acc.coach_json.len() {
+        acc.coach_json.clone_from(&other.coach_json);
+    }
+    if other.score > acc.score {
+        acc.score = other.score;
+    }
+    if other.user_text.len() > acc.user_text.len() {
+        acc.user_text.clone_from(&other.user_text);
+    }
+    if other.suggested.len() > acc.suggested.len() {
+        acc.suggested.clone_from(&other.suggested);
+    }
+    if acc.question.is_empty() && !other.question.is_empty() {
+        acc.question.clone_from(&other.question);
+    }
+}
+
+fn merge_mock_turn_rows(rows: Vec<MockTurn>) -> Vec<MockTurn> {
+    use std::collections::BTreeMap;
+    let mut by_key: BTreeMap<(Uuid, u32), MockTurn> = BTreeMap::new();
+    for row in rows {
+        let key = (row.session_id, row.turn_n);
+        by_key
+            .entry(key)
+            .and_modify(|m| merge_mock_turn_fields(m, &row))
+            .or_insert(row);
+    }
+    by_key.into_values().collect()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1100,13 +1240,143 @@ impl SessionPersistence {
         Ok(questions)
     }
 
+    /// Upsert the latest practice outcome for a question in this session.
+    pub fn upsert_question_attempt(
+        &self,
+        session_id: Uuid,
+        question: &str,
+        last_source: &str,
+        confidence_score: f32,
+        coach_score: u8,
+        satisfied: bool,
+    ) -> Result<()> {
+        use crate::session::question_attempts::normalize_question_key;
+
+        let key = normalize_question_key(question);
+        if key.is_empty() {
+            return Ok(());
+        }
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "INSERT INTO question_attempts
+                (session_id, question_key, question, last_source,
+                 confidence_score, coach_score, satisfied, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'))
+             ON CONFLICT(session_id, question_key) DO UPDATE SET
+                question = excluded.question,
+                last_source = excluded.last_source,
+                confidence_score = excluded.confidence_score,
+                coach_score = excluded.coach_score,
+                satisfied = excluded.satisfied,
+                updated_at = excluded.updated_at",
+            params![
+                session_id.to_string(),
+                key,
+                question.trim(),
+                last_source,
+                confidence_score as f64,
+                coach_score,
+                i32::from(satisfied),
+            ],
+        )
+        .context("upsert question attempt")?;
+        Ok(())
+    }
+
+    /// Whether the latest attempt for this question was satisfactory.
+    pub fn is_question_satisfied(&self, session_id: Uuid, question: &str) -> bool {
+        use crate::session::question_attempts::normalize_question_key;
+
+        let key = normalize_question_key(question);
+        if key.is_empty() {
+            return false;
+        }
+        let conn = match self.db.lock() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let sid = session_id.to_string();
+        conn.query_row(
+            "SELECT satisfied FROM question_attempts
+             WHERE session_id = ?1 AND question_key = ?2",
+            params![sid, key],
+            |r| r.get::<_, i32>(0),
+        )
+        .map(|v| v != 0)
+        .unwrap_or(false)
+    }
+
+    /// All recorded question attempts for a session keyed by `question_key`.
+    pub fn load_question_attempts(
+        &self,
+        session_id: Uuid,
+    ) -> Result<std::collections::HashMap<String, QuestionAttempt>> {
+        use std::collections::HashMap;
+
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let mut stmt = conn
+            .prepare(
+                "SELECT question_key, question, last_source, confidence_score,
+                        coach_score, satisfied
+                 FROM question_attempts WHERE session_id = ?1",
+            )
+            .context("prepare load question attempts")?;
+        let rows = stmt
+            .query_map(params![sid], |r| {
+                Ok(QuestionAttempt {
+                    question_key: r.get(0)?,
+                    question: r.get(1)?,
+                    last_source: r.get(2)?,
+                    confidence_score: r.get::<_, f64>(3)? as f32,
+                    coach_score: r.get(4)?,
+                    satisfied: r.get::<_, i32>(5)? != 0,
+                })
+            })
+            .context("query question attempts")?;
+        let mut map = HashMap::new();
+        for row in rows {
+            let attempt = row.context("read question attempt row")?;
+            map.insert(attempt.question_key.clone(), attempt);
+        }
+        Ok(map)
+    }
+
     // ── Mock Interview ────────────────────────────────────────────────────
 
-    /// Insert a new mock turn row (call after the AI question is chosen).
+    /// Start a mock turn: one stable row per `(session_id, turn_n)`.
+    ///
+    /// Replaces any prior row for the same turn number so coach and audio_path
+    /// never land on separate SQLite rows.
+    pub fn begin_mock_turn(
+        &self,
+        session_id: Uuid,
+        turn_n: u32,
+        question: &str,
+    ) -> Result<Uuid> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "DELETE FROM mock_turns WHERE session_id = ?1 AND turn_n = ?2",
+            params![sid, turn_n],
+        )
+        .context("clear prior mock turn row")?;
+        let id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO mock_turns
+             (id, session_id, turn_n, question, user_text, audio_path, coach_json, suggested, score)
+             VALUES (?1, ?2, ?3, ?4, '', '', '', '', 0)",
+            params![id.to_string(), sid, turn_n, question],
+        )
+        .context("insert mock turn row")?;
+        Ok(id)
+    }
+
+    /// Insert a mock turn row (tests and migration helpers only).
     pub fn write_mock_turn(&self, turn: &MockTurn) -> Result<()> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         conn.execute(
-            "INSERT OR REPLACE INTO mock_turns
+            "INSERT INTO mock_turns
              (id, session_id, turn_n, question, user_text, audio_path, coach_json, suggested, score)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
@@ -1123,6 +1393,21 @@ impl SessionPersistence {
         )
         .context("write mock turn")?;
         Ok(())
+    }
+
+    /// Resolve the row id for a session turn number.
+    pub fn mock_turn_id(&self, session_id: Uuid, turn_n: u32) -> Result<Option<Uuid>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let id_str: Option<String> = conn
+            .query_row(
+                "SELECT id FROM mock_turns WHERE session_id = ?1 AND turn_n = ?2",
+                params![sid, turn_n],
+                |r| r.get(0),
+            )
+            .optional()
+            .context("lookup mock turn id")?;
+        Ok(id_str.and_then(|s| Uuid::parse_str(&s).ok()))
     }
 
     /// Update the user-facing turn fields (transcript, audio path, suggested
@@ -1166,6 +1451,35 @@ impl SessionPersistence {
         Ok(())
     }
 
+    /// Update coach columns by session turn number (stable even if id drifted).
+    pub fn update_mock_turn_coach_by_turn_n(
+        &self,
+        session_id: Uuid,
+        turn_n: u32,
+        coach_json: &str,
+        score: u8,
+    ) -> Result<()> {
+        if let Some(id) = self.mock_turn_id(session_id, turn_n)? {
+            self.update_mock_turn_coach(id, coach_json, score)?;
+        }
+        Ok(())
+    }
+
+    /// Update user answer columns by session turn number.
+    pub fn update_mock_turn_user_answer_by_turn_n(
+        &self,
+        session_id: Uuid,
+        turn_n: u32,
+        user_text: &str,
+        audio_path: &str,
+        suggested: &str,
+    ) -> Result<()> {
+        if let Some(id) = self.mock_turn_id(session_id, turn_n)? {
+            self.update_mock_turn_user_answer(id, user_text, audio_path, suggested)?;
+        }
+        Ok(())
+    }
+
     /// Load all turns for a session in order, for replay and summary.
     pub fn load_mock_turns(&self, session_id: Uuid) -> Result<Vec<MockTurn>> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
@@ -1192,8 +1506,10 @@ impl SessionPersistence {
                 })
             })
             .context("query mock turns")?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("collect mock turns")
+        let rows = rows
+            .collect::<Result<Vec<_>, _>>()
+            .context("collect mock turns")?;
+        Ok(merge_mock_turn_rows(rows))
     }
 
     /// Delete all mock audio files for a session and remove the rows.
@@ -2555,6 +2871,57 @@ mod tests {
 
         db.delete_mock_turns(sid).unwrap();
         assert!(db.load_mock_turns(sid).unwrap().is_empty());
+    }
+
+    #[test]
+    fn begin_mock_turn_keeps_single_row_per_turn_n() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let id1 = db.begin_mock_turn(sid, 1, "Question 1").unwrap();
+        db.update_mock_turn_user_answer(id1, "answer", "/tmp/a.wav", "suggested")
+            .unwrap();
+        let id2 = db.begin_mock_turn(sid, 2, "Question 2").unwrap();
+        assert_ne!(id1, id2);
+        db.update_mock_turn_coach_by_turn_n(sid, 1, "{\"score\":70}", 70)
+            .unwrap();
+
+        let loaded = db.load_mock_turns(sid).unwrap();
+        assert_eq!(loaded.len(), 2);
+        let turn1 = loaded.iter().find(|t| t.turn_n == 1).unwrap();
+        assert_eq!(turn1.score, 70);
+        assert_eq!(turn1.audio_path, "/tmp/a.wav");
+    }
+
+    #[test]
+    fn merge_mock_turn_rows_combines_split_fields() {
+        let sid = Uuid::new_v4();
+        let coach_row = MockTurn {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            turn_n: 1,
+            question: "Q1".into(),
+            user_text: String::new(),
+            audio_path: String::new(),
+            coach_json: "{\"score\":80}".into(),
+            suggested: String::new(),
+            score: 80,
+        };
+        let audio_row = MockTurn {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            turn_n: 1,
+            question: "Q1".into(),
+            user_text: "my answer".into(),
+            audio_path: "/tmp/recording.wav".into(),
+            coach_json: String::new(),
+            suggested: String::new(),
+            score: 0,
+        };
+        let merged = merge_mock_turn_rows(vec![coach_row, audio_row]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].score, 80);
+        assert_eq!(merged[0].audio_path, "/tmp/recording.wav");
+        assert_eq!(merged[0].user_text, "my answer");
     }
 
     // ── WAL mode ─────────────────────────────────────────────────────────────

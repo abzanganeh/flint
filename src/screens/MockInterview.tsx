@@ -20,6 +20,7 @@ import {
 } from "../events";
 import CoachPanel from "../panels/CoachPanel";
 import SuggestedAnswerPanel from "../panels/SuggestedAnswerPanel";
+import { readShuffleQuestionsPreference, writeShuffleQuestionsPreference } from "../lib/shufflePreference";
 
 export interface MockInterviewProps {
   sessionId: string;
@@ -60,6 +61,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const [phase, setPhase] = useState<TurnPhase>("idle");
   const [pace, setPace] = useState<MockPace>("guided");
   const [studyMode, setStudyMode] = useState<MockStudyMode>("practice");
+  const [shuffleQuestions, setShuffleQuestions] = useState(readShuffleQuestionsPreference);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [turn, setTurn] = useState<TurnState>(emptyTurn());
@@ -185,7 +187,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     setError(null);
     setStarting(true);
     try {
-      await startMock(pace === "guided", studyMode);
+      await startMock(pace === "guided", studyMode, shuffleQuestions);
       setPhase(pace === "guided" ? "ready" : "waiting");
     } catch (e) {
       setError(String(e));
@@ -459,6 +461,41 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   <span style={{ fontSize: "12px", color: "#94a3b8" }}>
                     Full script streams while you answer. Coach scores delivery (pace, filler),
                     not content depth.
+                  </span>
+                </span>
+              </label>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
+                QUESTION ORDER
+              </span>
+              <label
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  border: shuffleQuestions ? "1px solid #7c3aed" : "1px solid #374151",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={shuffleQuestions}
+                  onChange={(e) => {
+                    setShuffleQuestions(e.target.checked);
+                    writeShuffleQuestionsPreference(e.target.checked);
+                  }}
+                  style={{ marginTop: 3 }}
+                  data-testid="mock-shuffle-questions"
+                />
+                <span>
+                  <strong style={{ color: "#e2e8f0" }}>Shuffle question order</strong>
+                  <br />
+                  <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    Randomize digest questions each session (stable for that session). Up to
+                    three AI follow-ups still run after scripted questions.
                   </span>
                 </span>
               </label>

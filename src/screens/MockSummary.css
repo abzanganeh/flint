@@ -69,6 +69,32 @@
   color: #ef4444;
 }
 
+.ms-skipped-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #94a3b8;
+  background: #1e2130;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+}
+
+.ms-skipped-note {
+  margin: 0 0 12px;
+  font-size: 12px;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.ms-audio-error {
+  margin: 0;
+  font-size: 12px;
+  color: #f87171;
+}
+
 /* ── turn cards ── */
 .ms-turns {
   display: flex;
