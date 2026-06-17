@@ -15,6 +15,7 @@ import {
   onMockCoachFeedback,
   onMockEnded,
   onMockQuestionStarted,
+  onMockQuestionSpoken,
   onMockSuggestedToken,
   onMockUserTranscribed,
 } from "../events";
@@ -31,7 +32,7 @@ export interface MockInterviewProps {
 type MockPace = "guided" | "continuous";
 
 /** idle = pick mode; ready = guided, waiting for Ask question; waiting = expecting question event */
-type TurnPhase = "idle" | "ready" | "waiting" | "question" | "answering" | "reviewing";
+type TurnPhase = "idle" | "ready" | "waiting" | "speaking" | "question" | "answering" | "reviewing";
 
 interface TurnState {
   turnN: number;
@@ -121,6 +122,10 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             suggestedStreaming: p.mode === "study",
           }));
           setRecording(false);
+          setPhase("speaking");
+        }),
+        onMockQuestionSpoken((p) => {
+          setTurn((t) => (p.turn_n === t.turnN ? t : t));
           if (paceRef.current === "continuous") {
             setPhase("answering");
             void beginAnsweringRef.current?.();
@@ -730,6 +735,17 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center" }}>
             {pace === "continuous" ? "Next question incoming…" : "Preparing question…"}
           </span>
+        )}
+
+        {phase === "speaking" && (
+          <>
+            <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center", flex: 1 }}>
+              Speaking question…
+            </span>
+            <button onClick={() => void handleSkip()} style={ghostBtn}>
+              Skip
+            </button>
+          </>
         )}
 
         {phase === "question" && (

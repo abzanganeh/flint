@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,6 +36,7 @@ use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::mock::rag::query_mock_rag;
+use crate::mock::tts;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
@@ -3198,6 +3199,7 @@ pub async fn start_mock(
     let role_packs = packs_for_role(&digest.domain, &digest.role);
 
     let active_turn_n = Arc::new(AtomicU32::new(0));
+    let mic_recording = Arc::new(AtomicBool::new(false));
 
     let conductor = Conductor::start(
         app.clone(),
@@ -3230,6 +3232,7 @@ pub async fn start_mock(
         conductor,
         mic_capture,
         active_turn_n,
+        mic_recording,
         guided,
         mode: mock_mode,
         suggested_text: suggested_buffer,
@@ -3277,7 +3280,9 @@ pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         .mic_capture
         .start_turn(turn_n)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    handles.mic_recording.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Stop recording, run coach LLM, persist results, and signal the conductor.
@@ -3289,7 +3294,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
     // Pull the turn number and queue the `EndTurn` command while holding the
     // mock_tasks guard, then drop it before the (potentially long) await on
     // the reply so concurrent commands like `stop_mock` are not blocked.
-    let (turn_n, reply_rx) = {
+    let (turn_n, reply_rx, mic_recording) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
         let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
@@ -3301,7 +3306,11 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .send_end_turn()
             .await
             .map_err(|e| e.to_string())?;
-        (turn_n, reply_rx)
+        (
+            turn_n,
+            reply_rx,
+            Arc::clone(&handles.mic_recording),
+        )
     };
 
     // Give the user up to 120 s to finish answering; in practice they stop
@@ -3310,6 +3319,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
             .await
             .map_err(|e| e.to_string())?;
+    mic_recording.store(false, Ordering::SeqCst);
 
     if transcript.trim().is_empty() {
         let session_id = state
@@ -3466,7 +3476,7 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         .session_id()
         .ok_or("no active session")?;
 
-    let (turn_n, persistence, conductor_tx) = {
+    let (turn_n, persistence, conductor_tx, mic_recording) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
         let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
@@ -3477,17 +3487,21 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
             turn_n,
             Arc::clone(&state.persistence),
             handles.conductor.cmd_tx.clone(),
+            Arc::clone(&handles.mic_recording),
         )
     };
 
-    // Stop mic capture if the user started answering then skipped.
-    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-        if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
-            let _ = crate::mock::mic_capture::await_end_turn_reply(
-                reply_rx,
-                Duration::from_secs(3),
-            )
-            .await;
+    tts::stop_active().await;
+
+    if mic_recording.swap(false, Ordering::SeqCst) {
+        if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+            if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
+                let _ = crate::mock::mic_capture::await_end_turn_reply(
+                    reply_rx,
+                    Duration::from_secs(3),
+                )
+                .await;
+            }
         }
     }
 

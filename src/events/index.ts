@@ -278,6 +278,10 @@ export interface MockQuestionStartedEventPayload {
   mode: MockStudyMode;
 }
 
+export interface MockQuestionSpokenEventPayload {
+  turn_n: number;
+}
+
 export interface MockUserTranscribedEventPayload {
   turn_n: number;
   text: string;
@@ -303,6 +307,13 @@ export const onMockQuestionStarted = (
   handler: (payload: MockQuestionStartedEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<MockQuestionStartedEventPayload>("mock_question_started", (event) =>
+    handler(event.payload),
+  );
+
+export const onMockQuestionSpoken = (
+  handler: (payload: MockQuestionSpokenEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockQuestionSpokenEventPayload>("mock_question_spoken", (event) =>
     handler(event.payload),
   );
 

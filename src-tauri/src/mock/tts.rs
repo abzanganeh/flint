@@ -22,7 +22,9 @@
 
 use anyhow::{bail, Context, Result};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 use tracing::{instrument, warn};
 
 #[cfg(target_os = "linux")]
@@ -32,6 +34,46 @@ use {
     std::path::{Path, PathBuf},
     tokio::io::AsyncWriteExt,
 };
+
+/// Kill any in-flight TTS subprocess (espeak, aplay, mpv, etc.).
+pub async fn stop_active() {
+    let mut guard = active_pids().lock().await;
+    for pid in guard.drain(..) {
+        let _ = Command::new("kill")
+            .arg(pid.to_string())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+}
+
+fn active_pids() -> &'static Mutex<Vec<u32>> {
+    static PIDS: OnceLock<Mutex<Vec<u32>>> = OnceLock::new();
+    PIDS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+async fn track_pid(pid: u32) {
+    active_pids().lock().await.push(pid);
+}
+
+async fn untrack_pid(pid: u32) {
+    let mut guard = active_pids().lock().await;
+    guard.retain(|p| *p != pid);
+}
+
+async fn run_tracked(mut child: tokio::process::Child) -> Result<std::process::ExitStatus> {
+    let pid = child.id();
+    if let Some(pid) = pid {
+        track_pid(pid).await;
+    }
+    let status = child.wait().await.context("wait on TTS child")?;
+    if let Some(pid) = pid {
+        untrack_pid(pid).await;
+    }
+    Ok(status)
+}
 
 /// Speak `text` using the platform TTS engine and wait for it to finish.
 ///
@@ -66,14 +108,14 @@ fn truncate_for_tts(text: &str) -> String {
 
 #[cfg(target_os = "macos")]
 async fn run_tts_command(text: &str) -> Result<()> {
-    let status = Command::new("say")
+    let child = Command::new("say")
         .args(["-r", "160", text])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .await
+        .spawn()
         .context("failed to spawn `say`")?;
+    let status = run_tracked(child).await.context("wait on `say`")?;
     if !status.success() {
         bail!("`say` exited with {:?}", status.code());
     }
@@ -132,7 +174,7 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
         // Dropping stdin closes the pipe and signals EOF to piper.
     }
 
-    let status = child.wait().await.context("piper wait")?;
+    let status = run_tracked(child).await.context("piper wait")?;
     if !status.success() {
         bail!("piper exited with {:?}", status.code());
     }
@@ -143,11 +185,11 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .await
+        .spawn()
         .context("failed to spawn aplay")?;
-    if !play.success() {
-        bail!("aplay exited with {:?}", play.code());
+    let play_status = run_tracked(play).await.context("aplay wait")?;
+    if !play_status.success() {
+        bail!("aplay exited with {:?}", play_status.code());
     }
     Ok(())
 }
@@ -193,15 +235,18 @@ async fn run_openai_tts(text: &str, api_key: &str) -> Result<()> {
             "ffplay" => &["-nodisp", "-autoexit", "-loglevel", "quiet"],
             _ => &[],
         };
-        let status = Command::new(player)
-            .args(args)
-            .arg(&mp3_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .with_context(|| format!("failed to spawn {player}"))?;
+        let status = run_tracked(
+            Command::new(player)
+                .args(args)
+                .arg(&mp3_path)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .with_context(|| format!("failed to spawn {player}"))?,
+        )
+        .await
+        .with_context(|| format!("wait on {player}"))?;
         if status.success() {
             return Ok(());
         }
@@ -213,27 +258,30 @@ async fn run_openai_tts(text: &str, api_key: &str) -> Result<()> {
 /// espeak-ng / espeak phonetic fallback.
 #[cfg(target_os = "linux")]
 async fn run_espeak(text: &str) -> Result<()> {
-    let result = Command::new("espeak-ng")
-        .args(["-s", "150", text])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    let result = {
+        let child = Command::new("espeak-ng")
+            .args(["-s", "150", text])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn espeak-ng")?;
+        run_tracked(child).await
+    };
 
     match result {
         Ok(s) if s.success() => return Ok(()),
         _ => {}
     }
 
-    let status = Command::new("espeak")
+    let child = Command::new("espeak")
         .args(["-s", "150", text])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .await
+        .spawn()
         .context("failed to spawn `espeak`")?;
+    let status = run_tracked(child).await?;
     if !status.success() {
         bail!("`espeak` exited with {:?}", status.code());
     }
@@ -290,14 +338,14 @@ async fn run_tts_command(text: &str) -> Result<()> {
          $s.Rate = 2; \
          $s.Speak('{safe}');"
     );
-    let status = Command::new("powershell")
+    let child = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .await
+        .spawn()
         .context("failed to spawn PowerShell TTS")?;
+    let status = run_tracked(child).await.context("wait on PowerShell TTS")?;
     if !status.success() {
         bail!("PowerShell TTS exited with {:?}", status.code());
     }

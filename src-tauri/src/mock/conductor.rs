@@ -22,7 +22,8 @@ use uuid::Uuid;
 
 use crate::digest::Digest;
 use crate::events::{
-    emit_mock_ended, emit_mock_question_started, emit_mock_suggested_token, MockEndedPayload,
+    emit_mock_ended, emit_mock_question_started, emit_mock_question_spoken,
+    emit_mock_suggested_token, MockEndedPayload, MockQuestionSpokenPayload,
     MockQuestionStartedPayload, MockSuggestedTokenPayload,
 };
 use crate::interfaces::vector::VectorInterface;
@@ -266,8 +267,6 @@ async fn conductor_loop<R: Runtime>(
         );
         info!(session_id = %session_id, turn_n, mode = mode.as_str(), "mock question started");
 
-        tts::speak_best_effort(&question).await;
-
         let suggested_handle = {
             let app_clone = app.clone();
             let failover_clone = Arc::clone(&failover);
@@ -293,7 +292,23 @@ async fn conductor_loop<R: Runtime>(
             })
         };
 
-        let cmd = cmd_rx.recv().await;
+        let mut cmd = None;
+        tokio::select! {
+            c = cmd_rx.recv() => {
+                tts::stop_active().await;
+                cmd = c;
+            }
+            _ = async {
+                tts::speak_best_effort(&question).await;
+                emit_mock_question_spoken(
+                    &app,
+                    MockQuestionSpokenPayload { turn_n },
+                );
+            } => {}
+        }
+        if cmd.is_none() {
+            cmd = cmd_rx.recv().await;
+        }
         let suggested_text = suggested_handle.await.unwrap_or_default();
 
         match cmd {

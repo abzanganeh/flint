@@ -230,6 +230,12 @@ pub struct MockQuestionStartedPayload {
     pub mode: String,
 }
 
+/// Emitted after TTS finishes (or is skipped) — UI may enable the mic.
+#[derive(Debug, Clone, Serialize)]
+pub struct MockQuestionSpokenPayload {
+    pub turn_n: u32,
+}
+
 /// Emitted when the user's mic VAD chunk has been transcribed.
 #[derive(Debug, Clone, Serialize)]
 pub struct MockUserTranscribedPayload {
@@ -266,6 +272,13 @@ pub fn emit_mock_question_started<R: Runtime>(
     payload: MockQuestionStartedPayload,
 ) {
     let _ = app.emit("mock_question_started", payload);
+}
+
+pub fn emit_mock_question_spoken<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: MockQuestionSpokenPayload,
+) {
+    let _ = app.emit("mock_question_spoken", payload);
 }
 
 pub fn emit_mock_user_transcribed<R: Runtime>(

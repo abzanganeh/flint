@@ -45,6 +45,8 @@ pub struct MockTaskHandles {
     pub mic_capture: MicCapture,
     /// Conductor's active question turn (1-based). Updated when each question starts.
     pub active_turn_n: Arc<AtomicU32>,
+    /// True while the mic is recording an answer for the current turn.
+    pub mic_recording: Arc<AtomicBool>,
     /// When true, questions are gated on `ask_mock_question`.
     pub guided: bool,
     /// Practice hides suggested answer until after the user responds.
