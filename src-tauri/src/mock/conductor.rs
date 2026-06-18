@@ -560,6 +560,11 @@ fn build_suggested_prompt(
     Ok(prompt)
 }
 
+/// Extracted validation for follow-up LLM output (unit-tested).
+fn generate_follow_up_validate(cleaned: &str) -> bool {
+    !cleaned.is_empty() && cleaned.len() <= 200 && cleaned.ends_with('?')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,9 +576,4 @@ mod tests {
         assert!(!generate_follow_up_validate("not a question"));
         assert!(!generate_follow_up_validate(&"x".repeat(201)));
     }
-}
-
-/// Extracted validation for follow-up LLM output (unit-tested).
-fn generate_follow_up_validate(cleaned: &str) -> bool {
-    !cleaned.is_empty() && cleaned.len() <= 200 && cleaned.ends_with('?')
 }
