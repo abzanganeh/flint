@@ -44,6 +44,45 @@ async fn import_from_smart_resume_maps_success_payload() {
 }
 
 #[tokio::test]
+async fn fetch_interview_questions_maps_success_payload() {
+    let _guard = env_lock().lock().await;
+    let server = MockServer::start().await;
+    std::env::set_var("FLINT_SMART_RESUME_URL", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/api/interview-questions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "domain": "software_engineering",
+            "questions": [
+                {
+                    "id": "uni-1",
+                    "text": "Tell me about yourself.",
+                    "domain": "universal",
+                    "category": "introduction",
+                    "canonical_answer": null
+                }
+            ],
+            "total": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let result = smart_resume::fetch_interview_questions(
+        "software engineering",
+        "Acme",
+        "Staff Engineer",
+        30,
+    )
+    .await
+    .expect("fetch succeeds");
+
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].text, "Tell me about yourself.");
+
+    std::env::remove_var("FLINT_SMART_RESUME_URL");
+}
+
+#[tokio::test]
 async fn import_from_smart_resume_maps_expired_token() {
     let _guard = env_lock().lock().await;
     let server = MockServer::start().await;
