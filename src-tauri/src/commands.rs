@@ -810,6 +810,77 @@ pub async fn get_session_context_fields(
         .map_err(|e| e.to_string())
 }
 
+/// Ingest global question-bank entries into the session context vector store.
+fn spawn_global_bank_enrichment(
+    session_id: Uuid,
+    questions: Vec<smart_resume::InterviewQuestionDto>,
+    embedder: Arc<crate::rag::embedder::Embedder>,
+    vector_store: Arc<dyn crate::interfaces::vector::VectorInterface>,
+) {
+    if questions.is_empty() {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let chunks_text = smart_resume::bank_entries_for_context_embed(&questions);
+        if chunks_text.is_empty() {
+            return;
+        }
+
+        let embeddings = {
+            let chunks_clone = chunks_text.clone();
+            let emb = Arc::clone(&embedder);
+            tokio::task::spawn_blocking(move || {
+                let refs: Vec<&str> = chunks_clone.iter().map(String::as_str).collect();
+                emb.embed_batch(&refs)
+            })
+            .await
+        };
+
+        let embeddings = match embeddings {
+            Ok(Ok(e)) => e,
+            Ok(Err(e)) => {
+                warn!(session_id = %session_id, error = %e, "global bank embedding failed");
+                return;
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "global bank embedder task panicked");
+                return;
+            }
+        };
+
+        let chunks: Vec<Chunk> = chunks_text
+            .into_iter()
+            .zip(embeddings)
+            .filter(|(_, emb)| !emb.is_empty())
+            .map(|(text, embedding)| Chunk {
+                id: Uuid::new_v4(),
+                text,
+                embedding,
+                session_id,
+            })
+            .collect();
+
+        let count = chunks.len();
+        if count == 0 {
+            return;
+        }
+
+        match vector_store.ingest_context(session_id, chunks).await {
+            Ok(()) => {
+                info!(
+                    session_id = %session_id,
+                    chunks = count,
+                    "global question bank ingested into session context store"
+                )
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "global bank ingest failed")
+            }
+        }
+    });
+}
+
 /// Fire-and-forget background task that runs targeted Tavily searches for the
 /// company + role, then ingests the results into the session RAG store.
 ///
@@ -953,6 +1024,7 @@ pub async fn confirm_digest(
     // 100+ staged questions. The regex path costs zero LLM tokens and runs in
     // O(lines).
     let context_blob_opt = state.persistence.get_session_context(sid).ok();
+    let mut bank_questions_for_embed = Vec::new();
     {
         let mut bank: Vec<String> = digest_rust.likely_questions.clone();
 
@@ -966,6 +1038,34 @@ pub async fn confirm_digest(
                 {
                     bank.push(q);
                 }
+            }
+        }
+
+        match smart_resume::fetch_interview_questions(
+            &digest_rust.domain,
+            &digest_rust.company,
+            &digest_rust.role,
+            smart_resume::DEFAULT_BANK_FETCH_LIMIT,
+        )
+        .await
+        {
+            Ok(remote) => {
+                bank_questions_for_embed = remote;
+                let added = bank.len();
+                smart_resume::merge_question_bank(&mut bank, &bank_questions_for_embed);
+                debug!(
+                    session_id = %sid,
+                    merged = bank.len().saturating_sub(added),
+                    total = bank.len(),
+                    "global question bank merged into session question bank"
+                );
+            }
+            Err(e) => {
+                warn!(
+                    session_id = %sid,
+                    error = %e,
+                    "global question bank fetch skipped (non-fatal)"
+                );
             }
         }
 
@@ -1036,6 +1136,14 @@ pub async fn confirm_digest(
     // Kick off a background Tavily sweep for company/role context so results
     // are in session RAG before the user reaches rehearsal or mock interview.
     if let Ok(embedder) = state.require_embedder() {
+        if !bank_questions_for_embed.is_empty() {
+            spawn_global_bank_enrichment(
+                sid,
+                bank_questions_for_embed,
+                Arc::clone(&embedder),
+                Arc::clone(&state.vector_store),
+            );
+        }
         spawn_company_enrichment(
             sid,
             digest_rust.company.clone(),

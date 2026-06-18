@@ -351,6 +351,88 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_retrieve_for_prompt_allocates_context_and_qa_slots() {
+        let store = make_store();
+        let session = Uuid::new_v4();
+        let emb = require_embedder!();
+
+        let ctx_texts = [
+            "distributed systems consensus and replication",
+            "identity access management RBAC policies",
+            "cloud infrastructure Kubernetes networking",
+            "database transaction isolation levels",
+            "software engineering design patterns",
+            "security incident response playbooks",
+            "agile sprint planning ceremonies",
+        ];
+        for text in ctx_texts {
+            store
+                .ingest_context(session, vec![make_chunk(text, session, emb)])
+                .await
+                .unwrap();
+        }
+
+        let qa_texts = [
+            "Q: Tell me about yourself\nA: IAM architect with eight years experience",
+            "Q: Why this role?\nA: Mission alignment and technical depth",
+            "Q: Greatest strength?\nA: Designing secure identity platforms at scale",
+        ];
+        for text in qa_texts {
+            store
+                .ingest_qa(session, vec![make_chunk(text, session, emb)])
+                .await
+                .unwrap();
+        }
+
+        let query = emb.embed_one("Tell me about yourself").unwrap();
+        let chunks = retrieve_for_prompt(&store, session, &query).await.unwrap();
+
+        assert_eq!(
+            chunks.context.len(),
+            6,
+            "context slot budget must be exactly 6"
+        );
+        assert!(
+            chunks.qa.len() <= 2,
+            "Q&A slot budget must be at most 2, got {}",
+            chunks.qa.len()
+        );
+        assert!(
+            chunks
+                .context
+                .iter()
+                .all(|c| !c.chunk.text.starts_with("Q:")),
+            "context slots must not contain Q&A store chunks"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_retrieve_for_prompt_empty_qa_store() {
+        let store = make_store();
+        let session = Uuid::new_v4();
+        let emb = require_embedder!();
+
+        store
+            .ingest_context(
+                session,
+                vec![make_chunk(
+                    "resume and job description context",
+                    session,
+                    emb,
+                )],
+            )
+            .await
+            .unwrap();
+
+        let query = emb.embed_one("background").unwrap();
+        let chunks = retrieve_for_prompt(&store, session, &query).await.unwrap();
+
+        assert!(!chunks.context.is_empty());
+        assert!(chunks.qa.is_empty());
+        assert!(!chunks.has_qa());
+    }
+
+    #[tokio::test]
     async fn test_retrieve_returns_scores_sorted_descending() {
         let store = make_store();
         let session = Uuid::new_v4();

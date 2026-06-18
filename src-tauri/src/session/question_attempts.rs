@@ -66,6 +66,18 @@ mod tests {
     }
 
     #[test]
+    fn embed_confidence_threshold_boundary() {
+        assert!(
+            !rehearsal_attempt_satisfied(0.64, ConfidenceLevel::Green),
+            "0.64 must not qualify for Q&A embedding"
+        );
+        assert!(
+            rehearsal_attempt_satisfied(0.65, ConfidenceLevel::Green),
+            "0.65 must qualify for Q&A embedding"
+        );
+    }
+
+    #[test]
     fn rehearsal_amber_not_satisfied() {
         assert!(!rehearsal_attempt_satisfied(0.5, ConfidenceLevel::Amber));
     }
