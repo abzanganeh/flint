@@ -114,6 +114,10 @@ path = "tests/integration/smart_resume_import.rs"
 name = "cold_start"
 path = "tests/integration/cold_start.rs"
 
+[[test]]
+name = "rag_dual_store"
+path = "tests/integration/rag_dual_store.rs"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 7.3 benchmarks — measured against NFR targets in flint-performance.mdc.
 # Run with: cargo bench --bench <name>
