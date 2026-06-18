@@ -1049,7 +1049,15 @@ pub async fn confirm_digest(
         )
         .await
         {
-            Ok(remote) => {
+            Ok(mut remote) => {
+                if remote.is_empty() {
+                    remote = crate::global_bank::fetch_global_bank_questions(
+                        &digest_rust.domain,
+                        &digest_rust.role,
+                        smart_resume::DEFAULT_BANK_FETCH_LIMIT,
+                    )
+                    .await;
+                }
                 bank_questions_for_embed = remote;
                 let added = bank.len();
                 smart_resume::merge_question_bank(&mut bank, &bank_questions_for_embed);
