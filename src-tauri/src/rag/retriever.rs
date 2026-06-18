@@ -385,9 +385,7 @@ mod tests {
         }
 
         let query = emb.embed_one("Tell me about yourself").unwrap();
-        let chunks = retrieve_for_prompt(&store, session, &query)
-            .await
-            .unwrap();
+        let chunks = retrieve_for_prompt(&store, session, &query).await.unwrap();
 
         assert_eq!(
             chunks.context.len(),
@@ -417,15 +415,17 @@ mod tests {
         store
             .ingest_context(
                 session,
-                vec![make_chunk("resume and job description context", session, emb)],
+                vec![make_chunk(
+                    "resume and job description context",
+                    session,
+                    emb,
+                )],
             )
             .await
             .unwrap();
 
         let query = emb.embed_one("background").unwrap();
-        let chunks = retrieve_for_prompt(&store, session, &query)
-            .await
-            .unwrap();
+        let chunks = retrieve_for_prompt(&store, session, &query).await.unwrap();
 
         assert!(!chunks.context.is_empty());
         assert!(chunks.qa.is_empty());

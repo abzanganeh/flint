@@ -146,17 +146,13 @@ pub async fn fetch_interview_questions(
         pairs.append_pair("limit", &clamped_limit.to_string());
     }
 
-    let response = http_client()?
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                "Smart Resume timed out. Check your connection and try again.".to_string()
-            } else {
-                "Could not reach Smart Resume. Check FLINT_SMART_RESUME_URL.".to_string()
-            }
-        })?;
+    let response = http_client()?.get(url).send().await.map_err(|e| {
+        if e.is_timeout() {
+            "Smart Resume timed out. Check your connection and try again.".to_string()
+        } else {
+            "Could not reach Smart Resume. Check FLINT_SMART_RESUME_URL.".to_string()
+        }
+    })?;
 
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
@@ -173,10 +169,8 @@ pub async fn fetch_interview_questions(
 /// Merge remote bank questions into a local digest bank without duplicates.
 /// Local digest questions always win — remote entries are appended only.
 pub fn merge_question_bank(local: &mut Vec<String>, remote: &[InterviewQuestionDto]) {
-    let existing: std::collections::HashSet<String> = local
-        .iter()
-        .map(|q| q.trim().to_lowercase())
-        .collect();
+    let existing: std::collections::HashSet<String> =
+        local.iter().map(|q| q.trim().to_lowercase()).collect();
     for question in remote {
         let text = question.text.trim();
         if text.is_empty() {

@@ -93,9 +93,7 @@ async fn test_user_qa_pair_in_context_store_is_retrievable() {
         .unwrap();
 
     let query = emb.embed_one("greatest strength").unwrap();
-    let chunks = retrieve_for_prompt(&store, session, &query)
-        .await
-        .unwrap();
+    let chunks = retrieve_for_prompt(&store, session, &query).await.unwrap();
 
     assert!(
         chunks
@@ -105,10 +103,7 @@ async fn test_user_qa_pair_in_context_store_is_retrievable() {
         "user-provided Q&A pair must surface in context slots"
     );
     assert!(
-        chunks
-            .context
-            .iter()
-            .any(|c| c.score >= 0.80),
+        chunks.context.iter().any(|c| c.score >= 0.80),
         "retrieved user Q&A chunk should clear similarity threshold"
     );
 }
