@@ -1348,12 +1348,7 @@ impl SessionPersistence {
     ///
     /// Replaces any prior row for the same turn number so coach and audio_path
     /// never land on separate SQLite rows.
-    pub fn begin_mock_turn(
-        &self,
-        session_id: Uuid,
-        turn_n: u32,
-        question: &str,
-    ) -> Result<Uuid> {
+    pub fn begin_mock_turn(&self, session_id: Uuid, turn_n: u32, question: &str) -> Result<Uuid> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         conn.execute(

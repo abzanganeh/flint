@@ -8,6 +8,19 @@
   </head>
 
   <body>
+    <script>
+      // Supabase may redirect OAuth errors to site_url (Vite) instead of flint://.
+      // Forward them to the desktop deep link so Flint can emit auth_oauth_error.
+      (function () {
+        var search = window.location.search || "";
+        var hash = window.location.hash || "";
+        var hasError =
+          search.indexOf("error=") !== -1 || hash.indexOf("error=") !== -1;
+        if (!hasError) return;
+        var tail = search || (hash.charAt(0) === "#" ? "?" + hash.slice(1) : hash);
+        window.location.replace("flint://auth/callback" + tail);
+      })();
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -344,3 +344,19 @@ export const onMockEnded = (
   listen<MockEndedEventPayload>("mock_ended", (event) =>
     handler(event.payload),
   );
+
+export interface AuthOAuthErrorEventPayload {
+  message: string;
+}
+
+export const onAuthOAuthComplete = (
+  handler: () => void,
+): Promise<UnlistenFn> =>
+  listen("auth_oauth_complete", () => handler());
+
+export const onAuthOAuthError = (
+  handler: (payload: AuthOAuthErrorEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<AuthOAuthErrorEventPayload>("auth_oauth_error", (event) =>
+    handler(event.payload),
+  );

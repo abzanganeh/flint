@@ -386,7 +386,10 @@ pub async fn run_prewarm(
 
             let mut c = cache_handle.lock().await;
             if c.insert(entry).is_none() {
-                warn!(question_idx, "pre-warm entry rejected (digest-shaped response)");
+                warn!(
+                    question_idx,
+                    "pre-warm entry rejected (digest-shaped response)"
+                );
             }
             #[cfg(debug_assertions)]
             debug!(

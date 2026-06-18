@@ -2,7 +2,7 @@
 
 Branch: `feature/m3-mock-interview`  
 Environment: Linux Wayland, Groq, espeak-ng TTS  
-Last updated: 2026-06-16
+Last updated: 2026-06-16 (M3 Linux manual gate signed off)
 
 ## Phase 8 — First Pass (completed)
 
@@ -10,7 +10,7 @@ Last updated: 2026-06-16
 |---|------|--------|-------|
 | 1 | Mock entry | Pass | |
 | 2 | State MOCK_INTERVIEW | Pass | Verify via SQLite, not DevTools (`window.__TAURI__` unavailable in Tauri 2) |
-| 3 | TTS | Pass | espeak-ng |
+| 3 | TTS | Pass | Piper neural (8.11 D1); espeak fallback if Piper absent |
 | 4 | Suggested answer streaming | Pass | Study mode required; Practice hides until after answer |
 | 5 | Mic + transcript | Pass | |
 | 6 | Coach feedback | Pass | |
@@ -30,7 +30,7 @@ Hotkeys: **Ctrl+Alt+Space** (tap / hold / double), **Ctrl+Alt+Shift+Space** (pan
 | 1 | Tap trigger | Pass | After fixes; Flint must be focused on Wayland |
 | 2 | Hold → Answer Now | Pass | |
 | 3 | Double-tap cancel | Pass | Works in REHEARSING after fix |
-| 4 | Panic hide | Partial | Panels hide; question field/sidebar remain without PanicRestoreShell |
+| 4 | Panic hide | Pass | PanicRestoreShell — full chrome hide; re-test C1 2026-06-16 |
 | 5 | OBS capture | Partial | Full monitor capture includes Flint (Wayland limitation) |
 | 6a | 1920×1080 | Pass | |
 | 6b | 4K | Partial | Readable but small at 3840×2160 |
@@ -74,27 +74,43 @@ Loop message when both pass:
 
 ### Block B — 8.9 Shuffle + Follow-ups
 
-- [ ] **B1** With shuffle ON, first question differs between two fresh mock starts
-- [ ] **B2** After a full spoken answer, a follow-up question appears (not immediate skip)
+- [x] **B1** With shuffle ON, first question differs between two fresh mock starts
+- [x] **B2 / B2a** After a full spoken answer, a follow-up question appears (not immediate skip)
 
-Loop message:
-```
-/flint-loop resume — 8.9 shuffle + follow-ups E2E passed (Linux)
-```
+**B1+B2a pass (2026-06-16):** M3 Linux manual gate sign-off.
 
 ### Block C — P0 Regressions
 
-- [ ] **C1** Panic (Ctrl+Alt+Shift+Space): only "Show Flint" pill visible in Rehearsal and LIVE
-- [ ] **C2** Pre-warm / Directional: no raw digest JSON in panel text
-- [ ] **C3** Test 14: Rehearsal → Go live still works
+- [x] **C1** Panic (Ctrl+Alt+Shift+Space): only "Show Flint" pill visible in Rehearsal and LIVE
+- [x] **C2** Pre-warm / Directional: no raw digest JSON in panel text
+- [x] **C3** Test 14: Rehearsal → Go live still works (+ panel reset — no rehearsal carry-over in live panels)
 
-Loop messages as each sub-block passes.
+**C1–C3 pass (2026-06-16):** `PanicRestoreShell`, digest pre-warm guard, `resetOrchestratorPanels` on live entry.
 
-### Block D — Later (not blocking M3 Linux gate)
+### M3 Linux manual gate — COMPLETE
 
-- [ ] **8.11** TTS voice selection / quality pass
+All blocks A, B, C passed on Linux Wayland. **Block D (8.11) Linux PASS** 2026-06-16. Remaining M3: **m3-gmail-sso**.
+
+### Block D — TTS + platform follow-ups
+
+- [x] **D1** Piper neural TTS speaks mock interviewer questions (Linux)
+- [x] **D2** Recording/mic gated until question fully spoken (`mock_question_spoken` timing)
+- [x] **D3** Skip stops in-flight TTS immediately (no bleed into next turn)
 - [ ] **m3-gmail-sso** Google OAuth (not built)
-- [ ] **8-gate-manual-macos-windows** platform TTS paths
+- [ ] **8-gate-manual-macos-windows** platform TTS paths (say / SAPI)
+
+**8.11 Linux pass (2026-06-16):** Piper backend; D2+D3 verified with skip/timing fixes (`67dd08b`).
+
+### Block E — Gmail SSO (`m3-gmail-sso`)
+
+See `tests/manual-qa/M3_GMAIL_SSO.md` for full setup + E1–E4 checklist.
+
+- [x] **E1** New user — Continue with Google → onboarding completes — **PASS 2026-06-17**
+- [x] **E2** Sign out → Google login → local sessions preserved — **PASS**
+- [x] **E3** Cancel/deny — `cancel_google_oauth` + Vite error bridge — **PASS**
+- [x] **E4** Email/password login still works — **PASS**
+
+**Block E complete** — M3 Linux manual QA closed.
 
 ## Session recovery after sign-out (2026-06-16)
 

@@ -213,6 +213,22 @@ pub fn emit_session_state_change<R: Runtime>(
     let _ = app.emit("session_state_change", payload);
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthOAuthCompletePayload {}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthOAuthErrorPayload {
+    pub message: String,
+}
+
+pub fn emit_auth_oauth_complete<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit("auth_oauth_complete", AuthOAuthCompletePayload {});
+}
+
+pub fn emit_auth_oauth_error<R: Runtime>(app: &AppHandle<R>, payload: AuthOAuthErrorPayload) {
+    let _ = app.emit("auth_oauth_error", payload);
+}
+
 pub fn emit_context_truncated<R: Runtime>(app: &AppHandle<R>, payload: ContextTruncatedPayload) {
     let _ = app.emit("context_truncated", payload);
 }

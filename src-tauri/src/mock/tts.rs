@@ -9,7 +9,7 @@
 //! interviewer keeps working even without any TTS engine installed.
 //!
 //! ## Piper setup (one-time)
-//! ```
+//! ```text
 //! pip install piper-tts
 //! mkdir -p ~/.local/share/piper
 //! cd ~/.local/share/piper

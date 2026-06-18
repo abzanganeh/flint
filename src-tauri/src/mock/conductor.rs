@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::digest::Digest;
 use crate::events::{
-    emit_mock_ended, emit_mock_question_started, emit_mock_question_spoken,
+    emit_mock_ended, emit_mock_question_spoken, emit_mock_question_started,
     emit_mock_suggested_token, MockEndedPayload, MockQuestionSpokenPayload,
     MockQuestionStartedPayload, MockSuggestedTokenPayload,
 };

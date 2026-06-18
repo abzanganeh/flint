@@ -72,6 +72,12 @@ export const setSessionState = (state: string): Promise<void> =>
 export const login = (email: string, password: string): Promise<void> =>
   invoke<void>("login", { email, password });
 
+export const startGoogleOAuth = (): Promise<void> =>
+  invoke<void>("start_google_oauth");
+
+export const cancelGoogleOAuth = (): Promise<void> =>
+  invoke<void>("cancel_google_oauth");
+
 export const logout = (): Promise<void> => invoke<void>("logout");
 
 export const getCurrentUser = (): Promise<UserDto> =>

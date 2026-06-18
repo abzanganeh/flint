@@ -52,6 +52,41 @@ impl SupabaseAuth {
         })
     }
 
+    pub(crate) fn public_base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Exchange a PKCE authorization code from the OAuth deep-link callback.
+    pub async fn exchange_pkce_code(
+        &self,
+        auth_code: &str,
+        code_verifier: &str,
+    ) -> Result<AuthToken> {
+        let response = self
+            .client
+            .post(self.auth_url("/token?grant_type=pkce"))
+            .headers(self.anon_headers())
+            .json(&serde_json::json!({
+                "auth_code": auth_code,
+                "code_verifier": code_verifier,
+            }))
+            .send()
+            .await
+            .map_err(Self::map_transport_error)?;
+
+        let status = response.status();
+        if status.is_success() {
+            let body: GoTrueTokenResponse = response
+                .json()
+                .await
+                .map_err(|_| anyhow!("Authentication failed. Please try again."))?;
+            info!(event = "oauth_login_success", provider = "google");
+            return Self::token_from_response(body);
+        }
+        info!(event = "oauth_login_failed", provider = "google");
+        Err(Self::map_response_error(status))
+    }
+
     fn auth_url(&self, path: &str) -> String {
         format!("{}/auth/v1{}", self.base_url, path)
     }

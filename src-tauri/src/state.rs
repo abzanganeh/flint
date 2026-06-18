@@ -88,6 +88,7 @@ pub struct LiveTaskHandles {
 pub struct AppState {
     // ── Auth (Phase 1) ───────────────────────────────────────────────────────
     pub auth: Arc<dyn AuthInterface>,
+    pub supabase_auth: Arc<SupabaseAuth>,
     #[allow(dead_code)] // Supabase session sync — Phase 3+
     pub session: Arc<dyn SessionInterface>,
     pub plugins: std::collections::HashMap<String, serde_json::Value>,
@@ -168,9 +169,10 @@ impl AppState {
     pub fn new(app: &App) -> Result<Self> {
         let plugins = app.config().plugins.0.clone();
 
-        let auth = Arc::new(
+        let supabase_auth = Arc::new(
             SupabaseAuth::from_tauri_plugins(&plugins).context("Failed to initialise auth")?,
         );
+        let auth: Arc<dyn AuthInterface> = supabase_auth.clone();
 
         // ── App data directory ───────────────────────────────────────────────
         let data_dir = app
@@ -233,6 +235,7 @@ impl AppState {
 
         Ok(Self {
             auth,
+            supabase_auth,
             session: Arc::new(StubSession),
             plugins,
             auth_token: RwLock::new(None),

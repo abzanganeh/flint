@@ -71,12 +71,15 @@ pub fn run() {
     {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let mut got_import = false;
+            let mut got_oauth = false;
             for arg in args {
                 if deep_link::emit_import_token_if_present(app, &arg) {
                     got_import = true;
+                } else if deep_link::spawn_oauth_callback_if_present(app, &arg) {
+                    got_oauth = true;
                 }
             }
-            if got_import {
+            if got_import || got_oauth {
                 deep_link::present_main_window(app);
             }
         }));
@@ -130,6 +133,28 @@ pub fn run() {
             }
             app.manage(app_state);
 
+            #[cfg(desktop)]
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        let url = url.to_string();
+                        if deep_link::emit_import_token_if_present(&handle, &url)
+                            || deep_link::spawn_oauth_callback_if_present(&handle, &url)
+                        {
+                            deep_link::present_main_window(&handle);
+                        }
+                    }
+                });
+            }
+
+            for arg in std::env::args().skip(1) {
+                if deep_link::spawn_oauth_callback_if_present(app.handle(), &arg) {
+                    break;
+                }
+            }
+
             // Phase 7.6 — kick off a non-blocking flag refresh in the
             // background. The compiled-in defaults are already loaded so
             // the UI works immediately; this just upgrades to the latest
@@ -157,6 +182,8 @@ pub fn run() {
             commands::set_session_state,
             commands::login,
             commands::logout,
+            commands::start_google_oauth,
+            commands::cancel_google_oauth,
             commands::get_current_user,
             commands::get_hardware_profile,
             commands::run_health_check,

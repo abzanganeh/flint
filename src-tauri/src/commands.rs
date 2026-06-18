@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
 use secrecy::{ExposeSecret, SecretString};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -207,6 +207,113 @@ pub async fn get_current_user(state: State<'_, AppState>) -> Result<UserDto, Str
         .await
         .map_err(map_user_error)?;
     Ok(UserDto::from(user))
+}
+
+/// Open the system browser to start Google OAuth (PKCE + `flint://auth/callback`).
+#[tauri::command]
+pub async fn start_google_oauth(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let (verifier, challenge) = crate::supabase::oauth::generate_pkce_pair();
+    keychain::store_oauth_code_verifier(&verifier).map_err(|_| KEYCHAIN_SAVE_ERROR.to_string())?;
+    let url = state.supabase_auth.google_authorize_url(&challenge);
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|_| "Could not open your browser for Google sign-in.".to_string())?;
+    Ok(())
+}
+
+/// Abort a pending Google OAuth flow started by [`start_google_oauth`].
+///
+/// Google has no server-side "cancel" API for an in-flight browser consent page.
+/// We invalidate the local PKCE verifier so a late `flint://` callback cannot
+/// complete, and emit `auth_oauth_error` so the UI leaves the waiting state.
+#[tauri::command]
+pub async fn cancel_google_oauth(app: AppHandle) -> Result<(), String> {
+    use crate::events::{emit_auth_oauth_error, AuthOAuthErrorPayload};
+
+    keychain::clear_oauth_code_verifier();
+    emit_auth_oauth_error(
+        &app,
+        AuthOAuthErrorPayload {
+            message: "Google sign-in was cancelled. Try again or use email below.".to_string(),
+        },
+    );
+    Ok(())
+}
+
+/// Handle `flint://auth/callback` from the browser redirect (deep link / argv).
+pub async fn process_oauth_callback_url<R: Runtime>(app: &AppHandle<R>, url: &str) -> bool {
+    use crate::events::{emit_auth_oauth_complete, emit_auth_oauth_error, AuthOAuthErrorPayload};
+    use crate::supabase::oauth::{parse_auth_callback, tokens_to_auth_token, AuthCallback};
+
+    let Some(callback) = parse_auth_callback(url) else {
+        return false;
+    };
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return true;
+    };
+
+    match callback {
+        AuthCallback::Error { message } => {
+            emit_auth_oauth_error(app, AuthOAuthErrorPayload { message });
+        }
+        AuthCallback::Tokens(tokens) => {
+            let token = tokens_to_auth_token(&tokens);
+            if persist_auth_token(&state, token).await.is_ok() {
+                emit_auth_oauth_complete(app);
+            } else {
+                emit_auth_oauth_error(
+                    app,
+                    AuthOAuthErrorPayload {
+                        message: KEYCHAIN_SAVE_ERROR.to_string(),
+                    },
+                );
+            }
+        }
+        AuthCallback::Code(code) => {
+            let verifier = match keychain::take_oauth_code_verifier() {
+                Ok(Some(v)) => v,
+                _ => {
+                    emit_auth_oauth_error(
+                        app,
+                        AuthOAuthErrorPayload {
+                            message: "OAuth session expired. Please try again.".to_string(),
+                        },
+                    );
+                    return true;
+                }
+            };
+            match state
+                .supabase_auth
+                .exchange_pkce_code(&code.code, &verifier)
+                .await
+            {
+                Ok(token) => {
+                    if persist_auth_token(&state, token).await.is_ok() {
+                        emit_auth_oauth_complete(app);
+                    } else {
+                        emit_auth_oauth_error(
+                            app,
+                            AuthOAuthErrorPayload {
+                                message: KEYCHAIN_SAVE_ERROR.to_string(),
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    emit_auth_oauth_error(
+                        app,
+                        AuthOAuthErrorPayload {
+                            message: map_user_error(e),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    true
 }
 
 #[tauri::command]
@@ -1810,11 +1917,8 @@ pub async fn get_question_bank(
             &mut order,
             crate::session::shuffle::session_shuffle_seed(sid),
         );
-        let rank: HashMap<String, usize> = order
-            .into_iter()
-            .enumerate()
-            .map(|(i, q)| (q, i))
-            .collect();
+        let rank: HashMap<String, usize> =
+            order.into_iter().enumerate().map(|(i, q)| (q, i)).collect();
         pending.sort_by_key(|e| rank.get(&e.question).copied().unwrap_or(0));
     }
 
@@ -2563,12 +2667,7 @@ pub async fn panic_hide_overlay(
         .lock()
         .map_err(|e| format!("overlay_panic_hidden lock poisoned: {e}"))?;
     *hidden = !*hidden;
-    emit_overlay_visibility(
-        &app,
-        OverlayVisibilityPayload {
-            hidden: *hidden,
-        },
-    );
+    emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: *hidden });
     Ok(*hidden)
 }
 
@@ -3345,11 +3444,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
             .send_end_turn()
             .await
             .map_err(|e| e.to_string())?;
-        (
-            turn_n,
-            reply_rx,
-            Arc::clone(&handles.mic_recording),
-        )
+        (turn_n, reply_rx, Arc::clone(&handles.mic_recording))
     };
 
     // Give the user up to 120 s to finish answering; in practice they stop
@@ -3376,13 +3471,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         } else {
             state
                 .persistence
-                .update_mock_turn_user_answer_by_turn_n(
-                    session_id,
-                    turn_n,
-                    "",
-                    &audio_path,
-                    "",
-                )
+                .update_mock_turn_user_answer_by_turn_n(session_id, turn_n, "", &audio_path, "")
                 .map_err(|e| e.to_string())?;
         }
         let (coach_json, score) = coach_failure_payload(
@@ -3501,25 +3590,17 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         );
     }
 
-    if let Err(e) = persistence.update_mock_turn_coach_by_turn_n(
-        session_id,
-        turn_n,
-        &coach_json,
-        score,
-    ) {
+    if let Err(e) =
+        persistence.update_mock_turn_coach_by_turn_n(session_id, turn_n, &coach_json, score)
+    {
         warn!(error = %e, "failed to persist mock turn coach feedback");
     }
 
     if !question.is_empty() {
         let satisfied = crate::session::question_attempts::mock_attempt_satisfied(score, false);
-        if let Err(e) = persistence.upsert_question_attempt(
-            session_id,
-            &question,
-            "mock",
-            0.0,
-            score,
-            satisfied,
-        ) {
+        if let Err(e) = persistence
+            .upsert_question_attempt(session_id, &question, "mock", 0.0, score, satisfied)
+        {
             warn!(error = %e, "failed to record mock question attempt");
         }
     }
@@ -3591,14 +3672,7 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         .find(|t| t.turn_n == turn_n)
         .map(|t| t.question)
     {
-        let _ = persistence.upsert_question_attempt(
-            session_id,
-            &question,
-            "mock",
-            0.0,
-            0,
-            false,
-        );
+        let _ = persistence.upsert_question_attempt(session_id, &question, "mock", 0.0, 0, false);
     }
 
     persistence

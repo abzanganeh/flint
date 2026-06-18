@@ -95,11 +95,6 @@ fn toggle_overlay<R: Runtime>(app: &AppHandle<R>) {
         .lock()
         .expect("overlay_panic_hidden lock poisoned");
     *hidden = !*hidden;
-    emit_overlay_visibility(
-        app,
-        OverlayVisibilityPayload {
-            hidden: *hidden,
-        },
-    );
+    emit_overlay_visibility(app, OverlayVisibilityPayload { hidden: *hidden });
     info!(hidden = *hidden, event = "overlay_panic_toggled");
 }
