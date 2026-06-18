@@ -15,8 +15,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: coverage-${{ github.ref }}
-  cancel-in-progress: true
+  group: coverage-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   llvm-cov:

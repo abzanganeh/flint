@@ -14,8 +14,8 @@ on:
     - cron: "0 6 * * 1"
 
 concurrency:
-  group: bench-${{ github.ref }}
-  cancel-in-progress: true
+  group: bench-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   bench-gate-unit:
@@ -47,7 +47,7 @@ jobs:
   performance-gate:
     name: NFR performance gates
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
