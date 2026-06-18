@@ -47,7 +47,7 @@ use crate::interfaces::vector::{
 };
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::LLMProvider;
-use crate::orchestrator::prewarm::PreWarmCache;
+use crate::orchestrator::prewarm::{is_plausible_cached_response, PreWarmCache};
 use crate::rag::embedder::Embedder;
 use crate::rag::retriever::retrieve_for_prompt;
 use crate::session::memory::{ContextBudget, ConversationMemory, MemoryContext, Turn};
@@ -448,9 +448,23 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // MutexGuard is dropped before the first `.await` in `retrieve_rag`.
     let cache_hit = {
         let cache = cfg.prewarm_cache.lock().await;
-        cache
-            .lookup(&embedding)
-            .map(|e| (e.directional_response.clone(), e.depth_response.clone()))
+        cache.lookup(&embedding).and_then(|e| {
+            let dir = if is_plausible_cached_response(&e.directional_response) {
+                e.directional_response.clone()
+            } else {
+                String::new()
+            };
+            let dep = if is_plausible_cached_response(&e.depth_response) {
+                e.depth_response.clone()
+            } else {
+                String::new()
+            };
+            if dir.is_empty() && dep.is_empty() {
+                None
+            } else {
+                Some((dir, dep))
+            }
+        })
     };
 
     let from_cache = cache_hit.is_some();
@@ -635,7 +649,30 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         );
         (score, level)
     };
-    let _ = confidence_level; // used implicitly via QA_EMBED_CONFIDENCE_THRESHOLD
+
+    // ── 6b. Rehearsal question attempt tracking ───────────────────────────
+    if cfg.usage_category == "rehearsal_turn" {
+        let canonical =
+            crate::session::question_attempts::strip_rephrase_prefix(&cfg.question_text);
+        let satisfied = crate::session::question_attempts::rehearsal_attempt_satisfied(
+            confidence_score,
+            confidence_level,
+        );
+        if let Err(e) = cfg.persistence.upsert_question_attempt(
+            cfg.session_id,
+            canonical,
+            "rehearsal",
+            confidence_score,
+            0,
+            satisfied,
+        ) {
+            warn!(
+                session_id = %cfg.session_id,
+                error = %e,
+                "failed to record rehearsal question attempt"
+            );
+        }
+    }
 
     // ── 7. Persist responses — crash-recovery insurance ───────────────────
     persist_thread_response(

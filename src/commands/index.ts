@@ -72,6 +72,12 @@ export const setSessionState = (state: string): Promise<void> =>
 export const login = (email: string, password: string): Promise<void> =>
   invoke<void>("login", { email, password });
 
+export const startGoogleOAuth = (): Promise<void> =>
+  invoke<void>("start_google_oauth");
+
+export const cancelGoogleOAuth = (): Promise<void> =>
+  invoke<void>("cancel_google_oauth");
+
 export const logout = (): Promise<void> => invoke<void>("logout");
 
 export const getCurrentUser = (): Promise<UserDto> =>
@@ -294,6 +300,10 @@ export const reopenSession = (sessionId: string): Promise<SessionSnapshotDto> =>
 /** Return the full session state snapshot for React resync. */
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");
+
+/** Reopen an ENDED session at Rehearsal (Past Sessions). */
+export const reopenPastSession = (sessionId: string): Promise<SessionSnapshotDto> =>
+  invoke<SessionSnapshotDto>("reopen_past_session", { sessionId });
 
 /** Restore the most recent pre-live draft from SQLite (startup). */
 export const restoreDraftSession = (): Promise<boolean> =>
@@ -569,8 +579,19 @@ export const clearProviderKey = (provider: ApiKeyProvider): Promise<void> =>
 
 // ── Phase 5.5.3 — Question bank ──────────────────────────────────────────────
 
-export const getQuestionBank = (sessionId: string): Promise<string[]> =>
-  invoke<string[]>("get_question_bank", { sessionId });
+export interface QuestionBankEntry {
+  question: string;
+  satisfied: boolean;
+  confidenceScore: number;
+  coachScore: number;
+  lastSource: string | null;
+}
+
+export const getQuestionBank = (
+  sessionId: string,
+  shuffle = true,
+): Promise<QuestionBankEntry[]> =>
+  invoke<QuestionBankEntry[]>("get_question_bank", { sessionId, shuffle });
 
 export const addToQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
   invoke<string[]>("add_to_question_bank", { sessionId, question });
@@ -638,7 +659,8 @@ export type { MockStudyMode } from "../events";
 export const startMock = (
   guided = false,
   mode: MockStudyMode = "practice",
-): Promise<void> => invoke<void>("start_mock", { guided, mode });
+  shuffle = false,
+): Promise<void> => invoke<void>("start_mock", { guided, mode, shuffle });
 
 export const askMockQuestion = (): Promise<void> =>
   invoke<void>("ask_mock_question");
@@ -654,3 +676,6 @@ export const stopMock = (finish = false): Promise<void> =>
 
 export const getMockTurns = (): Promise<MockTurn[]> =>
   invoke<MockTurn[]>("get_mock_turns");
+
+export const readMockAudioDataUrl = (path: string): Promise<string> =>
+  invoke<string>("read_mock_audio_data_url", { path });

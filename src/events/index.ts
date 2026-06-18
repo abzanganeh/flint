@@ -278,6 +278,10 @@ export interface MockQuestionStartedEventPayload {
   mode: MockStudyMode;
 }
 
+export interface MockQuestionSpokenEventPayload {
+  turn_n: number;
+}
+
 export interface MockUserTranscribedEventPayload {
   turn_n: number;
   text: string;
@@ -306,6 +310,13 @@ export const onMockQuestionStarted = (
     handler(event.payload),
   );
 
+export const onMockQuestionSpoken = (
+  handler: (payload: MockQuestionSpokenEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockQuestionSpokenEventPayload>("mock_question_spoken", (event) =>
+    handler(event.payload),
+  );
+
 export const onMockUserTranscribed = (
   handler: (payload: MockUserTranscribedEventPayload) => void,
 ): Promise<UnlistenFn> =>
@@ -331,5 +342,21 @@ export const onMockEnded = (
   handler: (payload: MockEndedEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<MockEndedEventPayload>("mock_ended", (event) =>
+    handler(event.payload),
+  );
+
+export interface AuthOAuthErrorEventPayload {
+  message: string;
+}
+
+export const onAuthOAuthComplete = (
+  handler: () => void,
+): Promise<UnlistenFn> =>
+  listen("auth_oauth_complete", () => handler());
+
+export const onAuthOAuthError = (
+  handler: (payload: AuthOAuthErrorEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<AuthOAuthErrorEventPayload>("auth_oauth_error", (event) =>
     handler(event.payload),
   );

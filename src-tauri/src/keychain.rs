@@ -17,6 +17,7 @@ const AUTH_REFRESH_ENTRY: &str = "auth_token_refresh";
 const AUTH_EXPIRES_ENTRY: &str = "auth_token_expires_at";
 const LEGAL_CONSENT_ENTRY: &str = "legal_consent_accepted";
 const REHEARSAL_COMPLETED_ENTRY: &str = "rehearsal_completed";
+const OAUTH_PKCE_VERIFIER_ENTRY: &str = "oauth_pkce_verifier";
 
 /// Every LLM provider that may have an API key stored under
 /// `api_key_{provider}`. Kept in sync with the providers Flint can connect
@@ -130,6 +131,31 @@ pub fn clear_auth_token() -> Result<()> {
     Ok(())
 }
 
+/// Store the PKCE code verifier between browser open and deep-link callback.
+pub fn store_oauth_code_verifier(verifier: &str) -> Result<()> {
+    store_password(
+        OAUTH_PKCE_VERIFIER_ENTRY,
+        &SecretString::new(verifier.to_string()),
+    )
+}
+
+/// Take the stored PKCE verifier (one-time use).
+pub fn take_oauth_code_verifier() -> Result<Option<String>> {
+    match get_password(OAUTH_PKCE_VERIFIER_ENTRY) {
+        Ok(secret) => {
+            let value = secret.expose_secret().clone();
+            let _ = delete_password(OAUTH_PKCE_VERIFIER_ENTRY);
+            Ok(Some(value))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+/// Drop a pending OAuth PKCE verifier without completing the flow.
+pub fn clear_oauth_code_verifier() {
+    let _ = delete_password(OAUTH_PKCE_VERIFIER_ENTRY);
+}
+
 /// Phase 7.5 — purge account-bound keychain entries for GDPR delete.
 ///
 /// BYOK API keys are **not** cleared — they are device-local credentials the
@@ -139,6 +165,7 @@ pub fn clear_account_secrets() -> Result<()> {
         AUTH_ACCESS_ENTRY,
         AUTH_REFRESH_ENTRY,
         AUTH_EXPIRES_ENTRY,
+        OAUTH_PKCE_VERIFIER_ENTRY,
         LEGAL_CONSENT_ENTRY,
         REHEARSAL_COMPLETED_ENTRY,
     ])

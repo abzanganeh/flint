@@ -1,11 +1,14 @@
-import { FormEvent, useCallback, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
 
 import {
+  cancelGoogleOAuth,
   login,
   setLegalConsentAccepted,
   setSessionState,
   signup,
+  startGoogleOAuth,
 } from "../commands";
+import { onAuthOAuthComplete, onAuthOAuthError } from "../events";
 import { SessionState } from "../types";
 import "./Onboarding.css";
 
@@ -27,6 +30,9 @@ export interface OnboardingProps {
 type OnboardingStep = "legal" | "auth";
 type AuthMode = "signup" | "login";
 
+/** Auto-cancel if the browser tab is closed and no deep link arrives. */
+const OAUTH_WAIT_TIMEOUT_MS = 3 * 60 * 1000;
+
 const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
   const [step, setStep] = useState<OnboardingStep>(initialStep);
   const [authMode, setAuthMode] = useState<AuthMode>("signup");
@@ -36,11 +42,54 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [oauthPending, setOauthPending] = useState(false);
+  const [oauthStarting, setOauthStarting] = useState(false);
+
+  const clearOAuthWait = useCallback((message?: string) => {
+    setOauthPending(false);
+    setOauthStarting(false);
+    if (message) {
+      setError(message);
+    }
+  }, []);
 
   const finishAuth = useCallback(async () => {
     await setSessionState(SessionState.IDLE);
     onComplete();
   }, [onComplete]);
+
+  useEffect(() => {
+    let active = true;
+    const unsubs: Array<Promise<() => void>> = [
+      onAuthOAuthComplete(() => {
+        if (!active) return;
+        setOauthPending(false);
+        setSubmitting(false);
+        void finishAuth();
+      }),
+      onAuthOAuthError(({ message }) => {
+        if (!active) return;
+        setOauthPending(false);
+        setSubmitting(false);
+        setError(message);
+      }),
+    ];
+
+    return () => {
+      active = false;
+      void Promise.all(unsubs).then((fns) => fns.forEach((fn) => fn()));
+    };
+  }, [finishAuth]);
+
+  useEffect(() => {
+    if (!oauthPending) return;
+    const timeoutId = window.setTimeout(() => {
+      void cancelGoogleOAuth().catch(() => {
+        clearOAuthWait("Google sign-in timed out. Try again or use email below.");
+      });
+    }, OAUTH_WAIT_TIMEOUT_MS);
+    return () => window.clearTimeout(timeoutId);
+  }, [oauthPending, clearOAuthWait]);
 
   const handleAcceptConsent = async () => {
     setError(null);
@@ -78,6 +127,34 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setError(null);
+    setOauthStarting(true);
+    try {
+      await startGoogleOAuth();
+      setOauthPending(true);
+    } catch (err) {
+      clearOAuthWait(
+        err instanceof Error ? err.message : "Could not start Google sign-in. Please try again.",
+      );
+    } finally {
+      setOauthStarting(false);
+    }
+  };
+
+  const handleCancelGoogleOAuth = () => {
+    void cancelGoogleOAuth().catch((err: unknown) => {
+      clearOAuthWait(
+        err instanceof Error ? err.message : "Could not cancel Google sign-in.",
+      );
+    });
+  };
+
+  const resetAuthFormState = () => {
+    setError(null);
+    clearOAuthWait();
   };
 
   if (step === "legal") {
@@ -129,6 +206,30 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
         <h1 className="onboarding-title">Welcome to Flint</h1>
         <p className="onboarding-subtitle">Create an account or sign in to continue.</p>
 
+        <button
+          type="button"
+          className="btn-google"
+          disabled={oauthStarting || oauthPending}
+          onClick={() => void handleGoogleSignIn()}
+          data-testid="google-sign-in-button"
+        >
+          {oauthPending ? "Waiting for Google…" : "Continue with Google"}
+        </button>
+        {oauthPending ? (
+          <button
+            type="button"
+            className="btn-oauth-cancel"
+            onClick={handleCancelGoogleOAuth}
+            data-testid="google-sign-in-cancel"
+          >
+            Cancel Google sign-in
+          </button>
+        ) : null}
+
+        <div className="auth-divider" aria-hidden="true">
+          <span>or</span>
+        </div>
+
         <div className="auth-tabs" role="tablist">
           <button
             type="button"
@@ -137,7 +238,7 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
             className={`auth-tab ${authMode === "signup" ? "active" : ""}`}
             onClick={() => {
               setAuthMode("signup");
-              setError(null);
+              resetAuthFormState();
             }}
           >
             Sign up
@@ -149,7 +250,7 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
             className={`auth-tab ${authMode === "login" ? "active" : ""}`}
             onClick={() => {
               setAuthMode("login");
-              setError(null);
+              resetAuthFormState();
             }}
           >
             Log in
@@ -166,6 +267,7 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
+              disabled={submitting || oauthStarting}
             />
           </div>
           <div className="field">
@@ -177,6 +279,7 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
+              disabled={submitting || oauthStarting}
             />
           </div>
           {authMode === "signup" ? (
@@ -189,6 +292,7 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
                 required
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
+                disabled={submitting || oauthStarting}
               />
             </div>
           ) : null}
@@ -197,8 +301,12 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
               {error}
             </p>
           ) : null}
-          <button type="submit" className="btn-primary" disabled={submitting}>
-            {submitting ? "Please wait…" : authMode === "signup" ? "Create account" : "Log in"}
+          <button type="submit" className="btn-primary" disabled={submitting || oauthStarting}>
+            {submitting && !oauthPending
+              ? "Please wait…"
+              : authMode === "signup"
+                ? "Create account"
+                : "Log in"}
           </button>
         </form>
       </div>

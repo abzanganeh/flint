@@ -213,6 +213,22 @@ pub fn emit_session_state_change<R: Runtime>(
     let _ = app.emit("session_state_change", payload);
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthOAuthCompletePayload {}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthOAuthErrorPayload {
+    pub message: String,
+}
+
+pub fn emit_auth_oauth_complete<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit("auth_oauth_complete", AuthOAuthCompletePayload {});
+}
+
+pub fn emit_auth_oauth_error<R: Runtime>(app: &AppHandle<R>, payload: AuthOAuthErrorPayload) {
+    let _ = app.emit("auth_oauth_error", payload);
+}
+
 pub fn emit_context_truncated<R: Runtime>(app: &AppHandle<R>, payload: ContextTruncatedPayload) {
     let _ = app.emit("context_truncated", payload);
 }
@@ -228,6 +244,12 @@ pub struct MockQuestionStartedPayload {
     pub total_questions: u32,
     /// `"practice"` or `"study"` — controls suggested-answer visibility in the UI.
     pub mode: String,
+}
+
+/// Emitted after TTS finishes (or is skipped) — UI may enable the mic.
+#[derive(Debug, Clone, Serialize)]
+pub struct MockQuestionSpokenPayload {
+    pub turn_n: u32,
 }
 
 /// Emitted when the user's mic VAD chunk has been transcribed.
@@ -266,6 +288,13 @@ pub fn emit_mock_question_started<R: Runtime>(
     payload: MockQuestionStartedPayload,
 ) {
     let _ = app.emit("mock_question_started", payload);
+}
+
+pub fn emit_mock_question_spoken<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: MockQuestionSpokenPayload,
+) {
+    let _ = app.emit("mock_question_spoken", payload);
 }
 
 pub fn emit_mock_user_transcribed<R: Runtime>(

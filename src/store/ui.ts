@@ -26,6 +26,8 @@ interface UIStore extends UIState {
   appendDirectionalToken: (token: string) => void;
   appendDepthToken: (token: string) => void;
   clearStreamingBuffers: () => void;
+  /** Clear panel content when entering LIVE so rehearsal answers do not carry over. */
+  resetOrchestratorPanels: () => void;
   /** Turn boundary: archive the current card into history and start fresh. */
   startTurn: (question: string, turn: number) => void;
   setConfidenceLevel: (level: ConfidenceLevel | null) => void;
@@ -200,6 +202,19 @@ export const useUIStore = create<UIStore>((set) => ({
       depthPrePrepared: false,
     }),
 
+  resetOrchestratorPanels: () =>
+    set({
+      streamingBuffers: { directional: "", depth: "" },
+      depthPrePrepared: false,
+      clarifyingQuestions: [],
+      confidenceLevel: null,
+      answerNowMode: false,
+      currentQuestion: "",
+      turnHistory: [],
+      lastManualQuestion: "",
+      ragChunks: [],
+    }),
+
   startTurn: (question, turn) =>
     set((s) => {
       const hasContent =
@@ -228,7 +243,7 @@ export const useUIStore = create<UIStore>((set) => ({
         confidenceLevel: null,
         depthPrePrepared: false,
         clarifyingQuestions: [],
-        answerNowMode: false,
+        answerNowMode: s.answerNowMode,
       };
     }),
 

@@ -10,6 +10,13 @@ vi.mock("../commands", () => ({
   signup: vi.fn(),
   login: vi.fn(),
   setSessionState: vi.fn().mockResolvedValue(undefined),
+  startGoogleOAuth: vi.fn().mockResolvedValue(undefined),
+  cancelGoogleOAuth: vi.fn().mockResolvedValue(undefined),
+}));
+
+vi.mock("../events", () => ({
+  onAuthOAuthComplete: vi.fn().mockResolvedValue(() => undefined),
+  onAuthOAuthError: vi.fn().mockResolvedValue(() => undefined),
 }));
 
 describe("Onboarding legal consent", () => {
@@ -25,5 +32,25 @@ describe("Onboarding legal consent", () => {
 
     fireEvent.click(screen.getByTestId("legal-consent-checkbox"));
     expect((continueButton as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("Onboarding Google OAuth", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows cancel while waiting for Google and calls cancel_google_oauth", async () => {
+    const { startGoogleOAuth, cancelGoogleOAuth } = await import("../commands");
+    render(<Onboarding initialStep="auth" onComplete={() => undefined} />);
+
+    fireEvent.click(screen.getByTestId("google-sign-in-button"));
+    expect(await screen.findByText("Waiting for Google…")).toBeTruthy();
+
+    const cancelButton = screen.getByTestId("google-sign-in-cancel");
+    fireEvent.click(cancelButton);
+
+    expect(startGoogleOAuth).toHaveBeenCalledTimes(1);
+    expect(cancelGoogleOAuth).toHaveBeenCalledTimes(1);
   });
 });

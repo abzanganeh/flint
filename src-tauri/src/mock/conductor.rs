@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -21,7 +22,8 @@ use uuid::Uuid;
 
 use crate::digest::Digest;
 use crate::events::{
-    emit_mock_ended, emit_mock_question_started, emit_mock_suggested_token, MockEndedPayload,
+    emit_mock_ended, emit_mock_question_spoken, emit_mock_question_started,
+    emit_mock_suggested_token, MockEndedPayload, MockQuestionSpokenPayload,
     MockQuestionStartedPayload, MockSuggestedTokenPayload,
 };
 use crate::interfaces::vector::VectorInterface;
@@ -30,7 +32,8 @@ use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 use crate::orchestrator::load_prompt;
 use crate::rag::embedder::Embedder;
-use crate::session::persistence::{MockTurn, SessionPersistence};
+use crate::session::persistence::SessionPersistence;
+use crate::session::shuffle::{session_shuffle_seed, shuffle_strings};
 
 use super::rag::{format_digest_context, query_mock_rag};
 use super::tts;
@@ -110,6 +113,8 @@ impl Conductor {
         suggested_buffer: Arc<RwLock<String>>,
         pace: MockPace,
         mode: MockMode,
+        shuffle: bool,
+        active_turn_n: Arc<AtomicU32>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConductorCommand>(8);
         tokio::spawn(conductor_loop(
@@ -126,6 +131,8 @@ impl Conductor {
             suggested_buffer,
             pace,
             mode,
+            shuffle,
+            active_turn_n,
             cmd_rx,
         ));
         Self { cmd_tx }
@@ -152,9 +159,38 @@ async fn conductor_loop<R: Runtime>(
     suggested_buffer: Arc<RwLock<String>>,
     pace: MockPace,
     mode: MockMode,
+    shuffle: bool,
+    active_turn_n: Arc<AtomicU32>,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
-    let base_questions: Vec<String> = digest.likely_questions.clone();
+    let mut base_questions: Vec<String> = digest
+        .likely_questions
+        .iter()
+        .filter(|q| !persistence.is_question_satisfied(session_id, q))
+        .cloned()
+        .collect();
+    if base_questions.is_empty() && !digest.likely_questions.is_empty() {
+        info!(
+            session_id = %session_id,
+            "all digest questions already practiced satisfactorily — ending mock"
+        );
+        emit_mock_ended(
+            &app,
+            MockEndedPayload {
+                session_id: session_id.to_string(),
+                turns_completed: 0,
+            },
+        );
+        return;
+    }
+    if shuffle && base_questions.len() > 1 {
+        shuffle_strings(&mut base_questions, session_shuffle_seed(session_id));
+        info!(
+            session_id = %session_id,
+            count = base_questions.len(),
+            "mock question order shuffled"
+        );
+    }
     // Follow-ups generated async during each turn; collected into a queue after the
     // scripted questions are exhausted.
     let mut followup_handles: Vec<JoinHandle<Option<String>>> = Vec::new();
@@ -210,20 +246,15 @@ async fn conductor_loop<R: Runtime>(
         )
         .await;
 
-        let turn = MockTurn {
-            id: Uuid::new_v4(),
-            session_id,
-            turn_n,
-            question: question.clone(),
-            user_text: String::new(),
-            audio_path: String::new(),
-            coach_json: String::new(),
-            suggested: String::new(),
-            score: 0,
+        let turn_id = match persistence.begin_mock_turn(session_id, turn_n, &question) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(error = %e, "failed to persist mock turn row");
+                Uuid::new_v4()
+            }
         };
-        if let Err(e) = persistence.write_mock_turn(&turn) {
-            warn!(error = %e, "failed to persist mock turn row");
-        }
+
+        active_turn_n.store(turn_n, Ordering::SeqCst);
 
         emit_mock_question_started(
             &app,
@@ -235,8 +266,6 @@ async fn conductor_loop<R: Runtime>(
             },
         );
         info!(session_id = %session_id, turn_n, mode = mode.as_str(), "mock question started");
-
-        tts::speak_best_effort(&question).await;
 
         let suggested_handle = {
             let app_clone = app.clone();
@@ -263,7 +292,23 @@ async fn conductor_loop<R: Runtime>(
             })
         };
 
-        let cmd = cmd_rx.recv().await;
+        let mut cmd = None;
+        tokio::select! {
+            c = cmd_rx.recv() => {
+                tts::stop_active().await;
+                cmd = c;
+            }
+            _ = async {
+                tts::speak_best_effort(&question).await;
+                emit_mock_question_spoken(
+                    &app,
+                    MockQuestionSpokenPayload { turn_n },
+                );
+            } => {}
+        }
+        if cmd.is_none() {
+            cmd = cmd_rx.recv().await;
+        }
         let suggested_text = suggested_handle.await.unwrap_or_default();
 
         match cmd {
@@ -272,7 +317,7 @@ async fn conductor_loop<R: Runtime>(
                 audio_path,
             }) => {
                 if let Err(e) = persistence.update_mock_turn_user_answer(
-                    turn.id,
+                    turn_id,
                     &user_text,
                     &audio_path,
                     &suggested_text,
@@ -397,8 +442,7 @@ async fn generate_follow_up<R: Runtime>(
 
     let cleaned = text.trim().trim_matches('"').trim().to_string();
 
-    // Must look like a plausible question: non-empty, reasonable length, ends with '?'.
-    if cleaned.is_empty() || cleaned.len() > 200 || !cleaned.ends_with('?') {
+    if !generate_follow_up_validate(&cleaned) {
         return Ok(None);
     }
 
@@ -514,4 +558,22 @@ fn build_suggested_prompt(
         .replace("{last_n_turns}", "")
         .replace("{question}", question);
     Ok(prompt)
+}
+
+/// Extracted validation for follow-up LLM output (unit-tested).
+fn generate_follow_up_validate(cleaned: &str) -> bool {
+    !cleaned.is_empty() && cleaned.len() <= 200 && cleaned.ends_with('?')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn follow_up_rejects_non_questions() {
+        assert!(generate_follow_up_validate("Tell me more?"));
+        assert!(!generate_follow_up_validate(""));
+        assert!(!generate_follow_up_validate("not a question"));
+        assert!(!generate_follow_up_validate(&"x".repeat(201)));
+    }
 }

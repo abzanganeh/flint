@@ -6,13 +6,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}/src-tauri"
 
 SUMMARY="$(cargo llvm-cov test --lib --tests --summary-only 2>&1)"
-echo "${SUMMARY}" | tail -30
+tail -30 <<< "${SUMMARY}"
 
 check_module_floor() {
   local module="$1"
   local floor="$2"
   local pct
-  pct="$(echo "${SUMMARY}" | awk -v m="${module}" '$1 == m { gsub(/%/, "", $4); print $4; exit }')"
+  # Use here-string — piping huge SUMMARY to awk triggers SIGPIPE under pipefail.
+  pct="$(awk -v m="${module}" '$1 == m { gsub(/%/, "", $4); print $4; exit }' <<< "${SUMMARY}")"
   if [[ -z "${pct}" ]]; then
     echo "coverage gate: module ${module} not found in llvm-cov summary" >&2
     exit 1
@@ -34,7 +35,7 @@ check_module_floor "rag/retriever.rs" 10
 check_module_floor "orchestrator/prewarm.rs" 10
 
 # Repo-wide regression guard (~53% today with lib + integration tests)
-TOTAL_PCT="$(echo "${SUMMARY}" | awk '/^TOTAL/ { gsub(/%/, "", $4); print $4; exit }')"
+TOTAL_PCT="$(awk '/^TOTAL/ { gsub(/%/, "", $4); print $4; exit }' <<< "${SUMMARY}")"
 awk -v p="${TOTAL_PCT}" 'BEGIN { if (p+0 < 50) exit 1 }' || {
   echo "coverage gate FAIL: TOTAL ${TOTAL_PCT}% < 50% repo floor" >&2
   exit 1

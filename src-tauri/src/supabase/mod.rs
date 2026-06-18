@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod oauth;
 pub mod session;
 
 pub use auth::SupabaseAuth;

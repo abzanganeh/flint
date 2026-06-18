@@ -8,6 +8,7 @@ import {
   getSessionContextFields,
   listSessions,
   promoteSession,
+  type SessionContextFields,
 } from "../commands";
 import type { SessionPreFill } from "./SessionDesign";
 import "./SessionList.css";
@@ -21,7 +22,11 @@ interface Props {
   /** Called when user clicks Resume for the active in-progress session. */
   onResumeSession?: (sessionId: string, sessionState: string) => void;
   /** Reopen a past session with the same id (fields, digest, question bank). */
-  onReopenSession?: (sessionId: string) => void;
+  onReopenSession?: (sessionId: string) => void | Promise<void>;
+}
+
+function hasStructuredFields(fields: SessionContextFields): boolean {
+  return Object.values(fields).some((value) => value.trim().length > 0);
 }
 
 function digestToContextText(digest: DigestDto): string {
@@ -95,6 +100,7 @@ export const SessionList: React.FC<Props> = ({
   const [actionInFlight, setActionInFlight] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cloning, setCloning] = useState<string | null>(null);
+  const [reopening, setReopening] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -148,7 +154,7 @@ export const SessionList: React.FC<Props> = ({
 
     try {
       const fields = await getSessionContextFields(session.id);
-      if (fields.jobDescription.trim().length > 0) {
+      if (hasStructuredFields(fields)) {
         onStartSimilar({ ...base, contextFields: fields });
         return;
       }
@@ -170,6 +176,22 @@ export const SessionList: React.FC<Props> = ({
       setCloning(null);
     }
   }, [onStartSimilar]);
+
+  const handleReopen = useCallback(
+    async (session: SessionSummaryDto) => {
+      if (!onReopenSession) return;
+      setReopening(session.id);
+      setError(null);
+      try {
+        await onReopenSession(session.id);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setReopening(null);
+      }
+    },
+    [onReopenSession],
+  );
 
   const handleDelete = useCallback(async (id: string) => {
     setActionInFlight(id + ":delete");
@@ -251,17 +273,6 @@ export const SessionList: React.FC<Props> = ({
                 </div>
 
                 <div className="sl-actions" onClick={(e) => e.stopPropagation()}>
-                  {isSelected && onReopenSession && REOPEN_STATES.has(session.state) && (
-                    <button
-                      className="sl-action-btn sl-action-btn--resume"
-                      onClick={() => onReopenSession(session.id)}
-                      disabled={busy}
-                      type="button"
-                      title="Restore this session with all fields and questions"
-                    >
-                      Reopen
-                    </button>
-                  )}
                   {isSelected && onResumeSession && activeSessionId === session.id && IN_PROGRESS_STATES.has(session.state) && (
                     <button
                       className="sl-action-btn sl-action-btn--resume"
@@ -271,6 +282,17 @@ export const SessionList: React.FC<Props> = ({
                       title="Return to your current in-progress session"
                     >
                       Resume
+                    </button>
+                  )}
+                  {isSelected && onReopenSession && REOPEN_STATES.has(session.state) && (
+                    <button
+                      className="sl-action-btn sl-action-btn--resume"
+                      onClick={() => void handleReopen(session)}
+                      disabled={busy || reopening === session.id}
+                      type="button"
+                      title="Restore this session with all fields and questions"
+                    >
+                      {reopening === session.id ? "Opening…" : "Reopen"}
                     </button>
                   )}
                   {isSelected && onStartSimilar && (
@@ -319,7 +341,8 @@ export const SessionList: React.FC<Props> = ({
 
         {sessions.length > 0 && (
           <p className="sl-footer-note">
-            Sessions are kept for 30 days. Pin a session to exempt it from automatic deletion.
+            Click a session to reveal actions. Sessions are kept for 30 days. Pin a session to
+            exempt it from automatic deletion.
           </p>
         )}
       </main>

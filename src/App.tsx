@@ -498,14 +498,13 @@ function App() {
               setScreen(screenForDraftState(resumeState));
             }
           }}
-          onReopenSession={(id) => {
-            void reopenSession(id)
-              .then((snapshot) => {
-                applyDraftSnapshot(snapshot, setSessionId, setSessionPreFill, setScreen);
-              })
-              .catch((err: unknown) => {
-                setImportError(String(err));
-              });
+          onReopenSession={async (id) => {
+            try {
+              const snapshot = await reopenSession(id);
+              applyDraftSnapshot(snapshot, setSessionId, setSessionPreFill, setScreen);
+            } catch (err: unknown) {
+              setImportError(String(err));
+            }
           }}
           onStartSimilar={(preFill) => {
             void (async () => {
@@ -529,6 +528,10 @@ function App() {
         <Settings
           initialTab={settingsInitialTab}
           onBack={() => setScreen(settingsReturnScreen)}
+          onLoggedOut={() => {
+            setOnboardingStep("auth");
+            setScreen("onboarding");
+          }}
         />
       </Shell>
     );

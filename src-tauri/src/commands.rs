@@ -1,11 +1,11 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as AnyhowContext;
 use secrecy::{ExposeSecret, SecretString};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::mock::rag::query_mock_rag;
+use crate::mock::tts;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
 use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
 use crate::rag::chunker::chunk_text;
@@ -206,6 +207,113 @@ pub async fn get_current_user(state: State<'_, AppState>) -> Result<UserDto, Str
         .await
         .map_err(map_user_error)?;
     Ok(UserDto::from(user))
+}
+
+/// Open the system browser to start Google OAuth (PKCE + `flint://auth/callback`).
+#[tauri::command]
+pub async fn start_google_oauth(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+
+    let (verifier, challenge) = crate::supabase::oauth::generate_pkce_pair();
+    keychain::store_oauth_code_verifier(&verifier).map_err(|_| KEYCHAIN_SAVE_ERROR.to_string())?;
+    let url = state.supabase_auth.google_authorize_url(&challenge);
+    app.opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|_| "Could not open your browser for Google sign-in.".to_string())?;
+    Ok(())
+}
+
+/// Abort a pending Google OAuth flow started by [`start_google_oauth`].
+///
+/// Google has no server-side "cancel" API for an in-flight browser consent page.
+/// We invalidate the local PKCE verifier so a late `flint://` callback cannot
+/// complete, and emit `auth_oauth_error` so the UI leaves the waiting state.
+#[tauri::command]
+pub async fn cancel_google_oauth(app: AppHandle) -> Result<(), String> {
+    use crate::events::{emit_auth_oauth_error, AuthOAuthErrorPayload};
+
+    keychain::clear_oauth_code_verifier();
+    emit_auth_oauth_error(
+        &app,
+        AuthOAuthErrorPayload {
+            message: "Google sign-in was cancelled. Try again or use email below.".to_string(),
+        },
+    );
+    Ok(())
+}
+
+/// Handle `flint://auth/callback` from the browser redirect (deep link / argv).
+pub async fn process_oauth_callback_url<R: Runtime>(app: &AppHandle<R>, url: &str) -> bool {
+    use crate::events::{emit_auth_oauth_complete, emit_auth_oauth_error, AuthOAuthErrorPayload};
+    use crate::supabase::oauth::{parse_auth_callback, tokens_to_auth_token, AuthCallback};
+
+    let Some(callback) = parse_auth_callback(url) else {
+        return false;
+    };
+
+    let Some(state) = app.try_state::<AppState>() else {
+        return true;
+    };
+
+    match callback {
+        AuthCallback::Error { message } => {
+            emit_auth_oauth_error(app, AuthOAuthErrorPayload { message });
+        }
+        AuthCallback::Tokens(tokens) => {
+            let token = tokens_to_auth_token(&tokens);
+            if persist_auth_token(&state, token).await.is_ok() {
+                emit_auth_oauth_complete(app);
+            } else {
+                emit_auth_oauth_error(
+                    app,
+                    AuthOAuthErrorPayload {
+                        message: KEYCHAIN_SAVE_ERROR.to_string(),
+                    },
+                );
+            }
+        }
+        AuthCallback::Code(code) => {
+            let verifier = match keychain::take_oauth_code_verifier() {
+                Ok(Some(v)) => v,
+                _ => {
+                    emit_auth_oauth_error(
+                        app,
+                        AuthOAuthErrorPayload {
+                            message: "OAuth session expired. Please try again.".to_string(),
+                        },
+                    );
+                    return true;
+                }
+            };
+            match state
+                .supabase_auth
+                .exchange_pkce_code(&code.code, &verifier)
+                .await
+            {
+                Ok(token) => {
+                    if persist_auth_token(&state, token).await.is_ok() {
+                        emit_auth_oauth_complete(app);
+                    } else {
+                        emit_auth_oauth_error(
+                            app,
+                            AuthOAuthErrorPayload {
+                                message: KEYCHAIN_SAVE_ERROR.to_string(),
+                            },
+                        );
+                    }
+                }
+                Err(e) => {
+                    emit_auth_oauth_error(
+                        app,
+                        AuthOAuthErrorPayload {
+                            message: map_user_error(e),
+                        },
+                    );
+                }
+            }
+        }
+    }
+    true
 }
 
 #[tauri::command]
@@ -954,10 +1062,18 @@ pub async fn confirm_digest(
     let embedder = state.require_embedder()?;
     let cache = Arc::clone(&state.prewarm_cache);
 
-    if let Err(e) = run_prewarm(&digest_rust, llm, embedder, cache).await {
-        // Pre-warm failures are non-fatal — the session can still proceed
-        // without cached responses.
-        warn!(session_id = %sid, error = %e, "pre-warm failed; continuing without cache");
+    if crate::digest::digest_is_prewarm_eligible(&digest_rust) {
+        if let Err(e) = run_prewarm(&digest_rust, llm, embedder, cache).await {
+            // Pre-warm failures are non-fatal — the session can still proceed
+            // without cached responses.
+            warn!(session_id = %sid, error = %e, "pre-warm failed; continuing without cache");
+        }
+    } else {
+        cache.lock().await.clear();
+        warn!(
+            session_id = %sid,
+            "digest has placeholder role/company or empty skills — pre-warm skipped"
+        );
     }
 
     // Transition → REHEARSING.
@@ -1237,6 +1353,69 @@ pub async fn get_session_snapshot(
             .as_ref()
             .map(|m| SessionContextFieldsDto::from(m.context_fields.clone())),
     })
+}
+
+/// Reopen a completed (ENDED) session at Rehearsal with its digest and question bank intact.
+#[tauri::command]
+pub async fn reopen_past_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionSnapshotDto, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+
+    let meta = state
+        .persistence
+        .get_session_metadata(sid)
+        .map_err(|e| e.to_string())?;
+
+    if meta.state != SessionState::Ended {
+        return Err(format!(
+            "Only ended sessions can be reopened (current: {})",
+            meta.state
+        ));
+    }
+
+    {
+        let machine = state.state_machine.lock().await;
+        let current = *machine.current();
+        if matches!(
+            current,
+            SessionState::Live | SessionState::Ending | SessionState::MockInterview
+        ) {
+            return Err(format!(
+                "Stop the active {} session before reopening a past session.",
+                current
+            ));
+        }
+    }
+
+    if let Some(digest) = state
+        .persistence
+        .load_session_digest(sid)
+        .map_err(|e| e.to_string())?
+    {
+        *state.session_digest.write().await = Some(digest);
+    } else {
+        *state.session_digest.write().await = None;
+    }
+    *state.prewarm_cache.lock().await = PreWarmCache::new();
+    *state.rehearsal_turn.lock().await = 0;
+    *state.session_memory.lock().await = None;
+
+    state
+        .persistence
+        .write_state_transition(sid, &SessionState::Rehearsing)
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine.restore_state_for_recovery(SessionState::Rehearsing, sid);
+    }
+
+    emit_state(&app, SessionState::Rehearsing);
+
+    get_session_snapshot(state).await
 }
 
 /// Re-anchor the state machine to the most recent pre-live draft in SQLite.
@@ -1755,39 +1934,81 @@ fn extract_qa_pairs_from_text(text: &str) -> Vec<String> {
 pub async fn get_question_bank(
     state: State<'_, AppState>,
     session_id: String,
-) -> Result<Vec<String>, String> {
-    let sid = validate_session_id(&state, &session_id).await?;
+    shuffle: Option<bool>,
+) -> Result<Vec<crate::dto::QuestionBankEntryDto>, String> {
+    use crate::session::question_attempts::normalize_question_key;
+    use std::collections::HashMap;
 
-    let persisted = state
+    let sid = validate_session_id(&state, &session_id).await?;
+    let shuffle = shuffle.unwrap_or(false);
+
+    let mut bank = state
         .persistence
         .load_question_bank(sid)
         .map_err(|e| e.to_string())?;
 
-    if !persisted.is_empty() {
-        return Ok(persisted);
-    }
-
-    // First call: seed from the persisted digest for this specific session.
-    // We intentionally query SQLite rather than the in-memory `session_digest`
-    // to guarantee the seed belongs to `sid` — the in-memory value is a shared
-    // mutable slot that may still hold a previous session's data at the moment
-    // `get_question_bank` is first called.
-    let seed: Vec<String> = state
-        .persistence
-        .load_session_digest(sid)
-        .ok()
-        .flatten()
-        .map(|d| d.likely_questions)
-        .unwrap_or_default();
-
-    if !seed.is_empty() {
-        state
+    if bank.is_empty() {
+        bank = state
             .persistence
-            .store_question_bank(sid, &seed)
-            .map_err(|e| e.to_string())?;
+            .load_session_digest(sid)
+            .ok()
+            .flatten()
+            .map(|d| d.likely_questions)
+            .unwrap_or_default();
+
+        if !bank.is_empty() {
+            state
+                .persistence
+                .store_question_bank(sid, &bank)
+                .map_err(|e| e.to_string())?;
+        }
     }
 
-    Ok(seed)
+    let attempts = state
+        .persistence
+        .load_question_attempts(sid)
+        .map_err(|e| e.to_string())?;
+
+    let entries: Vec<crate::dto::QuestionBankEntryDto> = bank
+        .iter()
+        .map(|q| {
+            let key = normalize_question_key(q);
+            if let Some(a) = attempts.get(&key) {
+                crate::dto::QuestionBankEntryDto {
+                    question: q.clone(),
+                    satisfied: a.satisfied,
+                    confidence_score: a.confidence_score,
+                    coach_score: a.coach_score,
+                    last_source: Some(a.last_source.clone()),
+                }
+            } else {
+                crate::dto::QuestionBankEntryDto {
+                    question: q.clone(),
+                    satisfied: false,
+                    confidence_score: 0.0,
+                    coach_score: 0,
+                    last_source: None,
+                }
+            }
+        })
+        .collect();
+
+    let (mut pending, completed): (Vec<_>, Vec<_>) =
+        entries.into_iter().partition(|e| !e.satisfied);
+
+    if shuffle && pending.len() > 1 {
+        let mut order: Vec<String> = pending.iter().map(|e| e.question.clone()).collect();
+        crate::session::shuffle::shuffle_strings(
+            &mut order,
+            crate::session::shuffle::session_shuffle_seed(sid),
+        );
+        let rank: HashMap<String, usize> =
+            order.into_iter().enumerate().map(|(i, q)| (q, i)).collect();
+        pending.sort_by_key(|e| rank.get(&e.question).copied().unwrap_or(0));
+    }
+
+    pending.extend(completed);
+    Ok(pending)
 }
 
 /// Add a question to the session question bank (dedup by lowercase trim).
@@ -2477,27 +2698,38 @@ pub async fn trigger_response(
     Ok(())
 }
 
-/// Cancel any running inference — valid only from LIVE.
+/// Cancel any running inference — valid from LIVE or REHEARSING.
 ///
 /// Sets the active turn's cancellation flag so in-flight token streams stop.
 #[tauri::command]
 pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> {
-    {
+    let current = {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Live {
-            return Err(format!(
-                "cancel_inference is only valid from LIVE (current: {})",
-                machine.current()
-            ));
-        }
-    }
+        *machine.current()
+    };
 
-    let guard = state.live_tasks.lock().await;
-    if let Some(handles) = guard.as_ref() {
-        let slot = handles.turn_cancel.lock().await;
-        if let Some(flag) = slot.as_ref() {
-            flag.store(true, std::sync::atomic::Ordering::Release);
-            info!("cancel_inference: active turn cancelled");
+    match current {
+        SessionState::Live => {
+            let guard = state.live_tasks.lock().await;
+            if let Some(handles) = guard.as_ref() {
+                let slot = handles.turn_cancel.lock().await;
+                if let Some(flag) = slot.as_ref() {
+                    flag.store(true, std::sync::atomic::Ordering::Release);
+                    info!("cancel_inference: live turn cancelled");
+                }
+            }
+        }
+        SessionState::Rehearsing => {
+            let slot = state.rehearsal_turn_cancel.lock().await;
+            if let Some(flag) = slot.as_ref() {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                info!("cancel_inference: rehearsal turn cancelled");
+            }
+        }
+        other => {
+            return Err(format!(
+                "cancel_inference is only valid from LIVE or REHEARSING (current: {other})"
+            ));
         }
     }
 
@@ -2505,29 +2737,23 @@ pub async fn cancel_inference(state: State<'_, AppState>) -> Result<(), String> 
 }
 
 /// Toggle overlay visibility (panic hotkey path).
+///
+/// Hides panel content via `overlay_visibility` only — does not close the window,
+/// so the restore chord still works on Wayland.
 #[tauri::command]
-pub async fn panic_hide_overlay(app: AppHandle) -> Result<bool, String> {
+pub async fn panic_hide_overlay(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
     use crate::events::{emit_overlay_visibility, OverlayVisibilityPayload};
 
-    if let Some(window) = app.get_webview_window("main") {
-        let visible = window.is_visible().unwrap_or(true);
-        if visible {
-            window
-                .hide()
-                .map_err(|e| format!("Failed to hide overlay: {e}"))?;
-            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: true });
-            Ok(true)
-        } else {
-            window
-                .show()
-                .map_err(|e| format!("Failed to show overlay: {e}"))?;
-            let _ = window.set_focus();
-            emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: false });
-            Ok(false)
-        }
-    } else {
-        Ok(false)
-    }
+    let mut hidden = state
+        .overlay_panic_hidden
+        .lock()
+        .map_err(|e| format!("overlay_panic_hidden lock poisoned: {e}"))?;
+    *hidden = !*hidden;
+    emit_overlay_visibility(&app, OverlayVisibilityPayload { hidden: *hidden });
+    Ok(*hidden)
 }
 
 /// Switch the active LLM provider.
@@ -3058,6 +3284,42 @@ pub async fn get_feature_flags_snapshot(
 // Phase 8 — Mock Interview commands
 // ──────────────────────────────────────────────────────────────────────────────
 
+fn mock_audio_dir(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_data_dir()
+        .map(|d| d.join("mock_audio"))
+        .unwrap_or_else(|_| PathBuf::from("mock_audio"))
+}
+
+fn validate_mock_audio_path(app: &AppHandle, path: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("mock audio path must be absolute".to_string());
+    }
+    let audio_dir = mock_audio_dir(app);
+    let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+    let dir_canonical = audio_dir
+        .canonicalize()
+        .unwrap_or_else(|_| audio_dir.clone());
+    if !canonical.starts_with(&dir_canonical) {
+        return Err("mock audio path is outside the session audio directory".to_string());
+    }
+    Ok(canonical)
+}
+
+async fn signal_mock_turn_complete(state: &AppState, user_text: String, audio_path: String) {
+    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+        let _ = handles
+            .conductor
+            .cmd_tx
+            .send(ConductorCommand::TurnComplete {
+                user_text,
+                audio_path,
+            })
+            .await;
+    }
+}
+
 /// Transition to MOCK_INTERVIEW and start the conductor + mic capture loop.
 ///
 /// Valid from: `REHEARSING` or `READY`.
@@ -3079,8 +3341,10 @@ pub async fn start_mock(
     state: State<'_, AppState>,
     guided: Option<bool>,
     mode: Option<String>,
+    shuffle: Option<bool>,
 ) -> Result<(), String> {
     let guided = guided.unwrap_or(false);
+    let shuffle = shuffle.unwrap_or(false);
     let mock_mode = MockMode::parse(mode.as_deref().unwrap_or("practice"));
     let pace = if guided {
         MockPace::Guided
@@ -3110,6 +3374,13 @@ pub async fn start_mock(
         machine.session_id().ok_or("no active session")?
     };
 
+    // Each mock run starts fresh — drop turns and WAV files from prior runs on
+    // this session so End & review only reflects the current interview.
+    state
+        .persistence
+        .delete_mock_turns(session_id)
+        .map_err(|e| e.to_string())?;
+
     let digest = state
         .session_digest
         .read()
@@ -3130,11 +3401,7 @@ pub async fn start_mock(
     let suggested_buffer = Arc::new(std::sync::RwLock::new(String::new()));
 
     // Create audio directory.
-    let audio_dir = app
-        .path()
-        .app_data_dir()
-        .map(|d| d.join("mock_audio"))
-        .unwrap_or_else(|_| PathBuf::from("mock_audio"));
+    let audio_dir = mock_audio_dir(&app);
     std::fs::create_dir_all(&audio_dir).map_err(|e| e.to_string())?;
 
     // Initialise WhisperEngine.
@@ -3154,6 +3421,9 @@ pub async fn start_mock(
 
     let role_packs = packs_for_role(&digest.domain, &digest.role);
 
+    let active_turn_n = Arc::new(AtomicU32::new(0));
+    let mic_recording = Arc::new(AtomicBool::new(false));
+
     let conductor = Conductor::start(
         app.clone(),
         session_id,
@@ -3168,6 +3438,8 @@ pub async fn start_mock(
         Arc::clone(&suggested_buffer),
         pace,
         mock_mode,
+        shuffle,
+        Arc::clone(&active_turn_n),
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -3182,7 +3454,8 @@ pub async fn start_mock(
     *state.mock_tasks.lock().await = Some(MockTaskHandles {
         conductor,
         mic_capture,
-        current_turn: 0,
+        active_turn_n,
+        mic_recording,
         guided,
         mode: mock_mode,
         suggested_text: suggested_buffer,
@@ -3192,6 +3465,7 @@ pub async fn start_mock(
     info!(
         session_id = %session_id,
         guided,
+        shuffle,
         mode = mock_mode.as_str(),
         "mock interview started"
     );
@@ -3219,15 +3493,19 @@ pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String>
 /// Call after the frontend has confirmed the AI question has been spoken.
 #[tauri::command]
 pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.mock_tasks.lock().await;
-    let handles = guard.as_mut().ok_or("no active mock session")?;
-    handles.current_turn += 1;
-    let turn_n = handles.current_turn;
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
+    let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+    if turn_n == 0 {
+        return Err("No mock question is active yet.".to_string());
+    }
     handles
         .mic_capture
         .start_turn(turn_n)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    handles.mic_recording.store(true, Ordering::SeqCst);
+    Ok(())
 }
 
 /// Stop recording, run coach LLM, persist results, and signal the conductor.
@@ -3239,16 +3517,19 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
     // Pull the turn number and queue the `EndTurn` command while holding the
     // mock_tasks guard, then drop it before the (potentially long) await on
     // the reply so concurrent commands like `stop_mock` are not blocked.
-    let (turn_n, reply_rx) = {
+    let (turn_n, reply_rx, mic_recording) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
-        let turn_n = handles.current_turn;
+        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+        if turn_n == 0 {
+            return Err("No mock question is active.".to_string());
+        }
         let reply_rx = handles
             .mic_capture
             .send_end_turn()
             .await
             .map_err(|e| e.to_string())?;
-        (turn_n, reply_rx)
+        (turn_n, reply_rx, Arc::clone(&handles.mic_recording))
     };
 
     // Give the user up to 120 s to finish answering; in practice they stop
@@ -3257,6 +3538,49 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
             .await
             .map_err(|e| e.to_string())?;
+    mic_recording.store(false, Ordering::SeqCst);
+
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+
+    if transcript.trim().is_empty() {
+        if audio_path.is_empty() {
+            state
+                .persistence
+                .mark_mock_turn_skipped(session_id, turn_n)
+                .map_err(|e| e.to_string())?;
+        } else {
+            state
+                .persistence
+                .update_mock_turn_user_answer_by_turn_n(session_id, turn_n, "", &audio_path, "")
+                .map_err(|e| e.to_string())?;
+        }
+        let (coach_json, score) = coach_failure_payload(
+            "No speech detected — speak for a few seconds before finishing your answer.",
+        );
+        emit_mock_coach_feedback(
+            &app,
+            MockCoachFeedbackPayload {
+                turn_n,
+                coach_json: coach_json.clone(),
+                score,
+            },
+        );
+        if let Err(e) = state.persistence.update_mock_turn_coach_by_turn_n(
+            session_id,
+            turn_n,
+            &coach_json,
+            score,
+        ) {
+            warn!(error = %e, turn_n, "failed to persist empty-transcript coach feedback");
+        }
+        signal_mock_turn_complete(&state, transcript, audio_path).await;
+        return Ok(());
+    }
 
     let (mock_mode, suggested_answer, role_packs) = {
         let guard = state.mock_tasks.lock().await;
@@ -3285,6 +3609,16 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .map(|t| t.question)
         .unwrap_or_default();
 
+    if let Err(e) = persistence.update_mock_turn_user_answer_by_turn_n(
+        session_id,
+        turn_n,
+        &transcript,
+        &audio_path,
+        &suggested_answer,
+    ) {
+        warn!(error = %e, turn_n, "failed to persist mock turn user answer");
+    }
+
     let rag_chunks = if let Ok(embedder) = state.require_embedder() {
         query_mock_rag(
             session_id,
@@ -3304,7 +3638,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         app.clone(),
         session_id,
         turn_n,
-        question,
+        question.clone(),
         transcript.clone(),
         suggested_answer.clone(),
         rag_chunks,
@@ -3341,46 +3675,102 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         );
     }
 
-    if let Some(turn_id) = persistence
-        .load_mock_turns(session_id)
-        .unwrap_or_default()
-        .into_iter()
-        .find(|t| t.turn_n == turn_n)
-        .map(|t| t.id)
+    if let Err(e) =
+        persistence.update_mock_turn_coach_by_turn_n(session_id, turn_n, &coach_json, score)
     {
-        if let Err(e) = persistence.update_mock_turn_coach(turn_id, &coach_json, score) {
-            warn!(error = %e, "failed to persist mock turn coach feedback");
+        warn!(error = %e, "failed to persist mock turn coach feedback");
+    }
+
+    if !question.is_empty() {
+        let satisfied = crate::session::question_attempts::mock_attempt_satisfied(score, false);
+        if let Err(e) = persistence
+            .upsert_question_attempt(session_id, &question, "mock", 0.0, score, satisfied)
+        {
+            warn!(error = %e, "failed to record mock question attempt");
         }
     }
 
     // Signal the conductor to advance to the next question.
-    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-        let _ = handles
-            .conductor
-            .cmd_tx
-            .send(ConductorCommand::TurnComplete {
-                user_text: transcript,
-                audio_path,
-            })
-            .await;
-    }
+    signal_mock_turn_complete(&state, transcript, audio_path).await;
 
     Ok(())
+}
+
+/// Return a data URL for a mock turn WAV so the summary screen can play it
+/// without relying on the asset protocol scope.
+#[tauri::command]
+pub fn read_mock_audio_data_url(app: AppHandle, path: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let canonical = validate_mock_audio_path(&app, &path)?;
+    let bytes = std::fs::read(&canonical).map_err(|e| e.to_string())?;
+    if bytes.is_empty() {
+        return Err("recording file is empty".to_string());
+    }
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:audio/wav;base64,{encoded}"))
 }
 
 /// Skip the current mock turn without recording an answer.
 #[tauri::command]
 pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
-    if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-        let _ = handles
-            .conductor
-            .cmd_tx
-            .send(ConductorCommand::TurnComplete {
-                user_text: String::new(),
-                audio_path: String::new(),
-            })
-            .await;
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+
+    let (turn_n, persistence, conductor_tx, mic_recording) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+        if turn_n == 0 {
+            return Err("No mock question is active.".to_string());
+        }
+        (
+            turn_n,
+            Arc::clone(&state.persistence),
+            handles.conductor.cmd_tx.clone(),
+            Arc::clone(&handles.mic_recording),
+        )
+    };
+
+    tts::stop_active().await;
+
+    if mic_recording.swap(false, Ordering::SeqCst) {
+        if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
+            if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
+                let _ = crate::mock::mic_capture::await_end_turn_reply(
+                    reply_rx,
+                    Duration::from_secs(3),
+                )
+                .await;
+            }
+        }
     }
+
+    if let Some(question) = persistence
+        .load_mock_turns(session_id)
+        .unwrap_or_default()
+        .into_iter()
+        .find(|t| t.turn_n == turn_n)
+        .map(|t| t.question)
+    {
+        let _ = persistence.upsert_question_attempt(session_id, &question, "mock", 0.0, 0, false);
+    }
+
+    persistence
+        .mark_mock_turn_skipped(session_id, turn_n)
+        .map_err(|e| e.to_string())?;
+
+    let _ = conductor_tx
+        .send(ConductorCommand::TurnComplete {
+            user_text: String::new(),
+            audio_path: String::new(),
+        })
+        .await;
+
     Ok(())
 }
 

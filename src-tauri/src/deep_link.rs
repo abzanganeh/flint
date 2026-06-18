@@ -93,6 +93,19 @@ pub fn emit_import_token_if_present<R: Runtime>(app: &AppHandle<R>, url: &str) -
     true
 }
 
+/// Spawn async OAuth token exchange when `url` is `flint://auth/callback`.
+pub fn spawn_oauth_callback_if_present<R: Runtime>(app: &AppHandle<R>, url: &str) -> bool {
+    if crate::supabase::oauth::parse_auth_callback(url).is_none() {
+        return false;
+    }
+    let app = app.clone();
+    let url = url.to_string();
+    tauri::async_runtime::spawn(async move {
+        let _ = crate::commands::process_oauth_callback_url(&app, &url).await;
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

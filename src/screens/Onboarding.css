@@ -141,6 +141,59 @@
   background: #4f46e5;
 }
 
+.btn-google {
+  width: 100%;
+  padding: 0.7rem 1rem;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: #fff;
+  color: #1f2937;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-google:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn-google:not(:disabled):hover {
+  background: #f3f4f6;
+}
+
+.btn-oauth-cancel {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.45rem 1rem;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #a1a1aa;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.btn-oauth-cancel:hover {
+  color: #e4e4e7;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 1rem 0;
+  color: #71717a;
+  font-size: 0.8rem;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.12);
+}
+
 .onboarding-loading {
   text-align: center;
   color: #a1a1aa;

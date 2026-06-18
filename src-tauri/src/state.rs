@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -43,8 +43,10 @@ pub struct MockTaskHandles {
     pub conductor: Conductor,
     /// Mic capture task — manages cpal stream and VAD+Whisper loop.
     pub mic_capture: MicCapture,
-    /// Current turn number. Incremented by `start_mock_turn`.
-    pub current_turn: u32,
+    /// Conductor's active question turn (1-based). Updated when each question starts.
+    pub active_turn_n: Arc<AtomicU32>,
+    /// True while the mic is recording an answer for the current turn.
+    pub mic_recording: Arc<AtomicBool>,
     /// When true, questions are gated on `ask_mock_question`.
     pub guided: bool,
     /// Practice hides suggested answer until after the user responds.
@@ -86,6 +88,7 @@ pub struct LiveTaskHandles {
 pub struct AppState {
     // ── Auth (Phase 1) ───────────────────────────────────────────────────────
     pub auth: Arc<dyn AuthInterface>,
+    pub supabase_auth: Arc<SupabaseAuth>,
     #[allow(dead_code)] // Supabase session sync — Phase 3+
     pub session: Arc<dyn SessionInterface>,
     pub plugins: std::collections::HashMap<String, serde_json::Value>,
@@ -156,15 +159,20 @@ pub struct AppState {
     /// and clears it. The warm path (second click, Flint already running) still
     /// uses the `smart_resume_import_token` event emitted by `single_instance`.
     pub pending_import_token: Mutex<Option<String>>,
+
+    /// Panic-hide toggles `overlay_visibility` in React only — the main window
+    /// stays alive so Wayland can still receive the restore chord.
+    pub overlay_panic_hidden: std::sync::Mutex<bool>,
 }
 
 impl AppState {
     pub fn new(app: &App) -> Result<Self> {
         let plugins = app.config().plugins.0.clone();
 
-        let auth = Arc::new(
+        let supabase_auth = Arc::new(
             SupabaseAuth::from_tauri_plugins(&plugins).context("Failed to initialise auth")?,
         );
+        let auth: Arc<dyn AuthInterface> = supabase_auth.clone();
 
         // ── App data directory ───────────────────────────────────────────────
         let data_dir = app
@@ -227,6 +235,7 @@ impl AppState {
 
         Ok(Self {
             auth,
+            supabase_auth,
             session: Arc::new(StubSession),
             plugins,
             auth_token: RwLock::new(None),
@@ -248,6 +257,7 @@ impl AppState {
             feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
             embedder_cache_dir,
             pending_import_token,
+            overlay_panic_hidden: std::sync::Mutex::new(false),
         })
     }
 
