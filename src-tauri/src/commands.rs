@@ -988,6 +988,91 @@ pub async fn get_session_context(
         .map_err(|e| e.to_string())
 }
 
+/// Re-bind the in-memory state machine to a persisted session (Past Sessions → Reopen).
+///
+/// Restores the same `session_id` so structured context columns, digest, vectors,
+/// and question bank remain attached. Does not delete any SQLite rows.
+#[tauri::command]
+pub async fn reopen_session(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionSnapshotDto, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("Invalid session ID: {e}"))?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() == SessionState::Live {
+            return Err("End the live session before reopening a past session.".to_string());
+        }
+    }
+
+    let meta = state
+        .persistence
+        .get_session_metadata(sid)
+        .map_err(|e| format!("Session not found: {e}"))?;
+
+    let has_digest = state
+        .persistence
+        .load_session_digest(sid)
+        .map_err(|e| e.to_string())?
+        .is_some();
+
+    let target = reopen_ui_state(meta.state, has_digest);
+
+    *state.session_digest.write().await = None;
+    *state.prewarm_cache.lock().await = PreWarmCache::new();
+    *state.rehearsal_turn.lock().await = 0;
+
+    if let Some(digest) = state
+        .persistence
+        .load_session_digest(sid)
+        .map_err(|e| e.to_string())?
+    {
+        *state.session_digest.write().await = Some(digest);
+    }
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        machine.restore_state_for_recovery(target, sid);
+    }
+
+    state
+        .persistence
+        .write_state_transition(sid, &target)
+        .map_err(|e| format!("Failed to persist reopened session state: {e}"))?;
+
+    emit_state(&app, target);
+
+    info!(session_id = %sid, target = %target, "past session reopened");
+    get_session_snapshot(state).await
+}
+
+/// Pick the UI/state-machine target when reopening a row from Past Sessions.
+fn reopen_ui_state(stored: SessionState, has_digest: bool) -> SessionState {
+    use SessionState::*;
+    match stored {
+        Ended | Ready => {
+            if has_digest {
+                Rehearsing
+            } else {
+                Configuring
+            }
+        }
+        DigestReview => DigestReview,
+        PreWarming => DigestReview,
+        Rehearsing | MockInterview => Rehearsing,
+        Configuring | Ingesting => Configuring,
+        Live | Ending | Crashed | Recovering | Paused | Idle => {
+            if has_digest {
+                Rehearsing
+            } else {
+                Configuring
+            }
+        }
+    }
+}
+
 /// Load the session digest from memory, falling back to SQLite after restart.
 async fn resolve_session_digest(
     state: &AppState,

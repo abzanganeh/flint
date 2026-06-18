@@ -5,6 +5,7 @@ import {
   demoteSession,
   getDigest,
   getSessionContext,
+  getSessionContextFields,
   listSessions,
   promoteSession,
 } from "../commands";
@@ -19,6 +20,8 @@ interface Props {
   activeSessionId?: string;
   /** Called when user clicks Resume for the active in-progress session. */
   onResumeSession?: (sessionId: string, sessionState: string) => void;
+  /** Reopen a past session with the same id (fields, digest, question bank). */
+  onReopenSession?: (sessionId: string) => void;
 }
 
 function digestToContextText(digest: DigestDto): string {
@@ -77,11 +80,14 @@ const IN_PROGRESS_STATES = new Set([
   "READY",
 ]);
 
+const REOPEN_STATES = new Set(["ENDED", "READY"]);
+
 export const SessionList: React.FC<Props> = ({
   onBack,
   onStartSimilar,
   activeSessionId,
   onResumeSession,
+  onReopenSession,
 }) => {
   const [sessions, setSessions] = useState<SessionSummaryDto[]>([]);
   const [loading, setLoading] = useState(true);
@@ -141,13 +147,18 @@ export const SessionList: React.FC<Props> = ({
     };
 
     try {
+      const fields = await getSessionContextFields(session.id);
+      if (fields.jobDescription.trim().length > 0) {
+        onStartSimilar({ ...base, contextFields: fields });
+        return;
+      }
+
       const stored = await getSessionContext(session.id);
       if (stored.trim().length > 0) {
         onStartSimilar({ ...base, contextText: stored.trim() });
         return;
       }
 
-      // Legacy sessions (before context_text column): reconstruct from digest.
       const digest = await getDigest(session.id);
       onStartSimilar({ ...base, contextText: digestToContextText(digest) });
     } catch {
@@ -240,6 +251,17 @@ export const SessionList: React.FC<Props> = ({
                 </div>
 
                 <div className="sl-actions" onClick={(e) => e.stopPropagation()}>
+                  {isSelected && onReopenSession && REOPEN_STATES.has(session.state) && (
+                    <button
+                      className="sl-action-btn sl-action-btn--resume"
+                      onClick={() => onReopenSession(session.id)}
+                      disabled={busy}
+                      type="button"
+                      title="Restore this session with all fields and questions"
+                    >
+                      Reopen
+                    </button>
+                  )}
                   {isSelected && onResumeSession && activeSessionId === session.id && IN_PROGRESS_STATES.has(session.state) && (
                     <button
                       className="sl-action-btn sl-action-btn--resume"
