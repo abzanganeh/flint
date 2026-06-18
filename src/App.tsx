@@ -9,8 +9,8 @@ import {
   getPendingImportToken,
   getSessionSnapshot,
   importFromSmartResume,
+  reopenSession,
   restoreDraftSession,
-  reopenPastSession,
   returnToSessionDesign,
   stopSession,
   type RecoveryOffer,
@@ -22,6 +22,7 @@ import {
   parseFlintImportToken,
   persistCompanyIntel,
 } from "./lib/smartResumeImport";
+import { useFeatureFlag } from "./hooks/useFeatureFlag";
 import { SessionState } from "./types";
 import "./App.css";
 import "./components/rehearsal-enrichment.css";
@@ -147,6 +148,7 @@ function App() {
   >("api-keys");
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
+  const postSessionSummaryEnabled = useFeatureFlag("post_session_summary", true);
 
   const openSettings = (
     returnTo: AppScreen = screen,
@@ -424,7 +426,12 @@ function App() {
       <LiveOverlay
         sessionId={sessionId}
         onEnded={() => {
-          setScreen("session-summary");
+          if (postSessionSummaryEnabled) {
+            setScreen("session-summary");
+          } else {
+            setSessionId(null);
+            setScreen("session-list");
+          }
         }}
         onReturnToSetup={() => void handleReturnToSessionDesign()}
       />
@@ -491,15 +498,24 @@ function App() {
               setScreen(screenForDraftState(resumeState));
             }
           }}
-          onStartSimilar={(preFill) => {
-            setSessionPreFill(preFill);
-            setScreen("session-design");
+          onReopenSession={async (id) => {
+            try {
+              const snapshot = await reopenSession(id);
+              applyDraftSnapshot(snapshot, setSessionId, setSessionPreFill, setScreen);
+            } catch (err: unknown) {
+              setImportError(String(err));
+            }
           }}
-          onReopenSession={async (pastSessionId) => {
-            const snapshot = await reopenPastSession(pastSessionId);
-            setSessionId(snapshot.sessionId);
-            setSessionPreFill(preFillFromSnapshot(snapshot));
-            setScreen("rehearsal");
+          onStartSimilar={(preFill) => {
+            void (async () => {
+              const snapshot = await getSessionSnapshot().catch(() => null);
+              if (snapshot && snapshot.state !== SessionState.IDLE) {
+                await abandonSessionDraft().catch(() => undefined);
+              }
+              setSessionId(null);
+              setSessionPreFill(preFill);
+              setScreen("session-design");
+            })();
           }}
         />
       </Shell>

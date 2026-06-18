@@ -21,8 +21,8 @@ interface Props {
   activeSessionId?: string;
   /** Called when user clicks Resume for the active in-progress session. */
   onResumeSession?: (sessionId: string, sessionState: string) => void;
-  /** Called when user reopens an ENDED session at Rehearsal. */
-  onReopenSession?: (sessionId: string) => Promise<void>;
+  /** Reopen a past session with the same id (fields, digest, question bank). */
+  onReopenSession?: (sessionId: string) => void | Promise<void>;
 }
 
 function hasStructuredFields(fields: SessionContextFields): boolean {
@@ -84,6 +84,8 @@ const IN_PROGRESS_STATES = new Set([
   "REHEARSING",
   "READY",
 ]);
+
+const REOPEN_STATES = new Set(["ENDED", "READY"]);
 
 export const SessionList: React.FC<Props> = ({
   onBack,
@@ -163,7 +165,6 @@ export const SessionList: React.FC<Props> = ({
         return;
       }
 
-      // Legacy sessions (before context_text column): reconstruct from digest.
       const digest = await getDigest(session.id);
       onStartSimilar({ ...base, contextText: digestToContextText(digest) });
     } catch {
@@ -283,13 +284,13 @@ export const SessionList: React.FC<Props> = ({
                       Resume
                     </button>
                   )}
-                  {isSelected && session.state === "ENDED" && onReopenSession && (
+                  {isSelected && onReopenSession && REOPEN_STATES.has(session.state) && (
                     <button
                       className="sl-action-btn sl-action-btn--resume"
                       onClick={() => void handleReopen(session)}
                       disabled={busy || reopening === session.id}
                       type="button"
-                      title="Return to Rehearsal with this session's question bank and digest"
+                      title="Restore this session with all fields and questions"
                     >
                       {reopening === session.id ? "Opening…" : "Reopen"}
                     </button>

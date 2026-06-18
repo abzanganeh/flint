@@ -293,6 +293,10 @@ export const reextractDigest = (sessionId: string): Promise<DigestDto> =>
 export const getSessionContext = (sessionId: string): Promise<string> =>
   invoke<string>("get_session_context", { sessionId });
 
+/** Re-bind the active session to a past row (fields, digest, question bank). */
+export const reopenSession = (sessionId: string): Promise<SessionSnapshotDto> =>
+  invoke<SessionSnapshotDto>("reopen_session", { sessionId });
+
 /** Return the full session state snapshot for React resync. */
 export const getSessionSnapshot = (): Promise<SessionSnapshotDto> =>
   invoke<SessionSnapshotDto>("get_session_snapshot");

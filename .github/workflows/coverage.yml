@@ -1,0 +1,68 @@
+name: Coverage
+
+# Phase 7.1 — lib coverage gate via cargo-llvm-cov.
+# State machine has dedicated 100% transition tests; this job enforces a
+# repo-wide floor so coverage regressions fail PRs.
+
+on:
+  pull_request:
+    paths:
+      - "src-tauri/src/**"
+      - "src-tauri/tests/**"
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - ".github/workflows/coverage.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  llvm-cov:
+    name: cargo llvm-cov (module + repo floors)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux deps
+        run: |
+          ./scripts/install-linux-deps.sh
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: coverage-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            coverage-${{ runner.os }}-
+
+      - name: Enforce module coverage gates (Phase 7.1)
+        run: ./scripts/check-coverage-gates.sh
+
+      - name: Upload HTML report
+        if: always()
+        working-directory: src-tauri
+        run: cargo llvm-cov test --lib --tests --html --output-dir target/coverage-html
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: src-tauri/target/coverage-html/
+          retention-days: 14
