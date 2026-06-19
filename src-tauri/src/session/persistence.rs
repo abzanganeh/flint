@@ -3025,6 +3025,62 @@ mod tests {
     }
 
     #[test]
+    fn session_focus_save_and_load_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Focus", "interview", "swe")
+            .unwrap();
+        let focus = SessionFocus {
+            focus_name: "HR screen".into(),
+            focus_tags: vec!["behavioral".into(), "motivation".into()],
+            recruiter_brief: "Competency round".into(),
+            focus_notes: "Emphasise IAM".into(),
+            focus_confirmed_at: Some(1_700_000_000),
+            needs_focus_refresh: false,
+        };
+        db.save_session_focus(sid, &focus).unwrap();
+        let loaded = db.load_session_focus(sid).unwrap();
+        assert_eq!(loaded.focus_name, "HR screen");
+        assert_eq!(loaded.focus_tags, focus.focus_tags);
+        assert_eq!(loaded.recruiter_brief, "Competency round");
+        assert!(!loaded.needs_focus_refresh);
+    }
+
+    #[test]
+    fn load_practice_questions_filters_by_focus_tags() {
+        use crate::session::question_bank::BankQuestionEntry;
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Filter", "interview", "swe")
+            .unwrap();
+        db.store_question_bank_entries(
+            sid,
+            &[
+                BankQuestionEntry::new(
+                    "Behavioral Q".to_string(),
+                    vec!["behavioral".to_string()],
+                ),
+                BankQuestionEntry::new(
+                    "Technical Q".to_string(),
+                    vec!["technical".to_string()],
+                ),
+            ],
+        )
+        .unwrap();
+        db.save_session_focus(
+            sid,
+            &SessionFocus {
+                focus_tags: vec!["behavioral".into()],
+                focus_confirmed_at: Some(1),
+                ..SessionFocus::default()
+            },
+        )
+        .unwrap();
+        let filtered = db.load_practice_questions(sid, true).unwrap();
+        assert_eq!(filtered, vec!["Behavioral Q".to_string()]);
+    }
+
+    #[test]
     fn load_question_bank_recovers_from_corrupted_json() {
         // The migration default is `'[]'` but a future bug or manual edit could
         // leave a malformed value. We never want to crash the session on read.
