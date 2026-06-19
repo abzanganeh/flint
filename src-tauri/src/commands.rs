@@ -1072,7 +1072,7 @@ pub async fn confirm_digest(
         let mut bank: Vec<BankQuestionEntry> = digest_rust
             .likely_questions
             .iter()
-            .map(|q| BankQuestionEntry::question_only(q))
+            .map(BankQuestionEntry::question_only)
             .collect();
 
         if let Some(ref context_blob) = context_blob_opt {
@@ -2182,7 +2182,7 @@ pub async fn get_question_bank(
             use crate::session::question_bank::BankQuestionEntry;
             bank_entries = fallback
                 .iter()
-                .map(|q| BankQuestionEntry::question_only(q))
+                .map(BankQuestionEntry::question_only)
                 .collect();
             state
                 .persistence
@@ -4291,7 +4291,6 @@ fn spawn_mock_qa_embed_if_qualified(
         Err(_) => return,
     };
     let store = Arc::clone(&state.vector_store);
-    let question = question.to_string();
     tokio::spawn(async move {
         let text_clone = qa_text.clone();
         let embedding =
