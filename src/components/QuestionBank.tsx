@@ -131,6 +131,11 @@ export default function QuestionBank({
         {completedRow ? "↻" : "▶"}
       </button>
       <span className="question-bank__text">{entry.question}</span>
+      {entry.hasPreferredAnswer && (
+        <span className="question-bank__preferred" title="Tailored answer saved for Live">
+          Live
+        </span>
+      )}
       {completedRow && scoreLabel(entry) && (
         <span className="question-bank__score">{scoreLabel(entry)}</span>
       )}

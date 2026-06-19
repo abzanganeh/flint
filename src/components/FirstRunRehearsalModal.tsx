@@ -56,10 +56,17 @@ export default function FirstRunRehearsalModal({
         <h2 className="first-run-modal__title">Before you rehearse</h2>
 
         <p className="first-run-modal__body">
-          Flint answers from your pasted context first. During rehearsal you can also
-          search the web (Tavily key in Settings) and save findings into Technical Prep.
-          The more context you gather here, the better live answers will be.
+          Rehearsal is where you turn prep into answers you can actually say in the
+          interview. Flint drafts from your pasted context — then you edit and save
+          each answer as your <strong>preferred answer</strong>. Those saved scripts
+          appear instantly during Live when the same question is asked.
         </p>
+
+        <ol className="first-run-modal__steps">
+          <li>Ask a question from the bank or type your own.</li>
+          <li>Review Flint&apos;s draft — fix anything that doesn&apos;t sound like you.</li>
+          <li>Save your tailored version as a preferred answer for Live.</li>
+        </ol>
 
         {emptyFields.length > 0 && (
           <div className="first-run-modal__empty-section">
@@ -75,8 +82,9 @@ export default function FirstRunRehearsalModal({
         )}
 
         <p className="first-run-modal__tip">
-          Use the <strong>Prep Checklist</strong> sidebar to fill missing fields without
-          leaving this screen.
+          Use the <strong>Prep Checklist</strong> sidebar to fill missing fields.
+          Use <strong>Chat</strong> for quick research and <strong>Stories</strong> for
+          longer prep notes — but always tailor and save preferred answers for Live.
         </p>
 
         <div className="first-run-modal__footer">

@@ -1068,17 +1068,22 @@ pub async fn confirm_digest(
     let context_blob_opt = state.persistence.get_session_context(sid).ok();
     let mut bank_questions_for_embed = Vec::new();
     {
-        let mut bank: Vec<String> = digest_rust.likely_questions.clone();
+        use crate::session::question_bank::BankQuestionEntry;
+        let mut bank: Vec<BankQuestionEntry> = digest_rust
+            .likely_questions
+            .iter()
+            .map(BankQuestionEntry::question_only)
+            .collect();
 
         if let Some(ref context_blob) = context_blob_opt {
             let extracted = extract_questions_from_text(context_blob);
-            let bank_lower: Vec<String> = bank.iter().map(|q| q.to_lowercase()).collect();
+            let bank_lower: Vec<String> = bank.iter().map(|e| e.question.to_lowercase()).collect();
             for q in extracted {
                 if !bank_lower
                     .iter()
                     .any(|existing| *existing == q.to_lowercase())
                 {
-                    bank.push(q);
+                    bank.push(BankQuestionEntry::question_only(q));
                 }
             }
         }
@@ -1119,7 +1124,7 @@ pub async fn confirm_digest(
             }
         }
 
-        if let Err(e) = state.persistence.store_question_bank(sid, &bank) {
+        if let Err(e) = state.persistence.store_question_bank_entries(sid, &bank) {
             warn!(session_id = %sid, error = %e, "failed to reset question bank on confirm_digest");
         } else {
             debug!(session_id = %sid, count = bank.len(), "question bank synced on confirm_digest");
@@ -2070,6 +2075,77 @@ fn extract_qa_pairs_from_text(text: &str) -> Vec<String> {
     pairs
 }
 
+fn session_focus_to_dto(
+    focus: crate::session::persistence::SessionFocus,
+) -> crate::dto::SessionFocusDto {
+    crate::dto::SessionFocusDto {
+        focus_name: focus.focus_name,
+        focus_tags: focus.focus_tags,
+        recruiter_brief: focus.recruiter_brief,
+        focus_notes: focus.focus_notes,
+        focus_confirmed_at: focus.focus_confirmed_at,
+        needs_focus_refresh: focus.needs_focus_refresh,
+    }
+}
+
+/// Load session focus settings for rehearsal / mock filtering.
+#[tauri::command]
+pub async fn get_session_focus(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<crate::dto::SessionFocusDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    state
+        .persistence
+        .load_session_focus(sid)
+        .map(session_focus_to_dto)
+        .map_err(|e| e.to_string())
+}
+
+/// Persist session focus and mark it confirmed for rehearsal / mock filtering.
+#[tauri::command]
+pub async fn save_session_focus(
+    state: State<'_, AppState>,
+    session_id: String,
+    focus: crate::dto::SessionFocusDto,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    let confirmed_at = if focus.focus_tags.is_empty() {
+        focus.focus_confirmed_at
+    } else {
+        Some(
+            focus
+                .focus_confirmed_at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp()),
+        )
+    };
+    let rust_focus = crate::session::persistence::SessionFocus {
+        focus_name: focus.focus_name,
+        focus_tags: focus.focus_tags,
+        recruiter_brief: focus.recruiter_brief,
+        focus_notes: focus.focus_notes,
+        focus_confirmed_at: confirmed_at,
+        needs_focus_refresh: false,
+    };
+    state
+        .persistence
+        .save_session_focus(sid, &rust_focus)
+        .map_err(|e| e.to_string())
+}
+
+/// Unique focus tags inferred from the session question bank.
+#[tauri::command]
+pub async fn list_question_bank_tags(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    state
+        .persistence
+        .list_question_bank_tags(sid)
+        .map_err(|e| e.to_string())
+}
+
 /// Return the question bank for a session.
 ///
 /// Returns digest `likely_questions` merged with any user-added questions,
@@ -2079,32 +2155,47 @@ pub async fn get_question_bank(
     state: State<'_, AppState>,
     session_id: String,
     shuffle: Option<bool>,
+    filter_by_focus: Option<bool>,
 ) -> Result<Vec<crate::dto::QuestionBankEntryDto>, String> {
     use crate::session::question_attempts::normalize_question_key;
+    use crate::session::question_bank::filter_by_focus_tags;
     use std::collections::HashMap;
 
     let sid = validate_session_id(&state, &session_id).await?;
     let shuffle = shuffle.unwrap_or(false);
+    let apply_focus = filter_by_focus.unwrap_or(true);
 
-    let mut bank = state
+    let mut bank_entries = state
         .persistence
-        .load_question_bank(sid)
+        .load_question_bank_entries(sid)
         .map_err(|e| e.to_string())?;
 
-    if bank.is_empty() {
-        bank = state
+    if bank_entries.is_empty() {
+        let fallback = state
             .persistence
             .load_session_digest(sid)
             .ok()
             .flatten()
             .map(|d| d.likely_questions)
             .unwrap_or_default();
-
-        if !bank.is_empty() {
+        if !fallback.is_empty() {
+            use crate::session::question_bank::BankQuestionEntry;
+            bank_entries = fallback
+                .iter()
+                .map(BankQuestionEntry::question_only)
+                .collect();
             state
                 .persistence
-                .store_question_bank(sid, &bank)
+                .store_question_bank_entries(sid, &bank_entries)
                 .map_err(|e| e.to_string())?;
+        }
+    }
+
+    if apply_focus {
+        if let Ok(focus) = state.persistence.load_session_focus(sid) {
+            if focus.focus_confirmed_at.is_some() && !focus.focus_tags.is_empty() {
+                bank_entries = filter_by_focus_tags(&bank_entries, &focus.focus_tags);
+            }
         }
     }
 
@@ -2113,25 +2204,29 @@ pub async fn get_question_bank(
         .load_question_attempts(sid)
         .map_err(|e| e.to_string())?;
 
-    let entries: Vec<crate::dto::QuestionBankEntryDto> = bank
+    let entries: Vec<crate::dto::QuestionBankEntryDto> = bank_entries
         .iter()
-        .map(|q| {
-            let key = normalize_question_key(q);
+        .map(|entry| {
+            let key = normalize_question_key(&entry.question);
             if let Some(a) = attempts.get(&key) {
                 crate::dto::QuestionBankEntryDto {
-                    question: q.clone(),
+                    question: entry.question.clone(),
                     satisfied: a.satisfied,
                     confidence_score: a.confidence_score,
                     coach_score: a.coach_score,
                     last_source: Some(a.last_source.clone()),
+                    has_preferred_answer: !a.preferred_answer.trim().is_empty(),
+                    tags: entry.tags.clone(),
                 }
             } else {
                 crate::dto::QuestionBankEntryDto {
-                    question: q.clone(),
+                    question: entry.question.clone(),
                     satisfied: false,
                     confidence_score: 0.0,
                     coach_score: 0,
                     last_source: None,
+                    has_preferred_answer: false,
+                    tags: entry.tags.clone(),
                 }
             }
         })
@@ -2153,6 +2248,83 @@ pub async fn get_question_bank(
 
     pending.extend(completed);
     Ok(pending)
+}
+
+/// Load the user-saved preferred answer for a question (empty string if none).
+#[tauri::command]
+pub async fn get_preferred_answer(
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+) -> Result<String, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    state
+        .persistence
+        .get_preferred_answer(sid, &question)
+        .map_err(|e| e.to_string())
+}
+
+/// Save a tailored answer for Live. Embeds into the Q&A vector store for retrieval.
+#[tauri::command]
+pub async fn save_preferred_answer(
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+    answer: String,
+) -> Result<(), String> {
+    use crate::interfaces::vector::Chunk;
+
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        match *machine.current() {
+            SessionState::Rehearsing | SessionState::Ready => {}
+            other => {
+                return Err(format!(
+                    "save_preferred_answer is only valid from REHEARSING or READY (current: {other})"
+                ));
+            }
+        }
+    }
+
+    let question = question.trim().to_string();
+    let answer = answer.trim().to_string();
+    if question.is_empty() || answer.is_empty() {
+        return Err("Question and answer must not be empty.".to_string());
+    }
+
+    state
+        .persistence
+        .save_preferred_answer(sid, &question, &answer)
+        .map_err(|e| e.to_string())?;
+
+    let qa_text = format!("[PREFERRED ANSWER]\nQ: {question}\nA: {answer}");
+    let embedder = state
+        .wait_for_embedder(std::time::Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("Embedding unavailable: {e}"))?;
+
+    let text_clone = qa_text.clone();
+    let embedding = tokio::task::spawn_blocking(move || embedder.embed_one(&text_clone))
+        .await
+        .map_err(|e| format!("Embedder task panicked: {e}"))?
+        .map_err(|e| format!("Embedding failed: {e}"))?;
+
+    let chunk = Chunk {
+        id: uuid::Uuid::new_v4(),
+        text: qa_text,
+        embedding,
+        session_id: sid,
+    };
+    state
+        .vector_store
+        .ingest_qa(sid, vec![chunk])
+        .await
+        .map_err(|e| format!("Failed to embed preferred answer: {e}"))?;
+
+    info!(session_id = %sid, "preferred answer saved");
+    Ok(())
 }
 
 /// Add a question to the session question bank (dedup by lowercase trim).
@@ -2732,6 +2904,13 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
         sid
     };
     emit_state(&app, SessionState::Ended);
+
+    // Prompt user to refresh session focus before returning to rehearsal.
+    if let Some(sid) = session_id {
+        if let Err(e) = state.persistence.mark_needs_focus_refresh(sid) {
+            warn!(session_id = %sid, error = %e, "failed to mark needs_focus_refresh");
+        }
+    }
 
     // Post-session Supabase sync — fire-and-forget, non-fatal on failure.
     if let Some(sid) = session_id {
@@ -3885,10 +4064,261 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         }
     }
 
-    // Signal the conductor to advance to the next question.
-    signal_mock_turn_complete(&state, transcript, audio_path).await;
+    spawn_mock_qa_embed_if_qualified(
+        state.inner(),
+        session_id,
+        &question,
+        &transcript,
+        &coach_json,
+        score,
+    );
+
+    // Conductor advances when the user confirms review (advance_mock_turn).
+    Ok(())
+}
+
+/// User accepted coach feedback — advance the conductor to the next question.
+#[tauri::command]
+pub async fn advance_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+
+    let (transcript, audio_path) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+        if turn_n == 0 {
+            return Err("No mock question is active.".to_string());
+        }
+        let row = state
+            .persistence
+            .load_mock_turns(session_id)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|t| t.turn_n == turn_n)
+            .ok_or("mock turn not found")?;
+        (row.user_text, row.audio_path)
+    };
+    signal_mock_turn_complete(state.inner(), transcript, audio_path).await;
+    Ok(())
+}
+
+/// Re-run the current mock question without advancing (M7-M2).
+#[tauri::command]
+pub async fn retry_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
+    if handles.active_turn_n.load(Ordering::SeqCst) == 0 {
+        return Err("No mock question is active.".to_string());
+    }
+    handles
+        .conductor
+        .cmd_tx
+        .send(ConductorCommand::RetryTurn)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Edit transcript and re-run coach without advancing (M7-M3).
+#[tauri::command]
+pub async fn regrade_mock_turn(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    user_text: String,
+) -> Result<(), String> {
+    let session_id = state
+        .state_machine
+        .lock()
+        .await
+        .session_id()
+        .ok_or("no active session")?;
+
+    let turn_n = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+        if turn_n == 0 {
+            return Err("No mock question is active.".to_string());
+        }
+        turn_n
+    };
+
+    let (mock_mode, suggested_answer, role_packs, question, audio_path) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("no active mock session")?;
+        let suggested = handles
+            .suggested_text
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        let turns = state
+            .persistence
+            .load_mock_turns(session_id)
+            .map_err(|e| e.to_string())?;
+        let row = turns
+            .into_iter()
+            .find(|t| t.turn_n == turn_n)
+            .ok_or("mock turn not found")?;
+        (
+            handles.mode,
+            suggested,
+            handles.role_packs.clone(),
+            row.question,
+            row.audio_path,
+        )
+    };
+
+    let trimmed = user_text.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Transcript must not be empty.".to_string());
+    }
+
+    state
+        .persistence
+        .update_mock_turn_user_answer_by_turn_n(
+            session_id,
+            turn_n,
+            &trimmed,
+            &audio_path,
+            &suggested_answer,
+        )
+        .map_err(|e| e.to_string())?;
+
+    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let rag_chunks = if let Ok(embedder) = state.require_embedder() {
+        query_mock_rag(
+            session_id,
+            &question,
+            &embedder,
+            state.vector_store.as_ref(),
+            Some((state.global_kb.as_ref(), &role_packs)),
+            8,
+        )
+        .await
+    } else {
+        vec![]
+    };
+
+    let (coach_json, score) = match run_coach(
+        app.clone(),
+        session_id,
+        turn_n,
+        question.clone(),
+        trimmed.clone(),
+        suggested_answer,
+        rag_chunks,
+        mock_mode,
+        failover,
+        &prompts_base_dir(),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(e) => {
+            warn!(error = %e, turn_n, "regrade coach LLM failed");
+            let (json, score) = coach_failure_payload(
+                "Coach analysis failed — check your Groq key or rate limits.",
+            );
+            emit_mock_coach_feedback(
+                &app,
+                MockCoachFeedbackPayload {
+                    turn_n,
+                    coach_json: json.clone(),
+                    score,
+                },
+            );
+            (json, score)
+        }
+    };
+
+    state
+        .persistence
+        .update_mock_turn_coach_by_turn_n(session_id, turn_n, &coach_json, score)
+        .map_err(|e| e.to_string())?;
+
+    if !question.is_empty() {
+        let satisfied = crate::session::question_attempts::mock_attempt_satisfied(score, false);
+        let _ = state
+            .persistence
+            .upsert_question_attempt(session_id, &question, "mock", 0.0, score, satisfied);
+    }
+
+    spawn_mock_qa_embed_if_qualified(
+        state.inner(),
+        session_id,
+        &question,
+        &trimmed,
+        &coach_json,
+        score,
+    );
 
     Ok(())
+}
+
+fn spawn_mock_qa_embed_if_qualified(
+    state: &AppState,
+    session_id: uuid::Uuid,
+    question: &str,
+    user_text: &str,
+    coach_json: &str,
+    score: u8,
+) {
+    use crate::interfaces::vector::Chunk;
+    use crate::interfaces::vector::QA_EMBED_CONFIDENCE_THRESHOLD;
+
+    let embed_threshold = (QA_EMBED_CONFIDENCE_THRESHOLD * 100.0).round() as u8;
+    if score < embed_threshold || question.trim().is_empty() || user_text.trim().is_empty() {
+        return;
+    }
+
+    let answer = extract_mock_embed_answer(coach_json, user_text);
+    if answer.trim().is_empty() {
+        return;
+    }
+
+    let qa_text = format!(
+        "[MOCK COACH — high score]\nQ: {}\nA: {}",
+        question.trim(),
+        answer.trim()
+    );
+    let embedder = match state.require_embedder() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let store = Arc::clone(&state.vector_store);
+    tokio::spawn(async move {
+        let text_clone = qa_text.clone();
+        let embedding =
+            match tokio::task::spawn_blocking(move || embedder.embed_one(&text_clone)).await {
+                Ok(Ok(v)) => v,
+                _ => return,
+            };
+        let chunk = Chunk {
+            id: uuid::Uuid::new_v4(),
+            text: qa_text,
+            embedding,
+            session_id,
+        };
+        if let Err(e) = store.ingest_qa(session_id, vec![chunk]).await {
+            tracing::warn!(session_id = %session_id, error = %e, "mock Q&A embed skipped");
+        }
+    });
+}
+
+fn extract_mock_embed_answer(coach_json: &str, user_text: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(coach_json) {
+        if let Some(s) = v.get("corrected_answer").and_then(|x| x.as_str()) {
+            if !s.trim().is_empty() {
+                return s.trim().to_string();
+            }
+        }
+    }
+    user_text.trim().to_string()
 }
 
 /// Return a data URL for a mock turn WAV so the summary screen can play it

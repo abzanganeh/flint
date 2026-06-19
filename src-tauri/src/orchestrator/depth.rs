@@ -34,11 +34,12 @@ pub async fn run_depth<R: Runtime>(
     let start = Instant::now();
     let provider_name = failover.active_provider_name().to_string();
 
-    // Pre-warm cache hit — serve cached depth; on turn ≥ 3 also run fresh LLM.
+    // Pre-warm / preferred hit — serve cached depth; on turn ≥ 3 also run fresh LLM
+    // unless this is a user-saved preferred script.
     if let Some(cached) = ctx.cached_depth.clone() {
         let mut full_response = emit_cached_depth_tokens(&cached, &app, &ctx.turn_cancel);
 
-        if ctx.turn_number >= 3 {
+        if ctx.turn_number >= 3 && !ctx.from_preferred {
             log_refresh_on_turn_three(ctx.session_id, ctx.turn_number);
             match run_fresh_depth(&ctx, Arc::clone(&failover), prompts_dir, &app).await {
                 Ok(fresh) if !fresh.is_empty() => full_response = fresh,
@@ -218,11 +219,22 @@ fn build_prompt(
     };
 
     let key_skills = ctx.digest.key_skills.join(", ");
+    let style = crate::session::question_attempts::answer_style_instructions(&ctx.question, true);
+    let preferred_hint = if ctx.preferred_answer.trim().is_empty() || ctx.from_preferred {
+        String::new()
+    } else {
+        format!(
+            "\n\n[Your saved preferred answer — expand on this script, do not contradict it]\n{}",
+            ctx.preferred_answer.trim()
+        )
+    };
 
     Ok(template
         .replace("{session_domain}", &ctx.digest.domain)
         .replace("{rag_chunks}", &rag_text)
         .replace("{qa_chunks}", &qa_section)
+        .replace("{answer_style_instructions}", &style)
+        .replace("{preferred_answer_hint}", &preferred_hint)
         .replace(
             "{rolling_summary_if_compressed}",
             &ctx.memory_ctx.rolling_summary,

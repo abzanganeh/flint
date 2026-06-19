@@ -31,7 +31,7 @@ Release builds register the scheme automatically (`deep_link.register_all`).
 
 ## Test E1 — New user Google sign-up
 
-Prerequisites: legal consent not yet accepted OR sign out first (Settings → Privacy → Sign out).
+Prerequisites: legal consent not yet accepted OR sign out first (Settings → Account → Sign out).
 
 | Step | Action | Pass criteria |
 |------|--------|---------------|
@@ -47,7 +47,7 @@ Prerequisites: legal consent not yet accepted OR sign out first (Settings → Pr
 
 | Step | Action | Pass criteria |
 |------|--------|---------------|
-| 1 | Settings → Privacy → **Sign out** | Returned to auth / onboarding |
+| 1 | Settings → Account → **Sign out** | Returned to auth / onboarding |
 | 2 | **Continue with Google** (same account) | Browser flow completes |
 | 3 | Flint resumes | Prior local sessions still in Session List (SQLite not wiped) |
 

@@ -77,8 +77,12 @@ pub struct OrchestrationContext {
     pub qa_chunks: Vec<ScoredChunk>,
     pub digest: Arc<Digest>,
     pub memory_ctx: MemoryContext,
-    /// True if this response was served from the pre-warm cache.
+    /// True if this response was served from the pre-warm cache or a saved preferred answer.
     pub from_cache: bool,
+    /// True when the turn used a user-saved preferred answer (not pre-warm).
+    pub from_preferred: bool,
+    /// Saved preferred answer text when present (used for prompt hints during generation).
+    pub preferred_answer: String,
     /// Cached directional text when pre-warm cache hit (≥ 0.85 cosine).
     pub cached_directional: Option<String>,
     /// Cached depth text when pre-warm cache hit.
@@ -444,9 +448,18 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     .context("embed failed")?;
 
     // ── 2. Pre-warm cache lookup ──────────────────────────────────────────
+    // Preferred answers take precedence — user explicitly saved a Live script.
+    let preferred_answer = cfg
+        .persistence
+        .get_preferred_answer(cfg.session_id, &cfg.question_text)
+        .unwrap_or_default();
+    let from_preferred = !preferred_answer.trim().is_empty();
+
     // Clone strings out of the cache entry before releasing the lock so the
     // MutexGuard is dropped before the first `.await` in `retrieve_rag`.
-    let cache_hit = {
+    let cache_hit = if from_preferred {
+        Some((preferred_answer.clone(), preferred_answer.clone()))
+    } else {
         let cache = cfg.prewarm_cache.lock().await;
         cache.lookup(&embedding).and_then(|e| {
             let dir = if is_plausible_cached_response(&e.directional_response) {
@@ -472,7 +485,14 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         Some((dir, dep)) => (Some(dir), Some(dep)),
         None => (None, None),
     };
-    if from_cache {
+    if from_preferred {
+        info!(
+            session_id = %cfg.session_id,
+            turn = cfg.turn_number,
+            event = "preferred_answer_hit",
+            "serving user preferred answer"
+        );
+    } else if from_cache {
         info!(
             session_id = %cfg.session_id,
             turn = cfg.turn_number,
@@ -546,6 +566,8 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         digest: Arc::clone(&cfg.digest),
         memory_ctx,
         from_cache,
+        from_preferred,
+        preferred_answer: preferred_answer.clone(),
         cached_directional,
         cached_depth,
         turn_cancel: Arc::clone(&cfg.turn_cancel),

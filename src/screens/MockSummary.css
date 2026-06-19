@@ -256,3 +256,24 @@
 .ms-error {
   color: #ef4444;
 }
+
+.ms-trends {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  background: #111827;
+  border: 1px solid #1e2028;
+  border-radius: 8px;
+}
+
+.ms-trend-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #a78bfa;
+  margin: 0 0 8px;
+}
+
+.ms-trend-block {
+  margin: 0;
+}

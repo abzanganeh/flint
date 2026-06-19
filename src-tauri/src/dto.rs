@@ -400,4 +400,19 @@ pub struct QuestionBankEntryDto {
     pub confidence_score: f32,
     pub coach_score: u8,
     pub last_source: Option<String>,
+    pub has_preferred_answer: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+/// Session-level interview focus for rehearsal / mock (never applied live).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionFocusDto {
+    pub focus_name: String,
+    pub focus_tags: Vec<String>,
+    pub recruiter_brief: String,
+    pub focus_notes: String,
+    pub focus_confirmed_at: Option<i64>,
+    pub needs_focus_refresh: bool,
 }

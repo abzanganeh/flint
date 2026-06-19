@@ -8,6 +8,7 @@ pub mod limits;
 pub mod memory;
 pub mod persistence;
 pub mod question_attempts;
+pub mod question_bank;
 pub mod recovery;
 pub mod shuffle;
 pub mod state;

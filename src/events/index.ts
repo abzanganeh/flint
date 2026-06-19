@@ -276,6 +276,7 @@ export interface MockQuestionStartedEventPayload {
   turn_n: number;
   total_questions: number;
   mode: MockStudyMode;
+  preferred_hit?: boolean;
 }
 
 export interface MockQuestionSpokenEventPayload {

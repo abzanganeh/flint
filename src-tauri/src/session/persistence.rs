@@ -102,6 +102,8 @@ pub struct QuestionAttempt {
     pub confidence_score: f32,
     pub coach_score: u8,
     pub satisfied: bool,
+    /// User-tailored script used in Live (and as rehearsal anchor when set).
+    pub preferred_answer: String,
 }
 
 /// One turn in a mock interview session.
@@ -121,6 +123,19 @@ pub struct MockTurn {
     pub suggested: String,
     /// Coach score 0–100. 0 until coach completes.
     pub score: u8,
+}
+
+/// Session-level interview focus (rehearsal / mock filtering — never live).
+#[derive(Debug, Clone, Default)]
+pub struct SessionFocus {
+    pub focus_name: String,
+    pub focus_tags: Vec<String>,
+    pub recruiter_brief: String,
+    pub focus_notes: String,
+    /// Unix epoch seconds when user confirmed focus, or None if never set.
+    pub focus_confirmed_at: Option<i64>,
+    /// After live session ends, prompt user to refresh focus before rehearsal.
+    pub needs_focus_refresh: bool,
 }
 
 /// Lightweight metadata returned alongside the recovery offer so the user
@@ -173,7 +188,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 13;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -395,6 +410,36 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v11")?;
         info!("sqlite schema migrated to version 11");
+    }
+
+    if current < 12 {
+        conn.execute_batch(
+            "
+            ALTER TABLE question_attempts
+                ADD COLUMN preferred_answer TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 12;
+            ",
+        )
+        .context("schema migration v12")?;
+        info!("sqlite schema migrated to version 12");
+    }
+
+    if current < 13 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN focus_name TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN focus_tags_json TEXT NOT NULL DEFAULT '[]';
+            ALTER TABLE sessions ADD COLUMN recruiter_brief TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN focus_notes TEXT NOT NULL DEFAULT '';
+            ALTER TABLE sessions ADD COLUMN focus_confirmed_at INTEGER;
+            ALTER TABLE sessions ADD COLUMN needs_focus_refresh INTEGER NOT NULL DEFAULT 0;
+
+            PRAGMA user_version = 13;
+            ",
+        )
+        .context("schema migration v13")?;
+        info!("sqlite schema migrated to version 13");
     }
 
     Ok(())
@@ -1278,21 +1323,54 @@ impl SessionPersistence {
     ///
     /// `questions` is the full ordered list; the caller owns de-dup / ordering.
     pub fn store_question_bank(&self, session_id: Uuid, questions: &[String]) -> Result<()> {
-        let json = serde_json::to_string(questions).context("serialize question bank")?;
+        use crate::session::question_bank::BankQuestionEntry;
+        let existing = self
+            .load_question_bank_entries(session_id)
+            .unwrap_or_default();
+        let tag_map: std::collections::HashMap<String, Vec<String>> = existing
+            .into_iter()
+            .map(|e| (e.question.trim().to_lowercase(), e.tags))
+            .collect();
+        let entries: Vec<BankQuestionEntry> = questions
+            .iter()
+            .map(|q| {
+                let key = q.trim().to_lowercase();
+                let tags = tag_map
+                    .get(&key)
+                    .cloned()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| BankQuestionEntry::question_only(q).tags);
+                BankQuestionEntry::new(q.clone(), tags)
+            })
+            .collect();
+        self.store_question_bank_entries(session_id, &entries)
+    }
+
+    /// Store tagged question bank entries.
+    pub fn store_question_bank_entries(
+        &self,
+        session_id: Uuid,
+        entries: &[crate::session::question_bank::BankQuestionEntry],
+    ) -> Result<()> {
+        use crate::session::question_bank::bank_to_json;
+        let json = bank_to_json(entries);
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         conn.execute(
             "UPDATE sessions SET question_bank_json = ?1 WHERE id = ?2",
             rusqlite::params![json, sid],
         )
-        .context("store question bank")?;
-        debug!(session_id = %session_id, count = questions.len(), "question bank stored");
+        .context("store question bank entries")?;
+        debug!(session_id = %session_id, count = entries.len(), "question bank stored");
         Ok(())
     }
 
-    /// Load the persisted question bank for a session. Returns an empty vec
-    /// when no questions have been saved or the column defaulted to `'[]'`.
-    pub fn load_question_bank(&self, session_id: Uuid) -> Result<Vec<String>> {
+    /// Load tagged question bank entries.
+    pub fn load_question_bank_entries(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<crate::session::question_bank::BankQuestionEntry>> {
+        use crate::session::question_bank::parse_bank_json;
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         let json: String = conn
@@ -1301,9 +1379,95 @@ impl SessionPersistence {
                 rusqlite::params![sid],
                 |r| r.get(0),
             )
-            .context("load question bank")?;
-        let questions: Vec<String> = serde_json::from_str(&json).unwrap_or_default();
-        Ok(questions)
+            .context("load question bank entries")?;
+        Ok(parse_bank_json(&json))
+    }
+
+    /// Load the persisted question bank for a session. Returns an empty vec
+    /// when no questions have been saved or the column defaulted to `'[]'`.
+    pub fn load_question_bank(&self, session_id: Uuid) -> Result<Vec<String>> {
+        use crate::session::question_bank::bank_questions;
+        Ok(bank_questions(
+            &self.load_question_bank_entries(session_id)?,
+        ))
+    }
+
+    /// Load question strings for mock/rehearsal, optionally filtered by session focus tags.
+    pub fn load_practice_questions(
+        &self,
+        session_id: Uuid,
+        filter_by_focus: bool,
+    ) -> Result<Vec<String>> {
+        use crate::session::question_bank::{bank_questions, filter_by_focus_tags};
+        let entries = self.load_question_bank_entries(session_id)?;
+        if !filter_by_focus {
+            return Ok(bank_questions(&entries));
+        }
+        let focus = self.load_session_focus(session_id)?;
+        let filtered = filter_by_focus_tags(&entries, &focus.focus_tags);
+        Ok(bank_questions(&filtered))
+    }
+
+    pub fn load_session_focus(&self, session_id: Uuid) -> Result<SessionFocus> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.query_row(
+            "SELECT focus_name, focus_tags_json, recruiter_brief, focus_notes,
+                    focus_confirmed_at, needs_focus_refresh
+             FROM sessions WHERE id = ?1",
+            rusqlite::params![sid],
+            |r| {
+                let tags_json: String = r.get(1)?;
+                let focus_tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
+                Ok(SessionFocus {
+                    focus_name: r.get(0)?,
+                    focus_tags,
+                    recruiter_brief: r.get(2)?,
+                    focus_notes: r.get(3)?,
+                    focus_confirmed_at: r.get(4)?,
+                    needs_focus_refresh: r.get::<_, i64>(5)? != 0,
+                })
+            },
+        )
+        .context("load session focus")
+    }
+
+    pub fn save_session_focus(&self, session_id: Uuid, focus: &SessionFocus) -> Result<()> {
+        let tags_json = serde_json::to_string(&focus.focus_tags).context("serialize focus tags")?;
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET focus_name = ?1, focus_tags_json = ?2,
+             recruiter_brief = ?3, focus_notes = ?4, focus_confirmed_at = ?5,
+             needs_focus_refresh = ?6 WHERE id = ?7",
+            rusqlite::params![
+                focus.focus_name,
+                tags_json,
+                focus.recruiter_brief,
+                focus.focus_notes,
+                focus.focus_confirmed_at,
+                i64::from(focus.needs_focus_refresh),
+                sid,
+            ],
+        )
+        .context("save session focus")?;
+        Ok(())
+    }
+
+    pub fn mark_needs_focus_refresh(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "UPDATE sessions SET needs_focus_refresh = 1 WHERE id = ?1",
+            rusqlite::params![session_id.to_string()],
+        )
+        .context("mark needs focus refresh")?;
+        Ok(())
+    }
+
+    pub fn list_question_bank_tags(&self, session_id: Uuid) -> Result<Vec<String>> {
+        use crate::session::question_bank::collect_bank_tags;
+        let entries = self.load_question_bank_entries(session_id)?;
+        Ok(collect_bank_tags(&entries))
     }
 
     /// Upsert the latest practice outcome for a question in this session.
@@ -1384,7 +1548,7 @@ impl SessionPersistence {
         let mut stmt = conn
             .prepare(
                 "SELECT question_key, question, last_source, confidence_score,
-                        coach_score, satisfied
+                        coach_score, satisfied, preferred_answer
                  FROM question_attempts WHERE session_id = ?1",
             )
             .context("prepare load question attempts")?;
@@ -1397,6 +1561,7 @@ impl SessionPersistence {
                     confidence_score: r.get::<_, f64>(3)? as f32,
                     coach_score: r.get(4)?,
                     satisfied: r.get::<_, i32>(5)? != 0,
+                    preferred_answer: r.get(6)?,
                 })
             })
             .context("query question attempts")?;
@@ -1406,6 +1571,65 @@ impl SessionPersistence {
             map.insert(attempt.question_key.clone(), attempt);
         }
         Ok(map)
+    }
+
+    /// User-tailored script for a question (empty when none saved).
+    pub fn get_preferred_answer(&self, session_id: Uuid, question: &str) -> Result<String> {
+        use crate::session::question_attempts::normalize_question_key;
+
+        let key = normalize_question_key(question);
+        if key.is_empty() {
+            return Ok(String::new());
+        }
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.query_row(
+            "SELECT preferred_answer FROM question_attempts
+             WHERE session_id = ?1 AND question_key = ?2",
+            params![sid, key],
+            |r| r.get::<_, String>(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => rusqlite::Error::QueryReturnedNoRows,
+            other => other,
+        })
+        .or_else(|e| {
+            if matches!(e, rusqlite::Error::QueryReturnedNoRows) {
+                Ok(String::new())
+            } else {
+                Err(anyhow::Error::from(e).context("read preferred answer"))
+            }
+        })
+    }
+
+    /// Persist a user-tailored answer for Live and embed into the Q&A vector store.
+    pub fn save_preferred_answer(
+        &self,
+        session_id: Uuid,
+        question: &str,
+        answer: &str,
+    ) -> Result<()> {
+        use crate::session::question_attempts::normalize_question_key;
+
+        let key = normalize_question_key(question);
+        if key.is_empty() {
+            return Ok(());
+        }
+        let trimmed_q = question.trim();
+        let trimmed_a = answer.trim();
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "INSERT INTO question_attempts
+                (session_id, question_key, question, preferred_answer, updated_at)
+             VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))
+             ON CONFLICT(session_id, question_key) DO UPDATE SET
+                question = excluded.question,
+                preferred_answer = excluded.preferred_answer,
+                updated_at = excluded.updated_at",
+            params![session_id.to_string(), key, trimmed_q, trimmed_a],
+        )
+        .context("save preferred answer")?;
+        Ok(())
     }
 
     // ── Mock Interview ────────────────────────────────────────────────────
@@ -2798,6 +3022,56 @@ mod tests {
             loaded, qs,
             "insertion order must be preserved across reload"
         );
+    }
+
+    #[test]
+    fn session_focus_save_and_load_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Focus", "interview", "swe")
+            .unwrap();
+        let focus = SessionFocus {
+            focus_name: "HR screen".into(),
+            focus_tags: vec!["behavioral".into(), "motivation".into()],
+            recruiter_brief: "Competency round".into(),
+            focus_notes: "Emphasise IAM".into(),
+            focus_confirmed_at: Some(1_700_000_000),
+            needs_focus_refresh: false,
+        };
+        db.save_session_focus(sid, &focus).unwrap();
+        let loaded = db.load_session_focus(sid).unwrap();
+        assert_eq!(loaded.focus_name, "HR screen");
+        assert_eq!(loaded.focus_tags, focus.focus_tags);
+        assert_eq!(loaded.recruiter_brief, "Competency round");
+        assert!(!loaded.needs_focus_refresh);
+    }
+
+    #[test]
+    fn load_practice_questions_filters_by_focus_tags() {
+        use crate::session::question_bank::BankQuestionEntry;
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Filter", "interview", "swe")
+            .unwrap();
+        db.store_question_bank_entries(
+            sid,
+            &[
+                BankQuestionEntry::new("Behavioral Q".to_string(), vec!["behavioral".to_string()]),
+                BankQuestionEntry::new("Technical Q".to_string(), vec!["technical".to_string()]),
+            ],
+        )
+        .unwrap();
+        db.save_session_focus(
+            sid,
+            &SessionFocus {
+                focus_tags: vec!["behavioral".into()],
+                focus_confirmed_at: Some(1),
+                ..SessionFocus::default()
+            },
+        )
+        .unwrap();
+        let filtered = db.load_practice_questions(sid, true).unwrap();
+        assert_eq!(filtered, vec!["Behavioral Q".to_string()]);
     }
 
     #[test]

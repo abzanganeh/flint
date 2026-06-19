@@ -4,21 +4,26 @@ import {
   deleteAccount,
   exportUserData,
   getCostStatus,
+  getSessionFocus,
   liftCostSuspension,
+  listQuestionBankTags,
   logout,
   resetCostTracker,
+  saveSessionFocus,
   setCostCap,
   type CostStatusDto,
   type DeleteAccountReport,
+  type SessionFocusDto,
 } from "../commands";
 import ProviderSettings from "./ProviderSettings";
 
-type Tab = "api-keys" | "usage-cap" | "privacy";
+type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus";
 
 interface Props {
   onBack?: () => void;
   onLoggedOut?: () => void;
   initialTab?: Tab;
+  sessionId?: string | null;
 }
 
 // ── Cost Cap Tab ──────────────────────────────────────────────────────────────
@@ -165,16 +170,11 @@ function CostCapTab() {
   );
 }
 
-// ── Privacy Tab ───────────────────────────────────────────────────────────────
+// ── Account Tab ─────────────────────────────────────────────────────────────
 
-function PrivacyTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
-  const [report, setReport] = useState<DeleteAccountReport | null>(null);
-  const [deleting, setDeleting] = useState(false);
+function AccountTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
   const [loggingOut, setLoggingOut] = useState(false);
-  const [exporting, setExporting] = useState(false);
-  const [exportDone, setExportDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const confirmRef = useRef<HTMLInputElement>(null);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -188,6 +188,47 @@ function PrivacyTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
       setLoggingOut(false);
     }
   };
+
+  return (
+    <div className="settings-tab">
+      <h3 className="settings-tab__heading">Account</h3>
+      <p className="settings-tab__description">
+        Manage your Flint sign-in on this device.
+      </p>
+
+      {error && (
+        <p className="settings-tab__error" role="alert">
+          {error}
+        </p>
+      )}
+
+      <section className="settings-tab__section">
+        <h4 className="settings-tab__subheading">Sign out</h4>
+        <p className="settings-tab__description">
+          Sign out of your Flint account on this device. Local sessions and API keys
+          in your OS keychain are kept until you delete your account.
+        </p>
+        <button
+          className="settings-tab__btn"
+          disabled={loggingOut}
+          onClick={() => void handleLogout()}
+        >
+          {loggingOut ? "Signing out…" : "Sign out"}
+        </button>
+      </section>
+    </div>
+  );
+}
+
+// ── Privacy Tab ───────────────────────────────────────────────────────────────
+
+function PrivacyTab() {
+  const [report, setReport] = useState<DeleteAccountReport | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportDone, setExportDone] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const confirmRef = useRef<HTMLInputElement>(null);
 
   const handleExport = async () => {
     setExporting(true);
@@ -266,21 +307,6 @@ function PrivacyTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
       )}
 
       <section className="settings-tab__section">
-        <h4 className="settings-tab__subheading">Sign out</h4>
-        <p className="settings-tab__description">
-          Sign out of your Flint account on this device. Local sessions and API keys
-          in your OS keychain are kept until you delete your account.
-        </p>
-        <button
-          className="settings-tab__btn"
-          disabled={loggingOut}
-          onClick={() => void handleLogout()}
-        >
-          {loggingOut ? "Signing out…" : "Sign out"}
-        </button>
-      </section>
-
-      <section className="settings-tab__section">
         <h4 className="settings-tab__subheading">Export</h4>
         <p className="settings-tab__description">
           Download all your sessions, transcripts, and responses as JSON.
@@ -324,15 +350,150 @@ function PrivacyTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
   );
 }
 
+// ── Session Focus Tab ─────────────────────────────────────────────────────────
+
+function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }) {
+  const [focus, setFocus] = useState<SessionFocusDto | null>(null);
+  const [tags, setTags] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!sessionId) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const [f, t] = await Promise.all([
+        getSessionFocus(sessionId),
+        listQuestionBankTags(sessionId),
+      ]);
+      setFocus(f);
+      setTags(t);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (!sessionId) {
+    return (
+      <p className="settings-tab__hint">
+        Open a session to configure interview focus. Live sessions never filter by focus.
+      </p>
+    );
+  }
+
+  if (loading || !focus) {
+    return <p className="settings-tab__hint">Loading session focus…</p>;
+  }
+
+  const toggleTag = (tag: string) => {
+    setFocus((prev) => {
+      if (!prev) return prev;
+      const selected = prev.focusTags.includes(tag)
+        ? prev.focusTags.filter((t) => t !== tag)
+        : [...prev.focusTags, tag];
+      return { ...prev, focusTags: selected };
+    });
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await saveSessionFocus(sessionId, {
+        ...focus,
+        focusConfirmedAt: focus.focusConfirmedAt ?? Math.floor(Date.now() / 1000),
+        needsFocusRefresh: false,
+      });
+      setSuccessMsg("Session focus saved.");
+      setTimeout(() => setSuccessMsg(null), 2000);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="settings-tab">
+      {error && <p className="settings-tab__error">{error}</p>}
+      {successMsg && <p className="settings-tab__success">{successMsg}</p>}
+      <p className="settings-tab__hint">
+        Rehearsal and mock use these tags to filter questions. Live always uses the full bank.
+      </p>
+      <label className="settings-tab__field">
+        <span className="settings-tab__label">Focus name</span>
+        <input
+          className="settings-tab__input"
+          value={focus.focusName}
+          onChange={(e) => setFocus({ ...focus, focusName: e.target.value })}
+        />
+      </label>
+      <label className="settings-tab__field">
+        <span className="settings-tab__label">Recruiter brief</span>
+        <textarea
+          className="settings-tab__input"
+          rows={4}
+          value={focus.recruiterBrief}
+          onChange={(e) => setFocus({ ...focus, recruiterBrief: e.target.value })}
+        />
+      </label>
+      <div className="settings-tab__field">
+        <span className="settings-tab__label">Focus tags</span>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          {tags.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              className={`settings-tab__chip${focus.focusTags.includes(tag) ? " settings-tab__chip--active" : ""}`}
+              onClick={() => toggleTag(tag)}
+            >
+              {tag}
+            </button>
+          ))}
+        </div>
+      </div>
+      <label className="settings-tab__field">
+        <span className="settings-tab__label">Notes</span>
+        <textarea
+          className="settings-tab__input"
+          rows={2}
+          value={focus.focusNotes}
+          onChange={(e) => setFocus({ ...focus, focusNotes: e.target.value })}
+        />
+      </label>
+      <button
+        className="settings-tab__btn"
+        disabled={saving}
+        onClick={() => void handleSave()}
+      >
+        {saving ? "Saving…" : "Save session focus"}
+      </button>
+    </div>
+  );
+}
+
 // ── Settings screen ───────────────────────────────────────────────────────────
 
 const TAB_LABELS: Record<Tab, string> = {
+  account: "Account",
+  "session-focus": "Session Focus",
   "api-keys": "API Keys",
   "usage-cap": "Usage Cap",
   privacy: "Privacy",
 };
 
-export default function Settings({ onBack, onLoggedOut, initialTab = "api-keys" }: Props) {
+export default function Settings({ onBack, onLoggedOut, initialTab = "account", sessionId }: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   return (
@@ -363,7 +524,9 @@ export default function Settings({ onBack, onLoggedOut, initialTab = "api-keys" 
       <div className="settings-screen__panel" role="tabpanel">
         {activeTab === "api-keys" && <ProviderSettings />}
         {activeTab === "usage-cap" && <CostCapTab />}
-        {activeTab === "privacy" && <PrivacyTab onLoggedOut={onLoggedOut} />}
+        {activeTab === "account" && <AccountTab onLoggedOut={onLoggedOut} />}
+        {activeTab === "session-focus" && <SessionFocusTab sessionId={sessionId} />}
+        {activeTab === "privacy" && <PrivacyTab />}
       </div>
     </div>
   );
