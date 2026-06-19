@@ -3056,14 +3056,8 @@ mod tests {
         db.store_question_bank_entries(
             sid,
             &[
-                BankQuestionEntry::new(
-                    "Behavioral Q".to_string(),
-                    vec!["behavioral".to_string()],
-                ),
-                BankQuestionEntry::new(
-                    "Technical Q".to_string(),
-                    vec!["technical".to_string()],
-                ),
+                BankQuestionEntry::new("Behavioral Q".to_string(), vec!["behavioral".to_string()]),
+                BankQuestionEntry::new("Technical Q".to_string(), vec!["technical".to_string()]),
             ],
         )
         .unwrap();
