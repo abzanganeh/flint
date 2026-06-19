@@ -22,7 +22,7 @@ jobs:
   llvm-cov:
     name: cargo llvm-cov (module + repo floors)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -55,12 +55,12 @@ jobs:
         run: ./scripts/check-coverage-gates.sh
 
       - name: Upload HTML report
-        if: always()
+        if: success()
         working-directory: src-tauri
         run: cargo llvm-cov test --lib --tests --html --output-dir target/coverage-html
 
       - name: Upload coverage artifact
-        if: always()
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: coverage-html

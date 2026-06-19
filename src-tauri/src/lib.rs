@@ -9,6 +9,7 @@ mod dto;
 mod events;
 pub mod flags;
 pub mod gdpr;
+mod global_bank;
 mod health;
 mod hotkeys;
 pub mod interfaces;
