@@ -118,6 +118,10 @@ path = "tests/integration/cold_start.rs"
 name = "rag_dual_store"
 path = "tests/integration/rag_dual_store.rs"
 
+[[test]]
+name = "llm_providers"
+path = "tests/integration/llm_providers.rs"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Phase 7.3 benchmarks — measured against NFR targets in flint-performance.mdc.
 # Run with: cargo bench --bench <name>

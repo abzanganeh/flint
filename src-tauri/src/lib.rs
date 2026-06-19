@@ -112,6 +112,8 @@ pub fn run() {
             // (set during AppState::new from argv / FLINT_IMPORT_URL env var) so React
             // can poll them after the WebView mounts. Nothing to emit here.
 
+            crate::llm::stack::bootstrap_dev_keys_from_env();
+
             // Show a visible, centred window immediately — do not block on embedder init.
             #[cfg(debug_assertions)]
             stealth::configure_dev_window(app.handle());
@@ -222,6 +224,7 @@ pub fn run() {
             commands::cancel_inference,
             commands::panic_hide_overlay,
             commands::switch_provider,
+            commands::get_preferred_primary_provider,
             // Phase 6 — crash recovery + post-session
             commands::check_crash_recovery,
             commands::resume_crashed_session,

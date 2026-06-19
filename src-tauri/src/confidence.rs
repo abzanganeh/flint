@@ -51,8 +51,9 @@ impl ConfidenceLevel {
 /// Static per-model reliability score used in the confidence formula.
 pub fn model_tier_score(provider_name: &str) -> f32 {
     match provider_name {
-        "claude-3-5-sonnet" | "claude" => 1.00,
-        "gpt-4o" => 0.95,
+        "claude-3-5-sonnet" | "claude" | "anthropic" => 1.00,
+        "gpt-4o" | "openai" => 0.95,
+        "deepseek" | "deepseek-chat" => 0.88,
         "llama-3-3-70b-versatile" | "groq" | "openrouter" => 0.85,
         "claude-3-5-haiku" => 0.85,
         "gpt-4o-mini" => 0.80,
@@ -358,6 +359,14 @@ mod tests {
         assert_eq!(ConfidenceLevel::AmberLow.as_str(), "amber_low");
         assert_eq!(ConfidenceLevel::Grey.as_str(), "grey");
         assert_eq!(ConfidenceLevel::Red.as_str(), "red");
+    }
+
+    #[test]
+    fn model_tier_score_covers_m6_cloud_providers() {
+        assert_eq!(model_tier_score("anthropic"), 1.00);
+        assert_eq!(model_tier_score("openai"), 0.95);
+        assert_eq!(model_tier_score("deepseek"), 0.88);
+        assert_eq!(model_tier_score("deepseek-chat"), 0.88);
     }
 
     #[test]

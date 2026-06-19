@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::health::hardware::{self, WhisperModel};
 use crate::keychain;
+use crate::llm::stack;
 use crate::supabase::resolve_supabase_config;
 
 const OLLAMA_HEALTH_URL: &str = "http://localhost:11434/api/tags";
@@ -286,28 +287,35 @@ fn check_stealth_api() -> HealthCheckResult {
 }
 
 fn check_primary_llm() -> HealthCheckResult {
-    let groq = keychain::get_api_key("groq").is_ok();
-    let openai = keychain::get_api_key("openai").is_ok();
-    let anthropic = keychain::get_api_key("anthropic").is_ok();
+    let configured: Vec<&str> = stack::PRIMARY_PROVIDERS
+        .iter()
+        .copied()
+        .filter(|name| keychain::get_api_key(name).is_ok())
+        .collect();
 
-    if groq || openai || anthropic {
-        let provider = if groq {
-            "Groq"
-        } else if openai {
-            "OpenAI"
+    if let Some(first) = configured.first() {
+        let label = match *first {
+            "groq" => "Groq",
+            "openai" => "OpenAI",
+            "anthropic" => "Anthropic",
+            "deepseek" => "DeepSeek",
+            other => other,
+        };
+        let fallback_note = if configured.len() > 1 {
+            format!(" (+{} more configured)", configured.len() - 1)
         } else {
-            "Anthropic"
+            String::new()
         };
         return pass(
             HealthCheck::PrimaryLlm,
-            format!("{provider} API key found in the OS keychain."),
+            format!("{label} API key found in the OS keychain{fallback_note}."),
         );
     }
 
     warn(
         HealthCheck::PrimaryLlm,
         "No cloud LLM API key configured.",
-        "Add a Groq, OpenAI, or Anthropic API key in Settings → Providers. Ollama can be used as a fallback when running locally.",
+        "Add a Groq, OpenAI, Anthropic, or DeepSeek API key in Settings → API Keys. Ollama can be used as a fallback when running locally.",
     )
 }
 

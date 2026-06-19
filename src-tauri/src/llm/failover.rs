@@ -3,13 +3,13 @@
 //! Decision tree:
 //!   1. Primary call fails (5xx / timeout / connection refused)
 //!   2. One immediate retry after 100ms
-//!   3. If retry fails → silent failover to Ollama → emit `failover_triggered`
+//!   3. If retry fails → cascade cloud tiers (DeepSeek → OpenRouter) → Ollama
 //!   4. Background task pings primary every 30 seconds
 //!   5. On recovery → emit `primary_restored`
 //!
 //! 429 rate-limit path:
-//!   - Short Retry-After (≤ `RATE_LIMIT_SHORT_RETRY_SECS`): honour capped wait, retry Groq once.
-//!   - Long Retry-After (> threshold): failover to OpenRouter (if configured), then Ollama.
+//!   - Short Retry-After (≤ threshold): honour capped wait, retry primary once.
+//!   - Long Retry-After (> threshold): cascade cloud tiers then Ollama.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,14 +39,17 @@ const PRIMARY_PING_INTERVAL: Duration = Duration::from_secs(30);
 const RATE_LIMIT_CLOUD_FAILOVER_SECS: u64 = 10;
 
 const TIER_PRIMARY: u8 = 0;
-const TIER_CLOUD: u8 = 1;
-const TIER_LOCAL: u8 = 2;
+// Cloud tier indices are `1..=cloud_tiers.len()`. Local is `cloud_tiers.len() + 1`.
+
+fn local_tier_index(cloud_tier_count: usize) -> u8 {
+    (cloud_tier_count + 1) as u8
+}
 
 fn rate_limit_without_fallback_message(retry_after_secs: u64) -> String {
     let mins = retry_after_secs.div_ceil(60);
     format!(
-        "Groq rate limit exceeded (retry in ~{mins} min). Add an OpenRouter key in Settings \
-         (fallback when Groq is exhausted) or start Ollama on localhost:11434."
+        "Primary LLM rate limit exceeded (retry in ~{mins} min). Add DeepSeek or OpenRouter \
+         keys in Settings for cloud fallback, or start Ollama on localhost:11434."
     )
 }
 
@@ -75,13 +78,13 @@ fn classify_error(err: &anyhow::Error) -> CallError {
 // FailoverManager
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Manages the primary → OpenRouter → Ollama failover cycle.
+/// Manages the primary → cloud tiers → Ollama failover cycle.
 pub struct FailoverManager {
     primary: Arc<dyn LLMProvider>,
-    cloud_fallback: Option<Arc<dyn LLMProvider>>,
+    cloud_tiers: Vec<Arc<dyn LLMProvider>>,
     local: Arc<dyn LLMProvider>,
     rate_limiter: Arc<RateLimiter>,
-    /// `0` primary, `1` cloud (OpenRouter), `2` local (Ollama).
+    /// `0` primary, `1..=cloud_tiers.len()` cloud tier, `cloud_tiers.len()+1` local.
     active_tier: Arc<std::sync::atomic::AtomicU8>,
     _ping_task: Option<JoinHandle<()>>,
 }
@@ -89,18 +92,33 @@ pub struct FailoverManager {
 impl FailoverManager {
     pub fn new(
         primary: Arc<dyn LLMProvider>,
-        cloud_fallback: Option<Arc<dyn LLMProvider>>,
+        cloud_tiers: Vec<Arc<dyn LLMProvider>>,
         local: Arc<dyn LLMProvider>,
         rate_limiter: Arc<RateLimiter>,
     ) -> Self {
         Self {
             primary,
-            cloud_fallback,
+            cloud_tiers,
             local,
             rate_limiter,
             active_tier: Arc::new(std::sync::atomic::AtomicU8::new(TIER_PRIMARY)),
             _ping_task: None,
         }
+    }
+
+    fn local_index(&self) -> u8 {
+        local_tier_index(self.cloud_tiers.len())
+    }
+
+    fn cloud_provider_at(&self, tier: u8) -> Option<&Arc<dyn LLMProvider>> {
+        if tier == TIER_PRIMARY {
+            return None;
+        }
+        let idx = tier as usize;
+        if idx == 0 || idx > self.cloud_tiers.len() {
+            return None;
+        }
+        self.cloud_tiers.get(idx - 1)
     }
 
     /// Spawn the background ping loop. Must be called once from an async context.
@@ -133,21 +151,20 @@ impl FailoverManager {
         estimated_tokens: u32,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
         let tier = self.active_tier.load(Ordering::Acquire);
-        if tier == TIER_LOCAL {
+        let local_idx = self.local_index();
+        if tier == local_idx {
             return self.local.complete_stream(prompt, config).await;
         }
-        if tier == TIER_CLOUD {
-            if let Some(cloud) = &self.cloud_fallback {
-                match cloud.complete_stream(prompt.clone(), config.clone()).await {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => {
-                        warn!(
-                            provider = %cloud.name(),
-                            error = %e,
-                            "cloud tier stream failed — falling back to Ollama"
-                        );
-                        return self.failover_to_local(prompt, config, app, None).await;
-                    }
+        if let Some(cloud) = self.cloud_provider_at(tier) {
+            match cloud.complete_stream(prompt.clone(), config.clone()).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    warn!(
+                        provider = %cloud.name(),
+                        error = %e,
+                        "active cloud tier stream failed — falling back to Ollama"
+                    );
+                    return self.failover_to_local(prompt, config, app, None).await;
                 }
             }
         }
@@ -251,32 +268,38 @@ impl FailoverManager {
         app: &AppHandle<R>,
         rate_limit_retry_secs: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
-        if let Some(cloud) = &self.cloud_fallback {
-            if cloud.health_check().await {
-                self.active_tier.store(TIER_CLOUD, Ordering::Release);
-                emit_failover_triggered(
-                    app,
-                    FailoverTriggeredPayload {
-                        from: self.primary.name().to_string(),
-                        to: cloud.name().to_string(),
-                    },
-                );
-                info!(
+        for (i, cloud) in self.cloud_tiers.iter().enumerate() {
+            if !cloud.health_check().await {
+                warn!(
                     provider = %cloud.name(),
-                    "Groq unavailable — routing inference to cloud fallback"
+                    "cloud fallback tier skipped — not configured or unavailable"
                 );
-                match cloud.complete_stream(prompt.clone(), config.clone()).await {
-                    Ok(stream) => return Ok(stream),
-                    Err(e) => {
-                        warn!(
-                            provider = %cloud.name(),
-                            error = %e,
-                            "cloud fallback request failed — trying Ollama"
-                        );
-                    }
+                continue;
+            }
+
+            let tier = (i + 1) as u8;
+            self.active_tier.store(tier, Ordering::Release);
+            emit_failover_triggered(
+                app,
+                FailoverTriggeredPayload {
+                    from: self.primary.name().to_string(),
+                    to: cloud.name().to_string(),
+                },
+            );
+            info!(
+                provider = %cloud.name(),
+                "primary unavailable — routing inference to cloud fallback tier"
+            );
+
+            match cloud.complete_stream(prompt.clone(), config.clone()).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => {
+                    warn!(
+                        provider = %cloud.name(),
+                        error = %e,
+                        "cloud fallback request failed — trying next tier"
+                    );
                 }
-            } else {
-                warn!("OpenRouter key missing or unavailable — skipping cloud fallback");
             }
         }
 
@@ -296,13 +319,13 @@ impl FailoverManager {
                 return Err(anyhow::anyhow!(rate_limit_without_fallback_message(secs)));
             }
             return Err(anyhow::anyhow!(
-                "Primary LLM ({}) failed. Add an OpenRouter key in Settings for cloud fallback, \
-                 or start Ollama on localhost:11434.",
+                "Primary LLM ({}) failed. Add DeepSeek or OpenRouter keys in Settings for cloud \
+                 fallback, or start Ollama on localhost:11434.",
                 self.primary.name()
             ));
         }
 
-        self.active_tier.store(TIER_LOCAL, Ordering::Release);
+        self.active_tier.store(self.local_index(), Ordering::Release);
         emit_failover_triggered(
             app,
             FailoverTriggeredPayload {
@@ -316,7 +339,7 @@ impl FailoverManager {
 
     /// Whether the local Ollama fallback is currently active.
     pub fn is_using_local(&self) -> bool {
-        self.active_tier.load(Ordering::Acquire) == TIER_LOCAL
+        self.active_tier.load(Ordering::Acquire) == self.local_index()
     }
 
     #[cfg(test)]
@@ -325,15 +348,14 @@ impl FailoverManager {
     }
 
     pub fn active_provider_name(&self) -> &str {
-        match self.active_tier.load(Ordering::Acquire) {
-            TIER_LOCAL => self.local.name(),
-            TIER_CLOUD => self
-                .cloud_fallback
-                .as_ref()
-                .map(|p| p.name())
-                .unwrap_or_else(|| self.local.name()),
-            _ => self.primary.name(),
+        let tier = self.active_tier.load(Ordering::Acquire);
+        if tier == self.local_index() {
+            return self.local.name();
         }
+        if let Some(cloud) = self.cloud_provider_at(tier) {
+            return cloud.name();
+        }
+        self.primary.name()
     }
 }
 
@@ -427,7 +449,7 @@ mod tests {
         local: Arc<dyn LLMProvider>,
     ) -> FailoverManager {
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-        FailoverManager::new(primary, None, local, rl)
+        FailoverManager::new(primary, vec![], local, rl)
     }
 
     #[test]
@@ -639,7 +661,7 @@ mod tests {
             provider_name: "ollama".to_string(),
         });
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-        let manager = FailoverManager::new(primary, Some(cloud), local, rl);
+        let manager = FailoverManager::new(primary, vec![cloud], local, rl);
         let app = mock_app_handle();
 
         let mut stream = manager
@@ -740,7 +762,7 @@ mod tests {
             provider_name: "ollama".to_string(),
         });
         let manager = make_failover(Arc::clone(&primary), Arc::clone(&local));
-        manager.force_tier(TIER_LOCAL);
+        manager.force_tier(local_tier_index(0));
         assert_eq!(manager.active_provider_name(), "ollama");
 
         let app = mock_app_handle();
@@ -865,7 +887,7 @@ mod tests {
             response: "pong".to_string(),
             provider_name: "groq".to_string(),
         });
-        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(TIER_CLOUD));
+        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(1));
         let app = mock_app_handle();
 
         probe_primary_once(&primary, &active_tier, &app).await;
@@ -893,11 +915,11 @@ mod tests {
             provider_name: "groq".to_string(),
             error_message: "still down".to_string(),
         });
-        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(TIER_LOCAL));
+        let active_tier = Arc::new(std::sync::atomic::AtomicU8::new(local_tier_index(0)));
         let app = mock_app_handle();
 
         probe_primary_once(&primary, &active_tier, &app).await;
-        assert_eq!(active_tier.load(Ordering::Acquire), TIER_LOCAL);
+        assert_eq!(active_tier.load(Ordering::Acquire), local_tier_index(0));
     }
 
     #[test]

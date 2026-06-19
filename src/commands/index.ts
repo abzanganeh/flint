@@ -163,8 +163,11 @@ export const rephraseResponse = (
 export const copyTextToClipboard = (text: string): Promise<void> =>
   invoke<void>("copy_text_to_clipboard", { text });
 
-export const switchProvider = (name: string): Promise<void> =>
+export const switchProvider = (name: PrimaryLlmProvider): Promise<void> =>
   invoke<void>("switch_provider", { name });
+
+export const getPreferredPrimaryProvider = (): Promise<string | null> =>
+  invoke<string | null>("get_preferred_primary_provider");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Session design commands (Phase 2)
@@ -550,7 +553,15 @@ export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =
 
 // ── Phase 7.7 — Provider API key management ──────────────────────────────────
 
-export type ApiKeyProvider = "groq" | "openrouter" | "openai" | "anthropic" | "tavily";
+export type ApiKeyProvider =
+  | "groq"
+  | "deepseek"
+  | "openrouter"
+  | "openai"
+  | "anthropic"
+  | "tavily";
+
+export type PrimaryLlmProvider = "groq" | "openai" | "anthropic" | "deepseek";
 
 /** @deprecated Use ApiKeyProvider */
 export type LlmProvider = Extract<ApiKeyProvider, "groq" | "openai" | "anthropic">;

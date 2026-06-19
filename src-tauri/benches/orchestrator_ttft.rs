@@ -104,7 +104,7 @@ fn build_failover(initial_delay: Duration) -> FailoverManager {
     // Rate limits set high enough that the limiter never gates the bench —
     // we are measuring streaming overhead, not token-bucket wait time.
     let limiter = Arc::new(RateLimiter::new("bench-primary", u32::MAX, u32::MAX));
-    FailoverManager::new(primary, None, local, limiter)
+    FailoverManager::new(primary, vec![], local, limiter)
 }
 
 fn bench_ttft(c: &mut Criterion) {
