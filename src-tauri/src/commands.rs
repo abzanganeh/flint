@@ -13,8 +13,9 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto,
-    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
+    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto,
+    OpenSessionLimitsDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
+    SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_mock_coach_feedback, emit_mock_suggested_token, emit_session_state_change,
@@ -22,7 +23,7 @@ use crate::events::{
     SessionStateChangePayload, TokenUsageUpdatePayload,
 };
 use crate::health::{checks, hardware};
-use crate::interfaces::auth::AuthToken;
+use crate::interfaces::auth::{AuthToken, Plan};
 use crate::interfaces::vector::Chunk;
 use crate::keychain;
 use crate::knowledge::packs_for_role;
@@ -46,6 +47,7 @@ const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
 /// Number of Tavily results to fetch per enrichment query.
 const ENRICHMENT_RESULTS_PER_QUERY: usize = 4;
 use crate::session::draft;
+use crate::session::limits;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
@@ -423,6 +425,33 @@ async fn extract_digest_resilient(
     })
 }
 
+/// Plan used for open-session caps — Free when logged out or auth lookup fails.
+async fn open_session_plan(state: &AppState) -> Plan {
+    evaluation_context(state).await.plan
+}
+
+/// Refuse when adding another open session would exceed the user's plan cap.
+async fn ensure_open_session_capacity(
+    state: &AppState,
+    adding_new_open: bool,
+) -> Result<(), String> {
+    if !adding_new_open {
+        return Ok(());
+    }
+
+    let plan = open_session_plan(state).await;
+    let limit = limits::open_session_limit(plan);
+    let count = state
+        .persistence
+        .count_open_sessions()
+        .map_err(|e| e.to_string())?;
+
+    if count >= limit {
+        return Err(limits::open_session_limit_message(plan, limit));
+    }
+    Ok(())
+}
+
 /// Discard an in-progress session setup and return to IDLE (Start Over).
 #[tauri::command]
 pub async fn abandon_session_draft(
@@ -479,6 +508,8 @@ pub async fn create_session(
     state: State<'_, AppState>,
     config: SessionConfigDto,
 ) -> Result<String, String> {
+    ensure_open_session_capacity(&state, true).await?;
+
     let session_id = Uuid::new_v4();
 
     {
@@ -1255,6 +1286,8 @@ pub async fn reopen_session(
         .get_session_metadata(sid)
         .map_err(|e| format!("Session not found: {e}"))?;
 
+    ensure_open_session_capacity(&state, !limits::is_open_session_state(meta.state)).await?;
+
     let has_digest = state
         .persistence
         .load_session_digest(sid)
@@ -1502,6 +1535,8 @@ pub async fn reopen_past_session(
             meta.state
         ));
     }
+
+    ensure_open_session_capacity(&state, true).await?;
 
     {
         let machine = state.state_machine.lock().await;
@@ -3076,6 +3111,28 @@ pub async fn list_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::dto::SessionSummaryDto>, String> {
     state.persistence.list_sessions().map_err(|e| e.to_string())
+}
+
+/// Open-session cap snapshot for the Past Sessions screen.
+#[tauri::command]
+pub async fn get_open_session_limits(
+    state: State<'_, AppState>,
+) -> Result<OpenSessionLimitsDto, String> {
+    let plan = open_session_plan(&state).await;
+    let open_limit = limits::open_session_limit(plan);
+    let open_count = state
+        .persistence
+        .count_open_sessions()
+        .map_err(|e| e.to_string())?;
+
+    Ok(OpenSessionLimitsDto {
+        open_count,
+        open_limit,
+        plan: match plan {
+            Plan::Free => "free".to_string(),
+            Plan::Premium => "premium".to_string(),
+        },
+    })
 }
 
 /// Mark a session as promoted (exempted from 30-day expiry).

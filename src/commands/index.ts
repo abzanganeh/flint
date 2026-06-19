@@ -340,6 +340,12 @@ export interface SessionSummaryDto {
   domain: string;
 }
 
+export interface OpenSessionLimitsDto {
+  openCount: number;
+  openLimit: number;
+  plan: "free" | "premium";
+}
+
 /** On app startup: check for a crashed session. Returns null if none. */
 export const checkCrashRecovery = (): Promise<RecoveryOffer | null> =>
   invoke<RecoveryOffer | null>("check_crash_recovery");
@@ -359,6 +365,10 @@ export const generateSessionSummary = (): Promise<string> =>
 /** List all sessions stored locally. */
 export const listSessions = (): Promise<SessionSummaryDto[]> =>
   invoke<SessionSummaryDto[]>("list_sessions");
+
+/** Concurrent open-session cap for the current plan. */
+export const getOpenSessionLimits = (): Promise<OpenSessionLimitsDto> =>
+  invoke<OpenSessionLimitsDto>("get_open_session_limits");
 
 /** Mark a session as promoted (exempt from 30-day expiry). */
 export const promoteSession = (sessionId: string): Promise<void> =>

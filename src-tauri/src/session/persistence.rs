@@ -1077,6 +1077,22 @@ impl SessionPersistence {
         }))
     }
 
+    /// Count sessions that count toward the concurrent open-session cap.
+    ///
+    /// Open = any state other than `IDLE` or `ENDED`. See `session::limits`.
+    pub fn count_open_sessions(&self) -> Result<usize> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE state NOT IN ('IDLE', 'ENDED')",
+                [],
+                |r| r.get(0),
+            )
+            .context("count open sessions")?;
+        Ok(count as usize)
+    }
+
     /// List all sessions in the database, most recent first.
     ///
     /// Returns lightweight rows suitable for the SessionList screen — no
@@ -2416,6 +2432,30 @@ mod tests {
             .unwrap();
         let found = db.find_incomplete_session().unwrap();
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn count_open_sessions_excludes_idle_and_ended() {
+        let db = new_db();
+        let open = Uuid::new_v4();
+        let ended = Uuid::new_v4();
+        let idle = Uuid::new_v4();
+
+        db.create_session_row(open, "Open", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(open, &SessionState::Rehearsing)
+            .unwrap();
+
+        db.create_session_row(ended, "Done", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(ended, &SessionState::Ended)
+            .unwrap();
+
+        db.create_session_row(idle, "", "interview", "").unwrap();
+        db.write_state_transition(idle, &SessionState::Idle)
+            .unwrap();
+
+        assert_eq!(db.count_open_sessions().unwrap(), 1);
     }
 
     // ── Phase 7.5 hardening ──────────────────────────────────────────────────

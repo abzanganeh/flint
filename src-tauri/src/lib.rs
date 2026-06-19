@@ -232,6 +232,7 @@ pub fn run() {
             commands::discard_all_crashed_sessions,
             commands::generate_session_summary,
             commands::list_sessions,
+            commands::get_open_session_limits,
             commands::promote_session,
             commands::demote_session,
             commands::delete_session,
