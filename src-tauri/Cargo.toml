@@ -158,3 +158,7 @@ harness = false
 name = "bench_gate"
 path = "src/bin/bench_gate.rs"
 
+[[bin]]
+name = "p4_ttft_live"
+path = "src/bin/p4_ttft_live.rs"
+

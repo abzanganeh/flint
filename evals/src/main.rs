@@ -94,6 +94,8 @@ enum VariantArg {
     Gpt,
     Claude,
     Llama,
+    Deepseek,
+    Openai,
 }
 
 impl From<VariantArg> for PromptVariant {
@@ -102,6 +104,8 @@ impl From<VariantArg> for PromptVariant {
             VariantArg::Gpt => PromptVariant::Gpt,
             VariantArg::Claude => PromptVariant::Claude,
             VariantArg::Llama => PromptVariant::Llama,
+            VariantArg::Deepseek => PromptVariant::Deepseek,
+            VariantArg::Openai => PromptVariant::Openai,
         }
     }
 }

@@ -34,6 +34,8 @@ pub enum PromptVariant {
     Gpt,
     Claude,
     Llama,
+    Deepseek,
+    Openai,
     Default,
 }
 
@@ -49,6 +51,8 @@ impl PromptVariant {
             PromptVariant::Gpt => "gpt",
             PromptVariant::Claude => "claude",
             PromptVariant::Llama => "llama",
+            PromptVariant::Deepseek => "deepseek",
+            PromptVariant::Openai => "openai",
             PromptVariant::Default => "default",
         }
     }

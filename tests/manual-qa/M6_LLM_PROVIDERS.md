@@ -73,14 +73,16 @@ Script helper (dev dashboard or logs):
 grep directional_thread_complete ~/.flint/metrics.log | tail -15
 ```
 
-Record results here:
+Record results here (Linux dev machine, 2026-06-19, `p4_ttft_live`):
 
 | Provider | Runs | P50 TTFT | P95 TTFT | Pass? |
 |----------|------|----------|----------|-------|
-| Groq | | | | |
-| DeepSeek | | | | |
-| OpenAI | | | | |
-| Anthropic | | | | |
+| Groq | 15 | 67 ms | 174 ms | Yes |
+| DeepSeek | 15 | 293 ms | 368 ms | Yes |
+| OpenAI | 15 | 670 ms | 1694 ms | No (optional primary; high variance) |
+| Anthropic | — | — | — | Not run (optional) |
+
+Groq + DeepSeek meet the M6 gate (P95 < 900 ms). OpenAI documented for Settings users who select it as primary.
 
 ## Test P5 — Token usage + cost cap
 
@@ -105,4 +107,4 @@ Record results here:
 /flint-loop resume — m6-llm-providers Block P4 pass (TTFT recorded)
 ```
 
-**Status:** OPEN — automated tasks 12.1–12.10 + 12.12 complete; live TTFT + eval smoke pending.
+**Status:** PASS 2026-06-19 (Linux) — P4 Groq + DeepSeek TTFT recorded; OpenAI documented.
