@@ -47,7 +47,7 @@ mod tests {
     fn mocked_mic_transcript_with_typos_may_fail() {
         let reference = load_mic_paragraph_text();
         let hypothesis = "At SecureAuth I led authentication using OAuth OIDC SAML MFA.";
-        let score = score_transcript(&reference, &hypothesis, MIC_WER_PASS_THRESHOLD);
+        let score = score_transcript(&reference, hypothesis, MIC_WER_PASS_THRESHOLD);
         assert!(!score.passed || score.wer < MIC_WER_PASS_THRESHOLD);
     }
 }
