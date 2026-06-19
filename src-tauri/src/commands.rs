@@ -4557,16 +4557,9 @@ pub async fn mark_mic_calibration_passed(
         .persistence
         .mark_mic_calibration_passed(&fingerprint, wer_system, wer_mic, forced)
         .map_err(|e| e.to_string())?;
-    let passed = !forced
-        && wer_system < SYSTEM_WER_PASS_THRESHOLD
-        && wer_mic < MIC_WER_PASS_THRESHOLD;
-    log_audio_quality_calibration(
-        &fingerprint,
-        wer_system,
-        wer_mic,
-        passed,
-        forced,
-    );
+    let passed =
+        !forced && wer_system < SYSTEM_WER_PASS_THRESHOLD && wer_mic < MIC_WER_PASS_THRESHOLD;
+    log_audio_quality_calibration(&fingerprint, wer_system, wer_mic, passed, forced);
     Ok(())
 }
 
