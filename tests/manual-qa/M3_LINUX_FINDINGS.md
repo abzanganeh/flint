@@ -48,7 +48,7 @@ Hotkeys: **Ctrl+Alt+Space** (tap / hold / double), **Ctrl+Alt+Shift+Space** (pan
 | Panic | `PanicRestoreShell` — only "Show Flint" pill when overlay hidden |
 | Hotkeys | Tap on keyup, hold at 2s; cancel in REHEARSING; Wayland focused fallback |
 | Rehearsal UX | Prep-before-live copy, skip confirm, de-emphasized go-live |
-| Settings | Sign out button (Privacy tab) — was missing despite `logout` command |
+| Settings | Sign out button (Account tab) |
 
 ## Post-Implementation Re-test Checklist
 
@@ -154,4 +154,4 @@ secret-tool clear service flint account auth_token_*
 # restart Flint
 ```
 
-Sign out is now in **Settings → Privacy → Sign out**.
+Sign out is in **Settings → Account → Sign out**.

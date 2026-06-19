@@ -84,6 +84,8 @@ pub enum ConductorCommand {
         user_text: String,
         audio_path: String,
     },
+    /// Re-run the current question without advancing the queue (M7-M2).
+    RetryTurn,
     /// User cancels — tear down without a summary screen.
     Abort,
     /// User ends early — emit `mock_ended` so the UI can show results.
@@ -163,12 +165,21 @@ async fn conductor_loop<R: Runtime>(
     active_turn_n: Arc<AtomicU32>,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
-    let mut base_questions: Vec<String> = digest
-        .likely_questions
-        .iter()
+    let mut base_questions: Vec<String> = persistence
+        .load_practice_questions(session_id, true)
+        .unwrap_or_default()
+        .into_iter()
         .filter(|q| !persistence.is_question_satisfied(session_id, q))
-        .cloned()
         .collect();
+    if base_questions.is_empty() && !digest.likely_questions.is_empty() {
+        // Focus filter may have excluded everything — fall back to full bank.
+        base_questions = persistence
+            .load_practice_questions(session_id, false)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|q| !persistence.is_question_satisfied(session_id, q))
+            .collect();
+    }
     if base_questions.is_empty() && !digest.likely_questions.is_empty() {
         info!(
             session_id = %session_id,
@@ -221,140 +232,183 @@ async fn conductor_loop<R: Runtime>(
         let total_questions_now =
             scripted_count as u32 + followup_queue.len() as u32 + u32::from(is_followup);
 
-        if pace == MockPace::Guided {
-            match wait_for_ask_question(&mut cmd_rx, session_id).await {
-                WaitOutcome::Ask => {}
-                WaitOutcome::FinishEarly => break,
-                WaitOutcome::Cancelled => {
+        let mut turn_complete_user_text = String::new();
+        let mut turn_complete_audio = String::new();
+        let mut turn_complete_suggested = String::new();
+        let mut turn_id = Uuid::new_v4();
+        let mut attempt: u32 = 0;
+
+        'question_attempt: loop {
+            attempt += 1;
+
+            if pace == MockPace::Guided && attempt == 1 {
+                match wait_for_ask_question(&mut cmd_rx, session_id).await {
+                    WaitOutcome::Ask => {}
+                    WaitOutcome::FinishEarly => break,
+                    WaitOutcome::Cancelled => {
+                        cancelled = true;
+                        break;
+                    }
+                }
+            }
+
+            if let Ok(mut buf) = suggested_buffer.write() {
+                buf.clear();
+            }
+
+            let rag_chunks = query_mock_rag(
+                session_id,
+                &question,
+                &embedder,
+                vector_store.as_ref(),
+                Some((global_kb.as_ref(), &role_packs)),
+                8,
+            )
+            .await;
+
+            turn_id = match persistence.begin_mock_turn(session_id, turn_n, &question) {
+                Ok(id) => id,
+                Err(e) => {
+                    warn!(error = %e, "failed to persist mock turn row");
+                    Uuid::new_v4()
+                }
+            };
+
+            active_turn_n.store(turn_n, Ordering::SeqCst);
+
+            let preferred_answer = persistence
+                .get_preferred_answer(session_id, &question)
+                .unwrap_or_default();
+            let preferred_hit = !preferred_answer.trim().is_empty();
+
+            emit_mock_question_started(
+                &app,
+                MockQuestionStartedPayload {
+                    question: question.clone(),
+                    turn_n,
+                    total_questions: total_questions_now,
+                    mode: mode.as_str().to_string(),
+                    preferred_hit,
+                },
+            );
+            info!(
+                session_id = %session_id,
+                turn_n,
+                attempt,
+                preferred_hit,
+                mode = mode.as_str(),
+                "mock question started"
+            );
+
+            let suggested_handle = if preferred_hit {
+                let app_clone = app.clone();
+                let buffer_clone = Arc::clone(&suggested_buffer);
+                let text = preferred_answer.clone();
+                tokio::spawn(async move {
+                    emit_preferred_suggested_tokens(&app_clone, &text, mode, &buffer_clone);
+                    text
+                })
+            } else {
+                let app_clone = app.clone();
+                let failover_clone = Arc::clone(&failover);
+                let prompts_dir_clone = prompts_dir.clone();
+                let rag_clone = rag_chunks.clone();
+                let digest_clone = Arc::clone(&digest);
+                let buffer_clone = Arc::clone(&suggested_buffer);
+                let q = question.clone();
+                tokio::spawn(async move {
+                    run_suggested_answer(
+                        app_clone,
+                        session_id,
+                        &q,
+                        &rag_clone,
+                        &digest_clone,
+                        &failover_clone,
+                        &prompts_dir_clone,
+                        mode,
+                        buffer_clone,
+                    )
+                    .await
+                    .unwrap_or_default()
+                })
+            };
+
+            let mut cmd = None;
+            tokio::select! {
+                c = cmd_rx.recv() => {
+                    tts::stop_active().await;
+                    cmd = c;
+                }
+                _ = async {
+                    tts::speak_best_effort(&question).await;
+                    emit_mock_question_spoken(
+                        &app,
+                        MockQuestionSpokenPayload { turn_n },
+                    );
+                } => {}
+            }
+            if cmd.is_none() {
+                cmd = cmd_rx.recv().await;
+            }
+            let suggested_text = suggested_handle.await.unwrap_or_default();
+
+            match cmd {
+                Some(ConductorCommand::TurnComplete {
+                    user_text,
+                    audio_path,
+                }) => {
+                    turn_complete_user_text = user_text;
+                    turn_complete_audio = audio_path;
+                    turn_complete_suggested = suggested_text;
+                    break 'question_attempt;
+                }
+                Some(ConductorCommand::RetryTurn) => {
+                    info!(session_id = %session_id, turn_n, "mock question retry — same prompt");
+                    continue 'question_attempt;
+                }
+                Some(ConductorCommand::AskQuestion) => {
+                    warn!(session_id = %session_id, "unexpected AskQuestion during turn");
+                    continue 'question_attempt;
+                }
+                Some(ConductorCommand::FinishEarly) => {
+                    info!(session_id = %session_id, "mock interview finish early");
+                    break;
+                }
+                Some(ConductorCommand::Abort) | None => {
+                    info!(session_id = %session_id, "mock interview cancelled");
                     cancelled = true;
                     break;
                 }
             }
         }
 
-        if let Ok(mut buf) = suggested_buffer.write() {
-            buf.clear();
+        if cancelled {
+            break;
         }
 
-        let rag_chunks = query_mock_rag(
-            session_id,
-            &question,
-            &embedder,
-            vector_store.as_ref(),
-            Some((global_kb.as_ref(), &role_packs)),
-            8,
-        )
-        .await;
-
-        let turn_id = match persistence.begin_mock_turn(session_id, turn_n, &question) {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(error = %e, "failed to persist mock turn row");
-                Uuid::new_v4()
-            }
-        };
-
-        active_turn_n.store(turn_n, Ordering::SeqCst);
-
-        emit_mock_question_started(
-            &app,
-            MockQuestionStartedPayload {
-                question: question.clone(),
-                turn_n,
-                total_questions: total_questions_now,
-                mode: mode.as_str().to_string(),
-            },
-        );
-        info!(session_id = %session_id, turn_n, mode = mode.as_str(), "mock question started");
-
-        let suggested_handle = {
-            let app_clone = app.clone();
-            let failover_clone = Arc::clone(&failover);
-            let prompts_dir_clone = prompts_dir.clone();
-            let rag_clone = rag_chunks.clone();
-            let digest_clone = Arc::clone(&digest);
-            let buffer_clone = Arc::clone(&suggested_buffer);
-            let q = question.clone();
-            tokio::spawn(async move {
-                run_suggested_answer(
-                    app_clone,
-                    session_id,
-                    &q,
-                    &rag_clone,
-                    &digest_clone,
-                    &failover_clone,
-                    &prompts_dir_clone,
-                    mode,
-                    buffer_clone,
-                )
-                .await
-                .unwrap_or_default()
-            })
-        };
-
-        let mut cmd = None;
-        tokio::select! {
-            c = cmd_rx.recv() => {
-                tts::stop_active().await;
-                cmd = c;
-            }
-            _ = async {
-                tts::speak_best_effort(&question).await;
-                emit_mock_question_spoken(
-                    &app,
-                    MockQuestionSpokenPayload { turn_n },
-                );
-            } => {}
+        if let Err(e) = persistence.update_mock_turn_user_answer(
+            turn_id,
+            &turn_complete_user_text,
+            &turn_complete_audio,
+            &turn_complete_suggested,
+        ) {
+            warn!(error = %e, "failed to persist mock turn user answer");
         }
-        if cmd.is_none() {
-            cmd = cmd_rx.recv().await;
-        }
-        let suggested_text = suggested_handle.await.unwrap_or_default();
+        turns_completed += 1;
 
-        match cmd {
-            Some(ConductorCommand::TurnComplete {
-                user_text,
-                audio_path,
-            }) => {
-                if let Err(e) = persistence.update_mock_turn_user_answer(
-                    turn_id,
-                    &user_text,
-                    &audio_path,
-                    &suggested_text,
-                ) {
-                    warn!(error = %e, "failed to persist mock turn user answer");
-                }
-                turns_completed += 1;
-
-                // Kick off a background follow-up generation if we haven't
-                // exceeded the cap and we're still in the scripted phase.
-                if question_idx < scripted_count && followup_handles.len() < MAX_FOLLOW_UPS {
-                    let fq = question.clone();
-                    let fa = user_text.clone();
-                    let fd = Arc::clone(&digest);
-                    let ff = Arc::clone(&failover);
-                    let fp = prompts_dir.clone();
-                    let fa_app = app.clone();
-                    followup_handles.push(tokio::spawn(async move {
-                        generate_follow_up(&fa_app, &fq, &fa, &fd, &ff, &fp)
-                            .await
-                            .ok()
-                            .flatten()
-                    }));
-                }
-            }
-            Some(ConductorCommand::AskQuestion) => {
-                warn!(session_id = %session_id, "unexpected AskQuestion during turn");
-            }
-            Some(ConductorCommand::FinishEarly) => {
-                info!(session_id = %session_id, "mock interview finish early");
-                break;
-            }
-            Some(ConductorCommand::Abort) | None => {
-                info!(session_id = %session_id, "mock interview cancelled");
-                cancelled = true;
-                break;
-            }
+        if question_idx < scripted_count && followup_handles.len() < MAX_FOLLOW_UPS {
+            let fq = question.clone();
+            let fa = turn_complete_user_text.clone();
+            let fd = Arc::clone(&digest);
+            let ff = Arc::clone(&failover);
+            let fp = prompts_dir.clone();
+            let fa_app = app.clone();
+            followup_handles.push(tokio::spawn(async move {
+                generate_follow_up(&fa_app, &fq, &fa, &fd, &ff, &fp)
+                    .await
+                    .ok()
+                    .flatten()
+            }));
         }
 
         question_idx += 1;
@@ -464,10 +518,10 @@ async fn wait_for_ask_question(
             Some(ConductorCommand::AskQuestion) => return WaitOutcome::Ask,
             Some(ConductorCommand::FinishEarly) => return WaitOutcome::FinishEarly,
             Some(ConductorCommand::Abort) | None => return WaitOutcome::Cancelled,
-            Some(ConductorCommand::TurnComplete { .. }) => {
+            Some(ConductorCommand::TurnComplete { .. }) | Some(ConductorCommand::RetryTurn) => {
                 warn!(
                     session_id = %session_id,
-                    "TurnComplete received while waiting for AskQuestion — ignored"
+                    "unexpected conductor command while waiting for AskQuestion — ignored"
                 );
             }
         }
@@ -532,6 +586,25 @@ async fn run_suggested_answer<R: Runtime>(
     }
 
     Ok(full)
+}
+
+/// Stream a saved preferred answer into the suggested buffer (and Study-mode UI).
+fn emit_preferred_suggested_tokens<R: Runtime>(
+    app: &AppHandle<R>,
+    text: &str,
+    mode: MockMode,
+    suggested_buffer: &Arc<RwLock<String>>,
+) {
+    for word in text.split_inclusive(' ') {
+        if let Ok(mut buf) = suggested_buffer.write() {
+            buf.push_str(word);
+        }
+        if mode == MockMode::Study {
+            emit_mock_suggested_token(app, MockSuggestedTokenPayload {
+                token: word.to_string(),
+            });
+        }
+    }
 }
 
 fn build_suggested_prompt(

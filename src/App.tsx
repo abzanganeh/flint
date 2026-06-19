@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import {
@@ -8,6 +8,7 @@ import {
   getLegalConsentAccepted,
   getPendingImportToken,
   getSessionSnapshot,
+  getSessionFocus,
   importFromSmartResume,
   reopenSession,
   restoreDraftSession,
@@ -35,6 +36,7 @@ import Rehearsal from "./screens/Rehearsal";
 import MockInterview from "./screens/MockInterview";
 import MockSummary from "./screens/MockSummary";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
+import SessionFocusGate from "./screens/SessionFocusGate";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
 import { SessionSummary } from "./screens/SessionSummary";
@@ -49,6 +51,7 @@ type AppScreen =
   | "session-list"
   | "settings"
   | "digest-review"
+  | "session-focus"
   | "rehearsal"
   | "mock-interview"
   | "mock-summary"
@@ -65,6 +68,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "session-list",
   "settings",
   "digest-review",
+  "session-focus",
   "rehearsal",
   "mock-interview",
   "mock-summary",
@@ -144,20 +148,35 @@ function App() {
   const [settingsReturnScreen, setSettingsReturnScreen] =
     useState<AppScreen>("session-design");
   const [settingsInitialTab, setSettingsInitialTab] = useState<
-    "api-keys" | "usage-cap" | "privacy"
-  >("api-keys");
+    "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus"
+  >("account");
+  /** When true, Rehearsal clears stale panel state (after re-ingest). */
+  const [resetRehearsalPanels, setResetRehearsalPanels] = useState(false);
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
   const postSessionSummaryEnabled = useFeatureFlag("post_session_summary", true);
 
   const openSettings = (
     returnTo: AppScreen = screen,
-    initialTab: "api-keys" | "usage-cap" | "privacy" = "api-keys",
+    initialTab: "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus" = "account",
   ) => {
     setSettingsReturnScreen(returnTo);
     setSettingsInitialTab(initialTab);
     setScreen("settings");
   };
+
+  const routeAfterDigestOrLive = useCallback(async (sid: string) => {
+    try {
+      const focus = await getSessionFocus(sid);
+      if (!focus.focusConfirmedAt || focus.needsFocusRefresh) {
+        setScreen("session-focus");
+      } else {
+        setScreen("rehearsal");
+      }
+    } catch {
+      setScreen("session-focus");
+    }
+  }, []);
 
   const queueImportToken = (token: string | null) => {
     if (!token) return;
@@ -526,6 +545,7 @@ function App() {
     return (
       <Shell nav={nav}>
         <Settings
+          sessionId={sessionId}
           initialTab={settingsInitialTab}
           onBack={() => setScreen(settingsReturnScreen)}
           onLoggedOut={() => {
@@ -573,7 +593,10 @@ function App() {
       <Shell nav={nav}>
         <DigestReview
           sessionId={sessionId}
-          onComplete={() => setScreen("rehearsal")}
+          onComplete={() => {
+            setResetRehearsalPanels(true);
+            void routeAfterDigestOrLive(sessionId);
+          }}
           onOpenSettings={() => openSettings("digest-review", "api-keys")}
           onEditContext={() => void handleEditContextFromDigest()}
           onStartOver={() => {
@@ -589,14 +612,27 @@ function App() {
     );
   }
 
+  if (screen === "session-focus" && sessionId) {
+    return (
+      <Shell nav={nav}>
+        <SessionFocusGate
+          sessionId={sessionId}
+          onComplete={() => setScreen("rehearsal")}
+        />
+      </Shell>
+    );
+  }
+
   if (screen === "rehearsal" && sessionId) {
     return (
       <Shell nav={nav}>
         <Rehearsal
           sessionId={sessionId}
+          resetPanelsOnEntry={resetRehearsalPanels}
+          onResetPanelsHandled={() => setResetRehearsalPanels(false)}
           onComplete={() => setScreen("live")}
           onReturnToSetup={() => void handleReturnToSessionDesign()}
-          onOpenSettings={() => openSettings("rehearsal", "api-keys")}
+          onOpenSettings={() => openSettings("rehearsal", "session-focus")}
           onStartMock={() => setScreen("mock-interview")}
         />
       </Shell>
@@ -618,7 +654,15 @@ function App() {
   if (screen === "mock-summary") {
     return (
       <Shell nav={nav}>
-        <MockSummary onContinue={() => setScreen("rehearsal")} />
+        <MockSummary
+          onContinue={() => {
+            if (sessionId) {
+              void routeAfterDigestOrLive(sessionId);
+            } else {
+              setScreen("rehearsal");
+            }
+          }}
+        />
       </Shell>
     );
   }

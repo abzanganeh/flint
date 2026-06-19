@@ -168,9 +168,15 @@ pub async fn fetch_interview_questions(
 
 /// Merge remote bank questions into a local digest bank without duplicates.
 /// Local digest questions always win — remote entries are appended only.
-pub fn merge_question_bank(local: &mut Vec<String>, remote: &[InterviewQuestionDto]) {
-    let existing: std::collections::HashSet<String> =
-        local.iter().map(|q| q.trim().to_lowercase()).collect();
+pub fn merge_question_bank(
+    local: &mut Vec<crate::session::question_bank::BankQuestionEntry>,
+    remote: &[InterviewQuestionDto],
+) {
+    use crate::session::question_bank::{infer_question_tags, tag_from_subdomain, BankQuestionEntry};
+    let existing: std::collections::HashSet<String> = local
+        .iter()
+        .map(|e| e.question.trim().to_lowercase())
+        .collect();
     for question in remote {
         let text = question.text.trim();
         if text.is_empty() {
@@ -180,7 +186,13 @@ pub fn merge_question_bank(local: &mut Vec<String>, remote: &[InterviewQuestionD
         if existing.contains(&key) {
             continue;
         }
-        local.push(text.to_string());
+        let mut tags = infer_question_tags(text);
+        if let Some(sub) = tag_from_subdomain(Some(&question.category)) {
+            if !tags.iter().any(|t| t == &sub) {
+                tags.push(sub);
+            }
+        }
+        local.push(BankQuestionEntry::new(text.to_string(), tags));
     }
 }
 
@@ -267,9 +279,10 @@ mod tests {
 
     #[test]
     fn merge_question_bank_preserves_local_and_dedupes_remote() {
+        use crate::session::question_bank::BankQuestionEntry;
         let mut local = vec![
-            "Tell me about yourself.".to_string(),
-            "Why this role?".to_string(),
+            BankQuestionEntry::question_only("Tell me about yourself."),
+            BankQuestionEntry::question_only("Why this role?"),
         ];
         let remote = vec![
             InterviewQuestionDto {
@@ -289,7 +302,7 @@ mod tests {
         ];
         merge_question_bank(&mut local, &remote);
         assert_eq!(local.len(), 3);
-        assert!(local.contains(&"Explain CAP theorem trade-offs.".to_string()));
+        assert!(local.iter().any(|e| e.question.contains("CAP theorem")));
     }
 
     #[test]

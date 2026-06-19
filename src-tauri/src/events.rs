@@ -244,6 +244,9 @@ pub struct MockQuestionStartedPayload {
     pub total_questions: u32,
     /// `"practice"` or `"study"` — controls suggested-answer visibility in the UI.
     pub mode: String,
+    /// True when the suggested answer comes from a user-saved preferred script.
+    #[serde(default)]
+    pub preferred_hit: bool,
 }
 
 /// Emitted after TTS finishes (or is skipped) — UI may enable the mic.

@@ -142,6 +142,8 @@ mod tests {
                 truncated: false,
             },
             from_cache: false,
+            from_preferred: false,
+            preferred_answer: String::new(),
             cached_directional: None,
             cached_depth: None,
             turn_cancel: Arc::new(AtomicBool::new(false)),

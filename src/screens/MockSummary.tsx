@@ -183,6 +183,28 @@ function TurnCard({ turn, index }: { turn: MockTurn; index: number }) {
   );
 }
 
+function aggregateTrends(turns: MockTurn[]): {
+  gapCounts: [string, number][];
+  weakest: MockTurn[];
+} {
+  const gapMap = new Map<string, number>();
+  for (const turn of turns) {
+    if (isSkippedTurn(turn)) continue;
+    const coach = parseCoach(turn.coach_json);
+    for (const gap of coach?.context_gaps ?? []) {
+      const key = gap.trim();
+      if (!key) continue;
+      gapMap.set(key, (gapMap.get(key) ?? 0) + 1);
+    }
+  }
+  const gapCounts = [...gapMap.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const weakest = [...turns]
+    .filter((t) => !isSkippedTurn(t) && t.score > 0)
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 3);
+  return { gapCounts, weakest };
+}
+
 export function MockSummary({ onContinue }: Props) {
   const [turns, setTurns] = useState<MockTurn[]>([]);
   const [loading, setLoading] = useState(true);
@@ -210,6 +232,7 @@ export function MockSummary({ onContinue }: Props) {
     scoredTurns.length > 0
       ? Math.round(scoredTurns.reduce((s, t) => s + t.score, 0) / scoredTurns.length)
       : 0;
+  const { gapCounts, weakest } = aggregateTrends(turns);
 
   if (loading) {
     return (
@@ -253,6 +276,36 @@ export function MockSummary({ onContinue }: Props) {
           )}
         </div>
       </header>
+
+      {(gapCounts.length > 0 || weakest.length > 0) && (
+        <section className="ms-trends" data-testid="mock-summary-trends">
+          {weakest.length > 0 && (
+            <div className="ms-trend-block">
+              <h2 className="ms-trend-title">Weakest answers</h2>
+              <ul className="ms-list">
+                {weakest.map((t) => (
+                  <li key={t.turn_n}>
+                    Q{t.turn_n}: {t.score} — {t.question.slice(0, 80)}
+                    {t.question.length > 80 ? "…" : ""}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {gapCounts.length > 0 && (
+            <div className="ms-trend-block">
+              <h2 className="ms-trend-title">Recurring context gaps</h2>
+              <ul className="ms-list">
+                {gapCounts.map(([gap, count]) => (
+                  <li key={gap}>
+                    {gap} ({count}×)
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="ms-turns">
         {turns.map((turn, i) => (

@@ -37,11 +37,15 @@ pub async fn run_directional<R: Runtime>(
     let ttft_start = Instant::now();
     let provider_name = failover.active_provider_name().to_string();
 
-    // Pre-warm cache hit — serve cached response without an LLM round-trip.
+    // Pre-warm / preferred hit — serve cached response without an LLM round-trip.
     if let Some(cached) = ctx.cached_directional {
         let text = emit_cached_directional_tokens(&cached, &app, &ctx.turn_cancel);
         let ttft_ms = ttft_start.elapsed().as_millis() as u64;
-        log_cache_served(ctx.session_id, ttft_ms, &provider_name);
+        if ctx.from_preferred {
+            log_preferred_served(ctx.session_id, ttft_ms, &provider_name);
+        } else {
+            log_cache_served(ctx.session_id, ttft_ms, &provider_name);
+        }
         emit_thread_status(
             &app,
             ThreadStatusPayload {
@@ -149,6 +153,21 @@ fn log_cache_served(session_id: Uuid, ttft_ms: u64, provider: &str) {
     );
 }
 
+fn log_preferred_served(session_id: Uuid, ttft_ms: u64, provider: &str) {
+    info!(
+        session_id = %session_id,
+        event = "directional_thread_complete",
+        thread_type = "directional",
+        ttft_ms,
+        stream_complete_ms = ttft_ms,
+        provider = %provider,
+        cache_hit = true,
+        preferred_hit = true,
+        model = %provider,
+        "directional served from preferred answer"
+    );
+}
+
 fn log_first_token(session_id: Uuid, ttft_ms: u64, provider: &str) {
     info!(
         session_id = %session_id,
@@ -215,11 +234,22 @@ fn build_prompt(
     };
 
     let key_skills = ctx.digest.key_skills.join(", ");
+    let style = crate::session::question_attempts::answer_style_instructions(&ctx.question, false);
+    let preferred_hint = if ctx.preferred_answer.trim().is_empty() || ctx.from_preferred {
+        String::new()
+    } else {
+        format!(
+            "\n\n[Your saved preferred answer for this question — refine or stay close to it]\n{}",
+            ctx.preferred_answer.trim()
+        )
+    };
 
     Ok(template
         .replace("{session_domain}", &ctx.digest.domain)
         .replace("{rag_chunks}", &rag_text)
         .replace("{qa_chunks}", &qa_section)
+        .replace("{answer_style_instructions}", &style)
+        .replace("{preferred_answer_hint}", &preferred_hint)
         .replace(
             "{rolling_summary_if_compressed}",
             &ctx.memory_ctx.rolling_summary,

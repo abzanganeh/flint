@@ -2,8 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
+  advanceMockTurn,
   askMockQuestion,
   endMockTurn,
+  regradeMockTurn,
+  retryMockTurn,
   skipMockTurn,
   startMock,
   startMockTurn,
@@ -38,7 +41,9 @@ interface TurnState {
   turnN: number;
   totalQuestions: number;
   question: string;
+  preferredHit: boolean;
   userTranscript: string;
+  editTranscript: string;
   suggestedText: string;
   suggestedStreaming: boolean;
   coachFeedback: CoachFeedback | null;
@@ -50,7 +55,9 @@ const emptyTurn = (): TurnState => ({
   turnN: 0,
   totalQuestions: 0,
   question: "",
+  preferredHit: false,
   userTranscript: "",
+  editTranscript: "",
   suggestedText: "",
   suggestedStreaming: false,
   coachFeedback: null,
@@ -71,6 +78,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const paceRef = useRef<MockPace>(pace);
   const studyModeRef = useRef<MockStudyMode>(studyMode);
   const beginAnsweringRef = useRef<(() => Promise<void>) | null>(null);
+  const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     paceRef.current = pace;
@@ -87,7 +95,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
 
   const beginAnswering = useCallback(async () => {
     setRecording(true);
-    setTurn((t) => ({ ...t, userTranscript: "", coachFeedback: null, coachLoading: false }));
+    setTurn((t) => ({
+      ...t,
+      userTranscript: "",
+      editTranscript: "",
+      coachFeedback: null,
+      coachLoading: false,
+    }));
     setPhase("answering");
     try {
       await startMockTurn();
@@ -119,7 +133,8 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             turnN: p.turn_n,
             totalQuestions: p.total_questions,
             question: p.question,
-            suggestedStreaming: p.mode === "study",
+            preferredHit: Boolean(p.preferred_hit),
+            suggestedStreaming: p.mode === "study" || Boolean(p.preferred_hit),
           }));
           setRecording(false);
           setPhase("speaking");
@@ -158,12 +173,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                 coachFeedback: fb,
                 coachLoading: false,
                 score: p.score,
+                editTranscript: t.userTranscript,
               };
             } catch {
-              return { ...t, coachLoading: false };
+              return { ...t, coachLoading: false, editTranscript: t.userTranscript };
             }
           });
-          setPhase(paceRef.current === "guided" ? "ready" : "reviewing");
+          setPhase("reviewing");
         }),
         onMockEnded(() => {
           void stopMock(false)
@@ -184,9 +200,25 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     void setup();
     return () => {
       cancelled = true;
+      if (autoAdvanceRef.current) clearTimeout(autoAdvanceRef.current);
       unlistenAll();
     };
   }, [unlistenAll, onComplete]);
+
+  useEffect(() => {
+    if (autoAdvanceRef.current) {
+      clearTimeout(autoAdvanceRef.current);
+      autoAdvanceRef.current = null;
+    }
+    if (phase !== "reviewing" || pace !== "continuous") return;
+    if (turn.coachLoading || !turn.coachFeedback) return;
+    autoAdvanceRef.current = setTimeout(() => {
+      void advanceMockTurn().catch((e) => setError(String(e)));
+    }, 2500);
+    return () => {
+      if (autoAdvanceRef.current) clearTimeout(autoAdvanceRef.current);
+    };
+  }, [phase, pace, turn.coachLoading, turn.coachFeedback]);
 
   const handleStartSession = async () => {
     setError(null);
@@ -209,6 +241,52 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     } catch (e) {
       setError(String(e));
       setPhase("ready");
+    }
+  };
+
+  const handleAdvance = async () => {
+    setError(null);
+    try {
+      await advanceMockTurn();
+      if (pace === "guided") {
+        setPhase("ready");
+        setTurn(emptyTurn());
+      } else {
+        setPhase("waiting");
+      }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleRetry = async () => {
+    setError(null);
+    try {
+      await retryMockTurn();
+      setTurn((t) => ({
+        ...t,
+        userTranscript: "",
+        editTranscript: "",
+        coachFeedback: null,
+        coachLoading: false,
+        suggestedText: "",
+        suggestedStreaming: studyMode === "study" || t.preferredHit,
+      }));
+      setRecording(false);
+      setPhase("speaking");
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleRegrade = async () => {
+    setError(null);
+    setTurn((t) => ({ ...t, coachLoading: true }));
+    try {
+      await regradeMockTurn(turn.editTranscript);
+    } catch (e) {
+      setError(String(e));
+      setTurn((t) => ({ ...t, coachLoading: false }));
     }
   };
 
@@ -243,10 +321,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const handleFinishEarly = async () => {
     setError(null);
     try {
-      if (phase === "answering" && recording) {
+      if (phase === "reviewing") {
+        await advanceMockTurn();
+      } else if (phase === "answering" && recording) {
         setRecording(false);
         setTurn((t) => ({ ...t, coachLoading: true }));
         await endMockTurn();
+        return;
       }
       await stopMock(true);
     } catch (e) {
@@ -608,6 +689,18 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
               INTERVIEWER
             </div>
             <p style={{ margin: 0, fontSize: "14px", lineHeight: 1.6 }}>{turn.question}</p>
+            {turn.preferredHit && (
+              <p
+                style={{
+                  margin: "8px 0 0",
+                  fontSize: "11px",
+                  color: "#22c55e",
+                  fontWeight: 600,
+                }}
+              >
+                Using your saved Live script
+              </p>
+            )}
           </div>
         )}
 
@@ -687,16 +780,38 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                 </span>
               )}
             </div>
-            <p
-              style={{
-                margin: 0,
-                fontSize: "13px",
-                lineHeight: 1.6,
-                color: turn.userTranscript ? "#e2e8f0" : "#475569",
-              }}
-            >
-              {turn.userTranscript || (recording ? "Listening…" : "No answer recorded.")}
-            </p>
+            {phase === "reviewing" ? (
+              <textarea
+                value={turn.editTranscript}
+                onChange={(e) =>
+                  setTurn((t) => ({ ...t, editTranscript: e.target.value }))
+                }
+                rows={4}
+                style={{
+                  width: "100%",
+                  boxSizing: "border-box",
+                  background: "#0f1117",
+                  border: "1px solid #374151",
+                  borderRadius: 6,
+                  color: "#e2e8f0",
+                  fontSize: "13px",
+                  lineHeight: 1.6,
+                  padding: "8px 10px",
+                  resize: "vertical",
+                }}
+              />
+            ) : (
+              <p
+                style={{
+                  margin: 0,
+                  fontSize: "13px",
+                  lineHeight: 1.6,
+                  color: turn.userTranscript ? "#e2e8f0" : "#475569",
+                }}
+              >
+                {turn.userTranscript || (recording ? "Listening…" : "No answer recorded.")}
+              </p>
+            )}
           </div>
         )}
 
@@ -773,9 +888,39 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </>
         )}
 
+        {phase === "reviewing" && (
+          <>
+            <button
+              type="button"
+              data-testid="mock-regrade-button"
+              onClick={() => void handleRegrade()}
+              disabled={turn.coachLoading || !turn.editTranscript.trim()}
+              style={ghostBtn}
+            >
+              Re-grade
+            </button>
+            <button
+              type="button"
+              data-testid="mock-retry-button"
+              onClick={() => void handleRetry()}
+              style={ghostBtn}
+            >
+              Try again
+            </button>
+            <button
+              type="button"
+              data-testid="mock-next-button"
+              onClick={() => void handleAdvance()}
+              style={primaryBtn}
+            >
+              {pace === "guided" ? "Next question" : "Continue"}
+            </button>
+          </>
+        )}
+
         {phase === "reviewing" && pace === "continuous" && (
           <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center", flex: 1 }}>
-            Analyzing your answer… next question when ready.
+            Auto-advancing in a moment…
           </span>
         )}
       </div>

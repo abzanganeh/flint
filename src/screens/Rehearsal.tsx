@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import PreferredAnswerPanel from "../components/PreferredAnswerPanel";
 import FirstRunRehearsalModal, {
   isFirstRunModalDismissed,
 } from "../components/FirstRunRehearsalModal";
@@ -34,6 +35,9 @@ import { useUIStore } from "../store/ui";
 
 export interface RehearsalProps {
   sessionId: string;
+  /** Clear directional/depth/clarifying panels (e.g. after re-ingest). */
+  resetPanelsOnEntry?: boolean;
+  onResetPanelsHandled?: () => void;
   onComplete: () => void;
   onReturnToSetup?: () => void;
   onOpenSettings?: () => void;
@@ -52,7 +56,15 @@ const emptyFields: SessionContextFields = {
   strategyNotes: "",
 };
 
-const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onStartMock }: RehearsalProps) => {
+const Rehearsal = ({
+  sessionId,
+  resetPanelsOnEntry = false,
+  onResetPanelsHandled,
+  onComplete,
+  onReturnToSetup,
+  onOpenSettings,
+  onStartMock,
+}: RehearsalProps) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,6 +79,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
     streamingBuffers,
     clearStreamingBuffers,
     clearClarifyingQuestions,
+    resetOrchestratorPanels,
     setLastManualQuestion,
     setConfidenceLevel,
     ragChunks,
@@ -74,6 +87,8 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
     clarifyingQuestions,
     lastManualQuestion,
   } = useUIStore();
+
+  const prevSessionIdRef = useRef<string | null>(null);
 
   const [lastAskedQuestion, setLastAskedQuestion] = useState("");
   const [bankRefreshKey, setBankRefreshKey] = useState(0);
@@ -100,6 +115,27 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
   useEffect(() => {
     void loadFields();
   }, [loadFields]);
+
+  // Fresh panel state after re-setup (same session) or when switching sessions.
+  useEffect(() => {
+    const sessionChanged =
+      prevSessionIdRef.current !== null && prevSessionIdRef.current !== sessionId;
+    if (resetPanelsOnEntry || sessionChanged) {
+      resetOrchestratorPanels();
+      setQuestion("");
+      setLastAskedQuestion("");
+      setError(null);
+      if (resetPanelsOnEntry) {
+        onResetPanelsHandled?.();
+      }
+    }
+    prevSessionIdRef.current = sessionId;
+  }, [
+    sessionId,
+    resetPanelsOnEntry,
+    resetOrchestratorPanels,
+    onResetPanelsHandled,
+  ]);
 
   useEffect(() => {
     void getCostStatus()
@@ -198,8 +234,8 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
     if (!hasResponse) {
       const proceed = window.confirm(
         "You have not asked a practice question this session.\n\n" +
-          "Rehearsal and Mock Interview help Flint ground answers in your prep. " +
-          "Going live without practicing may produce incomplete or less accurate responses.\n\n" +
+          "Rehearsal helps you tailor answers before Live. Going live without " +
+          "practicing or saving preferred answers may produce generic responses.\n\n" +
           "Go live anyway?",
       );
       if (!proceed) return;
@@ -263,7 +299,7 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
             Rehearsal Mode
           </span>
           <span style={{ color: "#6b7280", fontSize: "11px" }}>
-            — practice before going live. Ctrl+Enter to ask; Enter for a new line.
+            — Ask → tailor your answer → save for Live. Ctrl+Enter to ask.
           </span>
 
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
@@ -315,6 +351,12 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
               </button>
             )}
           </div>
+        </div>
+
+        <div className="rehearsal-workflow-banner">
+          <strong>How rehearsal feeds Live:</strong> Flint drafts from your prep context.
+          Edit each answer into your own words, then <strong>Save as preferred answer</strong>.
+          Saved scripts appear instantly when the same question comes up in your live interview.
         </div>
 
         {/* Question input */}
@@ -415,6 +457,17 @@ const Rehearsal = ({ sessionId, onComplete, onReturnToSetup, onOpenSettings, onS
                   setWeakContext(false);
                 }
               }}
+            />
+          </div>
+        )}
+
+        {!asking && hasResponse && lastAskedQuestion && (
+          <div style={{ padding: "8px 16px", flexShrink: 0 }}>
+            <PreferredAnswerPanel
+              sessionId={sessionId}
+              question={lastAskedQuestion}
+              suggestedAnswer={streamingBuffers.directional}
+              onSaved={() => setBankRefreshKey((k) => k + 1)}
             />
           </div>
         )}

@@ -606,13 +606,53 @@ export interface QuestionBankEntry {
   confidenceScore: number;
   coachScore: number;
   lastSource: string | null;
+  hasPreferredAnswer: boolean;
+  tags?: string[];
 }
+
+export interface SessionFocusDto {
+  focusName: string;
+  focusTags: string[];
+  recruiterBrief: string;
+  focusNotes: string;
+  focusConfirmedAt: number | null;
+  needsFocusRefresh: boolean;
+}
+
+export const getSessionFocus = (sessionId: string): Promise<SessionFocusDto> =>
+  invoke<SessionFocusDto>("get_session_focus", { sessionId });
+
+export const saveSessionFocus = (
+  sessionId: string,
+  focus: SessionFocusDto,
+): Promise<void> => invoke<void>("save_session_focus", { sessionId, focus });
+
+export const listQuestionBankTags = (sessionId: string): Promise<string[]> =>
+  invoke<string[]>("list_question_bank_tags", { sessionId });
+
+export const getPreferredAnswer = (
+  sessionId: string,
+  question: string,
+): Promise<string> =>
+  invoke<string>("get_preferred_answer", { sessionId, question });
+
+export const savePreferredAnswer = (
+  sessionId: string,
+  question: string,
+  answer: string,
+): Promise<void> =>
+  invoke<void>("save_preferred_answer", { sessionId, question, answer });
 
 export const getQuestionBank = (
   sessionId: string,
   shuffle = true,
+  filterByFocus = true,
 ): Promise<QuestionBankEntry[]> =>
-  invoke<QuestionBankEntry[]>("get_question_bank", { sessionId, shuffle });
+  invoke<QuestionBankEntry[]>("get_question_bank", {
+    sessionId,
+    shuffle,
+    filterByFocus,
+  });
 
 export const addToQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
   invoke<string[]>("add_to_question_bank", { sessionId, question });
@@ -689,6 +729,13 @@ export const askMockQuestion = (): Promise<void> =>
 export const startMockTurn = (): Promise<void> => invoke<void>("start_mock_turn");
 
 export const endMockTurn = (): Promise<void> => invoke<void>("end_mock_turn");
+
+export const advanceMockTurn = (): Promise<void> => invoke<void>("advance_mock_turn");
+
+export const retryMockTurn = (): Promise<void> => invoke<void>("retry_mock_turn");
+
+export const regradeMockTurn = (userText: string): Promise<void> =>
+  invoke<void>("regrade_mock_turn", { userText });
 
 export const skipMockTurn = (): Promise<void> => invoke<void>("skip_mock_turn");
 

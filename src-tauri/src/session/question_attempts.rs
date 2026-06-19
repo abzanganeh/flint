@@ -40,6 +40,67 @@ pub fn mock_attempt_satisfied(coach_score: u8, skipped: bool) -> bool {
     !skipped && coach_score >= MOCK_COACH_SATISFIED_THRESHOLD
 }
 
+/// Behavioral / intro questions need spoken first-person answers, not resume blocks.
+pub fn is_behavioral_question(question: &str) -> bool {
+    let q = strip_rephrase_prefix(question).trim().to_lowercase();
+    if q.is_empty() {
+        return false;
+    }
+    const PHRASES: &[&str] = &[
+        "tell me about yourself",
+        "walk me through your background",
+        "walk me through your resume",
+        "introduce yourself",
+        "why are you interested",
+        "why this role",
+        "why do you want",
+        "why fisher",
+        "why our company",
+        "greatest strength",
+        "greatest weakness",
+        "weakness",
+        "where do you see yourself",
+        "why should we hire",
+        "tell me about a time",
+        "describe a time",
+        "describe a situation",
+        "how do you handle conflict",
+        "tell me about a challenge",
+    ];
+    PHRASES.iter().any(|p| q.contains(p))
+}
+
+/// Prompt injection for directional/depth threads — behavioral vs technical tone.
+pub fn answer_style_instructions(question: &str, for_depth: bool) -> String {
+    if is_behavioral_question(question) {
+        if for_depth {
+            "Write a spoken answer the candidate can read aloud in first person. \
+             Use short paragraphs, not bullet lists. For STAR-style questions, cover situation, \
+             your action, and result. Ground every detail in [Supporting context] only — \
+             never invent employers, dates, metrics, or certifications. \
+             For \"tell me about yourself\": name and location first, then recent roles in order, \
+             close with why this role fits. Maximum 150 words."
+                .to_string()
+        } else {
+            "Speak in first person as the candidate (\"I\", not \"the candidate\"). \
+             Sound natural read aloud — short sentences, no bullet lists. \
+             Use only facts from [Supporting context]; never invent employers, metrics, or certs. \
+             For \"tell me about yourself\": name + location, 2–3 recent roles, why this role. \
+             Maximum 3 sentences."
+                .to_string()
+        }
+    } else if for_depth {
+        "Answer in first person as the candidate. Inverted pyramid: lead with the direct answer, \
+         then reasoning and one concrete example from [Supporting context]. \
+         Do not invent tools, metrics, or project names. Maximum 150 words."
+            .to_string()
+    } else {
+        "Answer in first person as the candidate. Be specific using [Supporting context] only. \
+         Do not invent metrics, tools, or project names. Maximum 3 sentences."
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +151,13 @@ mod tests {
     #[test]
     fn mock_low_score_not_satisfied() {
         assert!(!mock_attempt_satisfied(50, false));
+    }
+
+    #[test]
+    fn behavioral_detects_tmay() {
+        assert!(is_behavioral_question("Tell me about yourself"));
+        assert!(!is_behavioral_question(
+            "How would you design Okta SSO for 50k users?"
+        ));
     }
 }
