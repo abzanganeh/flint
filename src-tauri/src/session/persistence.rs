@@ -188,7 +188,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 13;
+const SCHEMA_VERSION: u32 = 14;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -440,6 +440,18 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v13")?;
         info!("sqlite schema migrated to version 13");
+    }
+
+    if current < 14 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN whisper_initial_prompt TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 14;
+            ",
+        )
+        .context("schema migration v14")?;
+        info!("sqlite schema migrated to version 14");
     }
 
     Ok(())
@@ -1961,6 +1973,152 @@ impl SessionPersistence {
         Ok(Some(digest))
     }
 
+    /// Load the session-specific Whisper initial prompt, if stored.
+    pub fn load_whisper_initial_prompt(&self, session_id: Uuid) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let prompt: String = conn
+            .query_row(
+                "SELECT whisper_initial_prompt FROM sessions WHERE id = ?1",
+                params![sid],
+                |r| r.get(0),
+            )
+            .context("load whisper_initial_prompt column")?;
+        if prompt.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(prompt))
+        }
+    }
+
+    /// Persist the session-specific Whisper initial prompt.
+    pub fn save_whisper_initial_prompt(&self, session_id: Uuid, prompt: &str) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.execute(
+            "UPDATE sessions SET whisper_initial_prompt = ?1 WHERE id = ?2",
+            params![prompt, sid],
+        )
+        .context("save whisper_initial_prompt")?;
+        debug!(session_id = %session_id, len = prompt.len(), "whisper initial prompt stored");
+        Ok(())
+    }
+
+    fn get_app_preference(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT value FROM app_preferences WHERE key = ?1")
+            .context("prepare app preference read")?;
+        let mut rows = stmt.query(params![key]).context("query app preference")?;
+        if let Some(row) = rows.next().context("fetch app preference row")? {
+            return Ok(Some(row.get(0).context("read app preference value")?));
+        }
+        Ok(None)
+    }
+
+    fn set_app_preference(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "INSERT INTO app_preferences (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )
+        .context("write app preference")?;
+        Ok(())
+    }
+
+    fn delete_app_preference(&self, key: &str) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute("DELETE FROM app_preferences WHERE key = ?1", params![key])
+            .context("delete app preference")?;
+        Ok(())
+    }
+
+    pub fn mic_calibration_passed_key(fingerprint: &str) -> String {
+        format!("mic_calibration_passed_{fingerprint}")
+    }
+
+    pub fn mic_calibration_wer_system_key(fingerprint: &str) -> String {
+        format!("mic_calibration_wer_system_{fingerprint}")
+    }
+
+    pub fn mic_calibration_wer_mic_key(fingerprint: &str) -> String {
+        format!("mic_calibration_wer_mic_{fingerprint}")
+    }
+
+    pub fn mic_calibration_at_key(fingerprint: &str) -> String {
+        format!("mic_calibration_at_{fingerprint}")
+    }
+
+    pub fn mic_calibration_forced_key(fingerprint: &str) -> String {
+        format!("mic_calibration_forced_{fingerprint}")
+    }
+
+    /// Read mic calibration pass state for a device fingerprint.
+    pub fn get_mic_calibration_passed(&self, fingerprint: &str) -> Result<bool> {
+        Ok(self
+            .get_app_preference(&Self::mic_calibration_passed_key(fingerprint))?
+            .is_some_and(|v| v == "1"))
+    }
+
+    pub fn get_mic_calibration_forced(&self, fingerprint: &str) -> Result<bool> {
+        Ok(self
+            .get_app_preference(&Self::mic_calibration_forced_key(fingerprint))?
+            .is_some_and(|v| v == "1"))
+    }
+
+    pub fn mark_mic_calibration_passed(
+        &self,
+        fingerprint: &str,
+        wer_system: f32,
+        wer_mic: f32,
+        forced: bool,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        self.set_app_preference(&Self::mic_calibration_passed_key(fingerprint), "1")?;
+        self.set_app_preference(
+            &Self::mic_calibration_wer_system_key(fingerprint),
+            &format!("{wer_system:.4}"),
+        )?;
+        self.set_app_preference(
+            &Self::mic_calibration_wer_mic_key(fingerprint),
+            &format!("{wer_mic:.4}"),
+        )?;
+        self.set_app_preference(&Self::mic_calibration_at_key(fingerprint), &now.to_string())?;
+        self.set_app_preference(
+            &Self::mic_calibration_forced_key(fingerprint),
+            if forced { "1" } else { "0" },
+        )?;
+        Ok(())
+    }
+
+    pub fn clear_mic_calibration(&self, fingerprint: &str) -> Result<()> {
+        self.delete_app_preference(&Self::mic_calibration_passed_key(fingerprint))?;
+        self.delete_app_preference(&Self::mic_calibration_wer_system_key(fingerprint))?;
+        self.delete_app_preference(&Self::mic_calibration_wer_mic_key(fingerprint))?;
+        self.delete_app_preference(&Self::mic_calibration_at_key(fingerprint))?;
+        self.delete_app_preference(&Self::mic_calibration_forced_key(fingerprint))?;
+        Ok(())
+    }
+
+    pub fn load_mic_calibration_wer_system(&self, fingerprint: &str) -> Result<Option<f32>> {
+        Ok(self
+            .get_app_preference(&Self::mic_calibration_wer_system_key(fingerprint))?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    pub fn load_mic_calibration_wer_mic(&self, fingerprint: &str) -> Result<Option<f32>> {
+        Ok(self
+            .get_app_preference(&Self::mic_calibration_wer_mic_key(fingerprint))?
+            .and_then(|v| v.parse().ok()))
+    }
+
+    pub fn load_mic_calibration_at(&self, fingerprint: &str) -> Result<Option<i64>> {
+        Ok(self
+            .get_app_preference(&Self::mic_calibration_at_key(fingerprint))?
+            .and_then(|v| v.parse().ok()))
+    }
+
     /// Delete all persisted data for `session_id`.
     ///
     /// Called after a session is successfully ended and synced, or when the
@@ -3022,6 +3180,31 @@ mod tests {
             loaded, qs,
             "insertion order must be preserved across reload"
         );
+    }
+
+    #[test]
+    fn whisper_initial_prompt_save_and_load_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Prompt", "interview", "swe")
+            .unwrap();
+        let prompt = "IAM architect interview at Fisher Investments.";
+        db.save_whisper_initial_prompt(sid, prompt).unwrap();
+        let loaded = db.load_whisper_initial_prompt(sid).unwrap();
+        assert_eq!(loaded.as_deref(), Some(prompt));
+    }
+
+    #[test]
+    fn mic_calibration_preference_round_trip() {
+        let db = new_db();
+        let fp = "test-device-fp";
+        assert!(!db.get_mic_calibration_passed(fp).unwrap());
+        db.mark_mic_calibration_passed(fp, 0.05, 0.10, false)
+            .unwrap();
+        assert!(db.get_mic_calibration_passed(fp).unwrap());
+        assert!(!db.get_mic_calibration_forced(fp).unwrap());
+        db.clear_mic_calibration(fp).unwrap();
+        assert!(!db.get_mic_calibration_passed(fp).unwrap());
     }
 
     #[test]

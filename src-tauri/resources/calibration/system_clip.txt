@@ -1,0 +1,1 @@
+Tell me about your experience at SecureAuth building adaptive authentication and ML-based risk engines. We use OAuth, OIDC, SAML, MFA, and IAM across multi-tenant SaaS platforms. Describe your work with Kerberos, LDAP, and enterprise identity federation for LLM and API security.

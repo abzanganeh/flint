@@ -567,7 +567,7 @@ fn configure_pipewire_monitor_source() {
 }
 
 #[cfg(target_os = "linux")]
-fn find_system_device(host: &cpal::Host) -> Result<Device> {
+pub(crate) fn find_system_device(host: &cpal::Host) -> Result<Device> {
     configure_pipewire_monitor_source();
 
     let devs: Vec<Device> = host
@@ -599,7 +599,7 @@ fn find_system_device(host: &cpal::Host) -> Result<Device> {
 }
 
 #[cfg(target_os = "windows")]
-fn find_system_device(host: &cpal::Host) -> Result<Device> {
+pub(crate) fn find_system_device(host: &cpal::Host) -> Result<Device> {
     // WASAPI loopback: the default output device can be used as a loopback
     // input source — cpal's WASAPI backend supports build_input_stream on
     // output devices for this purpose.
@@ -608,7 +608,7 @@ fn find_system_device(host: &cpal::Host) -> Result<Device> {
 }
 
 #[cfg(target_os = "macos")]
-fn find_system_device(host: &cpal::Host) -> Result<Device> {
+pub(crate) fn find_system_device(host: &cpal::Host) -> Result<Device> {
     let devs = host
         .input_devices()
         .context("Failed to enumerate input devices")?;

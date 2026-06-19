@@ -361,3 +361,14 @@ export const onAuthOAuthError = (
   listen<AuthOAuthErrorEventPayload>("auth_oauth_error", (event) =>
     handler(event.payload),
   );
+
+export interface AudioQualityStatusEventPayload {
+  level: "ok" | "low";
+}
+
+export const onAudioQualityStatus = (
+  handler: (payload: AudioQualityStatusEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<AudioQualityStatusEventPayload>("audio_quality_status", (event) =>
+    handler(event.payload),
+  );

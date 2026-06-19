@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 
 import OverlayLayout from "../components/OverlayLayout";
+import MicQualityBadge from "../components/MicQualityBadge";
 import PanicRestoreShell from "../components/PanicRestoreShell";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
@@ -223,6 +224,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       </div>
 
       <TokenBudgetIndicator />
+      <MicQualityBadge />
     </div>
     </PanicRestoreShell>
   );

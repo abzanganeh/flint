@@ -23,6 +23,7 @@ import {
   onMockUserTranscribed,
 } from "../events";
 import CoachPanel from "../panels/CoachPanel";
+import MicQualityBadge from "../components/MicQualityBadge";
 import SuggestedAnswerPanel from "../panels/SuggestedAnswerPanel";
 import { readShuffleQuestionsPreference, writeShuffleQuestionsPreference } from "../lib/shufflePreference";
 
@@ -924,6 +925,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </span>
         )}
       </div>
+      <MicQualityBadge />
     </div>
   );
 };

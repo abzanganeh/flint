@@ -747,3 +747,37 @@ export const getMockTurns = (): Promise<MockTurn[]> =>
 
 export const readMockAudioDataUrl = (path: string): Promise<string> =>
   invoke<string>("read_mock_audio_data_url", { path });
+
+export interface MicCalibrationStatusDto {
+  passedOnDevice: boolean;
+  deviceFingerprint: string;
+  werSystem: number | null;
+  werMic: number | null;
+  forced: boolean;
+  calibratedAt: number | null;
+}
+
+export interface CalibrationResultDto {
+  wer: number;
+  passed: boolean;
+  transcript: string;
+}
+
+export const getMicCalibrationStatus = (): Promise<MicCalibrationStatusDto> =>
+  invoke<MicCalibrationStatusDto>("get_mic_calibration_status");
+
+export const markMicCalibrationPassed = (
+  werSystem: number,
+  werMic: number,
+  forced = false,
+): Promise<void> =>
+  invoke<void>("mark_mic_calibration_passed", { werSystem, werMic, forced });
+
+export const clearMicCalibration = (): Promise<void> =>
+  invoke<void>("clear_mic_calibration");
+
+export const runSystemAudioCalibration = (): Promise<CalibrationResultDto> =>
+  invoke<CalibrationResultDto>("run_system_audio_calibration");
+
+export const runMicCalibration = (): Promise<CalibrationResultDto> =>
+  invoke<CalibrationResultDto>("run_mic_calibration");

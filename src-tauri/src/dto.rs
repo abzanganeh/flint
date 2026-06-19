@@ -416,3 +416,22 @@ pub struct SessionFocusDto {
     pub focus_confirmed_at: Option<i64>,
     pub needs_focus_refresh: bool,
 }
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicCalibrationStatusDto {
+    pub passed_on_device: bool,
+    pub device_fingerprint: String,
+    pub wer_system: Option<f32>,
+    pub wer_mic: Option<f32>,
+    pub forced: bool,
+    pub calibrated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationResultDto {
+    pub wer: f32,
+    pub passed: bool,
+    pub transcript: String,
+}

@@ -22,6 +22,7 @@ type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus";
 interface Props {
   onBack?: () => void;
   onLoggedOut?: () => void;
+  onRetestMic?: () => void;
   initialTab?: Tab;
   sessionId?: string | null;
 }
@@ -172,7 +173,13 @@ function CostCapTab() {
 
 // ── Account Tab ─────────────────────────────────────────────────────────────
 
-function AccountTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
+function AccountTab({
+  onLoggedOut,
+  onRetestMic,
+}: {
+  onLoggedOut?: () => void;
+  onRetestMic?: () => void;
+}) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -201,6 +208,23 @@ function AccountTab({ onLoggedOut }: { onLoggedOut?: () => void }) {
           {error}
         </p>
       )}
+
+      <section className="settings-tab__section">
+        <h4 className="settings-tab__subheading">Audio quality</h4>
+        <p className="settings-tab__description">
+          Re-run the mic and system audio calibration if you changed headsets, moved rooms,
+          or updated audio routing.
+        </p>
+        <button
+          className="settings-tab__btn"
+          type="button"
+          data-testid="settings-retest-mic"
+          disabled={!onRetestMic}
+          onClick={() => onRetestMic?.()}
+        >
+          Re-test mic and audio
+        </button>
+      </section>
 
       <section className="settings-tab__section">
         <h4 className="settings-tab__subheading">Sign out</h4>
@@ -493,7 +517,13 @@ const TAB_LABELS: Record<Tab, string> = {
   privacy: "Privacy",
 };
 
-export default function Settings({ onBack, onLoggedOut, initialTab = "account", sessionId }: Props) {
+export default function Settings({
+  onBack,
+  onLoggedOut,
+  onRetestMic,
+  initialTab = "account",
+  sessionId,
+}: Props) {
   const [activeTab, setActiveTab] = useState<Tab>(initialTab);
 
   return (
@@ -524,7 +554,9 @@ export default function Settings({ onBack, onLoggedOut, initialTab = "account", 
       <div className="settings-screen__panel" role="tabpanel">
         {activeTab === "api-keys" && <ProviderSettings />}
         {activeTab === "usage-cap" && <CostCapTab />}
-        {activeTab === "account" && <AccountTab onLoggedOut={onLoggedOut} />}
+        {activeTab === "account" && (
+          <AccountTab onLoggedOut={onLoggedOut} onRetestMic={onRetestMic} />
+        )}
         {activeTab === "session-focus" && <SessionFocusTab sessionId={sessionId} />}
         {activeTab === "privacy" && <PrivacyTab />}
       </div>

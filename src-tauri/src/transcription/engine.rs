@@ -17,6 +17,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use flate2::write::ZlibEncoder;
@@ -37,7 +38,8 @@ const LANGUAGE: &str = "en";
 const NO_SPEECH_THRESHOLD: f32 = 0.6;
 const COMPRESSION_RATIO_THRESHOLD: f32 = 2.4;
 const LOGPROB_THRESHOLD: f32 = -1.0;
-const INITIAL_PROMPT: &str = "Professional interview conversation.";
+/// §26 fallback — overridden per session via [`WhisperEngine::initial_prompt`].
+pub const DEFAULT_INITIAL_PROMPT: &str = "Professional interview conversation.";
 /// §26 `max_context: -1` — no context carry-over between VAD chunks.
 const MAX_TEXT_CONTEXT_TOKENS: i32 = 0;
 
@@ -56,16 +58,19 @@ pub struct WordTimestamp {
 }
 
 /// Successful transcription of one VAD speech segment.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TranscriptionResult {
     pub text: String,
     pub source: AudioSource,
     pub word_timestamps: Vec<WordTimestamp>,
+    /// Mean `avg_logprob` of surviving segments (for mic quality monitoring).
+    pub avg_logprob: Option<f32>,
 }
 
 pub struct WhisperEngine {
     model: WhisperContext,
     tier: HardwareTier,
+    initial_prompt: Arc<str>,
 }
 
 impl WhisperEngine {
@@ -73,7 +78,11 @@ impl WhisperEngine {
     ///
     /// Model file selection by tier (§17) is the caller's responsibility —
     /// typically `ggml-{tiny,small,base}.en.bin` from `~/.cache/whisper/`.
-    pub fn new(model_path: &str, tier: HardwareTier) -> Result<Self> {
+    pub fn new(
+        model_path: &str,
+        tier: HardwareTier,
+        initial_prompt: impl Into<Arc<str>>,
+    ) -> Result<Self> {
         let path = Path::new(model_path);
         let model = WhisperContext::new_with_params(path, WhisperContextParameters::default())
             .with_context(|| format!("Failed to load Whisper model at {}", path.display()))?;
@@ -84,7 +93,16 @@ impl WhisperEngine {
             "Whisper engine initialised"
         );
 
-        Ok(Self { model, tier })
+        Ok(Self {
+            model,
+            tier,
+            initial_prompt: initial_prompt.into(),
+        })
+    }
+
+    /// Session-specific Whisper initial prompt injected on every decode.
+    pub fn initial_prompt(&self) -> &str {
+        &self.initial_prompt
     }
 
     /// Transcribe one VAD speech chunk.
@@ -108,7 +126,7 @@ impl WhisperEngine {
             .create_state()
             .context("Failed to create Whisper state")?;
 
-        let mut params = build_full_params();
+        let mut params = build_full_params(&self.initial_prompt);
         params.set_n_threads(thread_count_for_tier(self.tier));
 
         state
@@ -124,6 +142,8 @@ impl WhisperEngine {
         let mut text_parts: Vec<String> = Vec::new();
         let mut word_timestamps: Vec<WordTimestamp> = Vec::new();
         let mut discarded: u32 = 0;
+        let mut logprob_sum: f32 = 0.0;
+        let mut logprob_count: u32 = 0;
 
         for segment in state.as_iter() {
             let no_speech_prob = segment.no_speech_probability();
@@ -199,6 +219,8 @@ impl WhisperEngine {
                     discarded += 1;
                     continue;
                 }
+                logprob_sum += avg_logprob;
+                logprob_count += 1;
             }
 
             text_parts.push(segment_text);
@@ -226,10 +248,16 @@ impl WhisperEngine {
         }
 
         let text = text_parts.join(" ").trim().to_string();
+        let avg_logprob = if logprob_count > 0 {
+            Some(logprob_sum / logprob_count as f32)
+        } else {
+            None
+        };
         Ok(Some(TranscriptionResult {
             text,
             source: chunk.source,
             word_timestamps,
+            avg_logprob,
         }))
     }
 
@@ -244,7 +272,7 @@ impl WhisperEngine {
 // ────────────────────────────────────────────────────────────────────────────
 
 /// Build `FullParams` with exact §26 Whisper.cpp configuration.
-fn build_full_params() -> FullParams<'static, 'static> {
+fn build_full_params(initial_prompt: &str) -> FullParams<'static, 'static> {
     let mut params = FullParams::new(SamplingStrategy::BeamSearch {
         beam_size: BEAM_SIZE,
         patience: -1.0,
@@ -256,7 +284,7 @@ fn build_full_params() -> FullParams<'static, 'static> {
     params.set_entropy_thold(COMPRESSION_RATIO_THRESHOLD);
     params.set_logprob_thold(LOGPROB_THRESHOLD);
     params.set_token_timestamps(true);
-    params.set_initial_prompt(INITIAL_PROMPT);
+    params.set_initial_prompt(initial_prompt);
     params.set_no_context(true);
     params.set_n_max_text_ctx(MAX_TEXT_CONTEXT_TOKENS);
 
@@ -379,7 +407,7 @@ mod tests {
 
     #[test]
     fn build_full_params_does_not_panic() {
-        let params = build_full_params();
+        let params = build_full_params(DEFAULT_INITIAL_PROMPT);
         drop(params);
     }
 

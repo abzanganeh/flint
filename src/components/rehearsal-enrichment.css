@@ -1135,3 +1135,57 @@
   font-size: 13px;
   line-height: 1.6;
 }
+
+/* ── M8 mic calibration + quality badge ─────────────────────────────────── */
+.mic-quality-badge {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 50;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(180, 83, 9, 0.92);
+  color: #fff7ed;
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+.mic-calibration {
+  max-width: 720px;
+  margin: 24px auto;
+  padding: 24px;
+  color: #e5e7eb;
+}
+
+.mic-calibration-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.mic-calibration-warning {
+  border: 1px solid #ef4444;
+  background: rgba(127, 29, 29, 0.35);
+  color: #fecaca;
+  padding: 16px;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.mic-calibration-paragraph {
+  border-left: 3px solid #7c3aed;
+  padding: 12px 16px;
+  margin: 16px 0;
+  color: #d1d5db;
+  line-height: 1.6;
+}
+
+.mic-calibration-wer {
+  color: #fbbf24;
+  font-size: 13px;
+}
+
+.mic-calibration-error {
+  color: #f87171;
+}

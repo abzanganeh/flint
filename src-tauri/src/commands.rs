@@ -10,16 +10,22 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::audio::capture::AudioCapture;
-use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
+use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
+use crate::calibration::{
+    device_fingerprint_or_fallback, load_mic_paragraph_text, load_system_clip_text,
+    log_audio_quality_calibration, score_transcript, transcribe_mic_calibration,
+    transcribe_system_calibration, MIC_WER_PASS_THRESHOLD, SYSTEM_WER_PASS_THRESHOLD,
+};
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto,
-    OpenSessionLimitsDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
-    SmartResumeImportDto, UserDto, WebSourceDto,
+    AppendResearchResultDto, CalibrationResultDto, DigestDto, HardwareProfileDto,
+    HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto, SessionConfigDto,
+    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
-    emit_mock_coach_feedback, emit_mock_suggested_token, emit_session_state_change,
-    emit_token_usage_update, MockCoachFeedbackPayload, MockSuggestedTokenPayload,
+    emit_calibration_mic_complete, emit_calibration_system_complete, emit_mock_coach_feedback,
+    emit_mock_suggested_token, emit_session_state_change, emit_token_usage_update,
+    CalibrationCompletePayload, MockCoachFeedbackPayload, MockSuggestedTokenPayload,
     SessionStateChangePayload, TokenUsageUpdatePayload,
 };
 use crate::health::{checks, hardware};
@@ -55,6 +61,7 @@ use crate::smart_resume;
 use crate::state::{AppState, LiveTaskHandles, MockTaskHandles};
 use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
+use crate::transcription::prompt::{build_whisper_initial_prompt, FALLBACK_WHISPER_INITIAL_PROMPT};
 
 const GENERIC_AUTH_ERROR: &str = "Authentication failed. Please try again.";
 const KEYCHAIN_SAVE_ERROR: &str = "Could not save credentials. Please try again.";
@@ -1066,6 +1073,14 @@ pub async fn confirm_digest(
     // 100+ staged questions. The regex path costs zero LLM tokens and runs in
     // O(lines).
     let context_blob_opt = state.persistence.get_session_context(sid).ok();
+    let context_for_prompt = context_blob_opt.clone().unwrap_or_default();
+    let whisper_prompt = build_whisper_initial_prompt(&digest_rust, &context_for_prompt);
+    if let Err(e) = state
+        .persistence
+        .save_whisper_initial_prompt(sid, &whisper_prompt)
+    {
+        warn!(session_id = %sid, error = %e, "failed to persist whisper initial prompt");
+    }
     let mut bank_questions_for_embed = Vec::new();
     {
         use crate::session::question_bank::BankQuestionEntry;
@@ -1674,6 +1689,35 @@ fn whisper_model_path(profile: &hardware::HardwareProfile) -> String {
     }
 
     recommended_path
+}
+
+async fn resolve_whisper_initial_prompt(state: &AppState, session_id: Uuid) -> Arc<str> {
+    if let Ok(Some(prompt)) = state.persistence.load_whisper_initial_prompt(session_id) {
+        return prompt.into();
+    }
+    if let Some(digest) = state.session_digest.read().await.clone() {
+        let context = state
+            .persistence
+            .get_session_context(session_id)
+            .unwrap_or_default();
+        return build_whisper_initial_prompt(&digest, &context).into();
+    }
+    FALLBACK_WHISPER_INITIAL_PROMPT.into()
+}
+
+fn init_whisper_engine(
+    profile: &hardware::HardwareProfile,
+    initial_prompt: Arc<str>,
+) -> Result<Arc<WhisperEngine>, String> {
+    let model_path = whisper_model_path(profile);
+    WhisperEngine::new(&model_path, profile.tier, initial_prompt)
+        .map(Arc::new)
+        .map_err(|e| {
+            format!(
+                "Whisper init failed (model={model_path} tier={}): {e}",
+                profile.tier
+            )
+        })
 }
 
 fn whisper_cache_dir() -> PathBuf {
@@ -2671,14 +2715,9 @@ pub async fn start_session(
 
     // ── 1. Hardware profile and Whisper model ─────────────────────────────
     let profile = hardware::assess_hardware();
-    let model_path = whisper_model_path(&profile);
-
-    let whisper = Arc::new(WhisperEngine::new(&model_path, profile.tier).map_err(|e| {
-        start_session_step_err(
-            "whisper init",
-            format!("model={model_path} tier={} error={e}", profile.tier),
-        )
-    })?);
+    let initial_prompt = resolve_whisper_initial_prompt(state.inner(), sid).await;
+    let whisper = init_whisper_engine(&profile, initial_prompt)
+        .map_err(|e| start_session_step_err("whisper init", e))?;
 
     // ── 2. Question detector ──────────────────────────────────────────────
     let detector = Arc::new(
@@ -2794,6 +2833,7 @@ pub async fn start_session(
         system_rx,
         mic_rx,
         Arc::clone(&state.persistence),
+        Arc::new(std::sync::Mutex::new(MicQualityMonitor::default())),
     ));
 
     let handles = LiveTaskHandles {
@@ -3780,9 +3820,8 @@ pub async fn start_mock(
 
     // Initialise WhisperEngine.
     let profile = hardware::assess_hardware();
-    let model_path = whisper_model_path(&profile);
-    let whisper =
-        Arc::new(WhisperEngine::new(&model_path, profile.tier).map_err(|e| e.to_string())?);
+    let initial_prompt = resolve_whisper_initial_prompt(state.inner(), session_id).await;
+    let whisper = init_whisper_engine(&profile, initial_prompt)?;
 
     let mic_capture = MicCapture::start(
         app.clone(),
@@ -4467,6 +4506,131 @@ pub async fn get_mock_turns(state: State<'_, AppState>) -> Result<Vec<MockTurnDt
             score: t.score,
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn get_mic_calibration_status(
+    state: State<'_, AppState>,
+) -> Result<MicCalibrationStatusDto, String> {
+    let fingerprint = device_fingerprint_or_fallback();
+    let passed = state
+        .persistence
+        .get_mic_calibration_passed(&fingerprint)
+        .map_err(|e| e.to_string())?;
+    let forced = state
+        .persistence
+        .get_mic_calibration_forced(&fingerprint)
+        .map_err(|e| e.to_string())?;
+    let wer_system = state
+        .persistence
+        .load_mic_calibration_wer_system(&fingerprint)
+        .map_err(|e| e.to_string())?;
+    let wer_mic = state
+        .persistence
+        .load_mic_calibration_wer_mic(&fingerprint)
+        .map_err(|e| e.to_string())?;
+    let calibrated_at = state
+        .persistence
+        .load_mic_calibration_at(&fingerprint)
+        .map_err(|e| e.to_string())?;
+
+    Ok(MicCalibrationStatusDto {
+        passed_on_device: passed,
+        device_fingerprint: fingerprint,
+        wer_system,
+        wer_mic,
+        forced,
+        calibrated_at,
+    })
+}
+
+#[tauri::command]
+pub async fn mark_mic_calibration_passed(
+    state: State<'_, AppState>,
+    wer_system: f32,
+    wer_mic: f32,
+    forced: Option<bool>,
+) -> Result<(), String> {
+    let fingerprint = device_fingerprint_or_fallback();
+    let forced = forced.unwrap_or(false);
+    state
+        .persistence
+        .mark_mic_calibration_passed(&fingerprint, wer_system, wer_mic, forced)
+        .map_err(|e| e.to_string())?;
+    let passed = !forced
+        && wer_system < SYSTEM_WER_PASS_THRESHOLD
+        && wer_mic < MIC_WER_PASS_THRESHOLD;
+    log_audio_quality_calibration(
+        &fingerprint,
+        wer_system,
+        wer_mic,
+        passed,
+        forced,
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn clear_mic_calibration(state: State<'_, AppState>) -> Result<(), String> {
+    let fingerprint = device_fingerprint_or_fallback();
+    state
+        .persistence
+        .clear_mic_calibration(&fingerprint)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn run_system_audio_calibration(
+    app: AppHandle,
+    _state: State<'_, AppState>,
+) -> Result<CalibrationResultDto, String> {
+    let profile = hardware::assess_hardware();
+    let whisper = init_whisper_engine(&profile, FALLBACK_WHISPER_INITIAL_PROMPT.into())?;
+    let reference = load_system_clip_text();
+    let transcript = transcribe_system_calibration(&reference, whisper)
+        .await
+        .map_err(|e| e.to_string())?;
+    let score = score_transcript(&reference, &transcript, SYSTEM_WER_PASS_THRESHOLD);
+    emit_calibration_system_complete(
+        &app,
+        CalibrationCompletePayload {
+            wer: score.wer,
+            passed: score.passed,
+            transcript: score.transcript.clone(),
+        },
+    );
+    Ok(CalibrationResultDto {
+        wer: score.wer,
+        passed: score.passed,
+        transcript: score.transcript,
+    })
+}
+
+#[tauri::command]
+pub async fn run_mic_calibration(
+    app: AppHandle,
+    _state: State<'_, AppState>,
+) -> Result<CalibrationResultDto, String> {
+    let profile = hardware::assess_hardware();
+    let whisper = init_whisper_engine(&profile, FALLBACK_WHISPER_INITIAL_PROMPT.into())?;
+    let reference = load_mic_paragraph_text();
+    let transcript = transcribe_mic_calibration(whisper)
+        .await
+        .map_err(|e| e.to_string())?;
+    let score = score_transcript(&reference, &transcript, MIC_WER_PASS_THRESHOLD);
+    emit_calibration_mic_complete(
+        &app,
+        CalibrationCompletePayload {
+            wer: score.wer,
+            passed: score.passed,
+            transcript: score.transcript.clone(),
+        },
+    );
+    Ok(CalibrationResultDto {
+        wer: score.wer,
+        passed: score.passed,
+        transcript: score.transcript,
+    })
 }
 
 #[derive(serde::Serialize)]

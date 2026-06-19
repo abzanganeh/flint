@@ -37,6 +37,7 @@ import MockInterview from "./screens/MockInterview";
 import MockSummary from "./screens/MockSummary";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
 import SessionFocusGate from "./screens/SessionFocusGate";
+import MicCalibration from "./screens/MicCalibration";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
 import { SessionSummary } from "./screens/SessionSummary";
@@ -52,6 +53,7 @@ type AppScreen =
   | "settings"
   | "digest-review"
   | "session-focus"
+  | "mic-calibration"
   | "rehearsal"
   | "mock-interview"
   | "mock-summary"
@@ -69,6 +71,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "settings",
   "digest-review",
   "session-focus",
+  "mic-calibration",
   "rehearsal",
   "mock-interview",
   "mock-summary",
@@ -152,6 +155,7 @@ function App() {
   >("account");
   /** When true, Rehearsal clears stale panel state (after re-ingest). */
   const [resetRehearsalPanels, setResetRehearsalPanels] = useState(false);
+  const [forceMicCalibrationRetest, setForceMicCalibrationRetest] = useState(false);
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
   const postSessionSummaryEnabled = useFeatureFlag("post_session_summary", true);
@@ -171,11 +175,21 @@ function App() {
       if (!focus.focusConfirmedAt || focus.needsFocusRefresh) {
         setScreen("session-focus");
       } else {
-        setScreen("rehearsal");
+        setScreen("mic-calibration");
       }
     } catch {
       setScreen("session-focus");
     }
+  }, []);
+
+  const routeAfterSessionFocus = useCallback(() => {
+    setForceMicCalibrationRetest(false);
+    setScreen("mic-calibration");
+  }, []);
+
+  const openMicCalibrationRetest = useCallback(() => {
+    setForceMicCalibrationRetest(true);
+    setScreen("mic-calibration");
   }, []);
 
   const queueImportToken = (token: string | null) => {
@@ -548,6 +562,7 @@ function App() {
           sessionId={sessionId}
           initialTab={settingsInitialTab}
           onBack={() => setScreen(settingsReturnScreen)}
+          onRetestMic={openMicCalibrationRetest}
           onLoggedOut={() => {
             setOnboardingStep("auth");
             setScreen("onboarding");
@@ -617,7 +632,21 @@ function App() {
       <Shell nav={nav}>
         <SessionFocusGate
           sessionId={sessionId}
-          onComplete={() => setScreen("rehearsal")}
+          onComplete={routeAfterSessionFocus}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "mic-calibration") {
+    return (
+      <Shell nav={nav}>
+        <MicCalibration
+          forceRetest={forceMicCalibrationRetest}
+          onComplete={() => {
+            setForceMicCalibrationRetest(false);
+            setScreen("rehearsal");
+          }}
         />
       </Shell>
     );

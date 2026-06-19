@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import PreferredAnswerPanel from "../components/PreferredAnswerPanel";
+import MicQualityBadge from "../components/MicQualityBadge";
 import FirstRunRehearsalModal, {
   isFirstRunModalDismissed,
 } from "../components/FirstRunRehearsalModal";
@@ -666,6 +667,7 @@ const Rehearsal = ({
           </button>
         </div>
       </div>
+      <MicQualityBadge />
       </>
     </PanicRestoreShell>
   );

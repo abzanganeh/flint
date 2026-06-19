@@ -321,3 +321,36 @@ pub fn emit_mock_coach_feedback<R: Runtime>(app: &AppHandle<R>, payload: MockCoa
 pub fn emit_mock_ended<R: Runtime>(app: &AppHandle<R>, payload: MockEndedPayload) {
     let _ = app.emit("mock_ended", payload);
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CalibrationCompletePayload {
+    pub wer: f32,
+    pub passed: bool,
+    pub transcript: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioQualityStatusPayload {
+    pub level: String,
+}
+
+pub fn emit_calibration_system_complete<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: CalibrationCompletePayload,
+) {
+    let _ = app.emit("calibration_system_complete", payload);
+}
+
+pub fn emit_calibration_mic_complete<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: CalibrationCompletePayload,
+) {
+    let _ = app.emit("calibration_mic_complete", payload);
+}
+
+pub fn emit_audio_quality_status<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: AudioQualityStatusPayload,
+) {
+    let _ = app.emit("audio_quality_status", payload);
+}

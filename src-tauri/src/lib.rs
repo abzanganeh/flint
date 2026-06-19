@@ -1,5 +1,6 @@
 pub mod audio;
 mod auth_session;
+pub mod calibration;
 mod commands;
 pub mod confidence;
 pub mod cost;
@@ -250,6 +251,12 @@ pub fn run() {
             commands::delete_account,
             commands::export_user_data,
             commands::copy_text_to_clipboard,
+            // M8 — input quality / mic calibration
+            commands::get_mic_calibration_status,
+            commands::mark_mic_calibration_passed,
+            commands::clear_mic_calibration,
+            commands::run_system_audio_calibration,
+            commands::run_mic_calibration,
             // Phase 7.6 — feature flags
             commands::is_feature_enabled,
             commands::refresh_feature_flags,
