@@ -67,11 +67,7 @@ pub fn evaluate(report: &Report, baseline: Option<&Report>) -> GateOutcome {
     }
 }
 
-fn check_conciseness(
-    variant: PromptVariant,
-    summary: &VariantSummary,
-    out: &mut Vec<Violation>,
-) {
+fn check_conciseness(variant: PromptVariant, summary: &VariantSummary, out: &mut Vec<Violation>) {
     if summary.overall.directional_conciseness_pass_rate < CONCISENESS_FLOOR {
         out.push(Violation::Conciseness {
             variant,
@@ -134,10 +130,7 @@ mod tests {
     use crate::report::DomainSummary;
     use std::collections::BTreeMap;
 
-    fn summary_with(
-        overall_conciseness: f32,
-        domains: Vec<(Domain, f32)>,
-    ) -> VariantSummary {
+    fn summary_with(overall_conciseness: f32, domains: Vec<(Domain, f32)>) -> VariantSummary {
         let mut by_domain = BTreeMap::new();
         for (d, rel) in domains {
             by_domain.insert(

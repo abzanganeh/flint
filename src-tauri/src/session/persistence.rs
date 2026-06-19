@@ -173,7 +173,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -382,6 +382,21 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         info!("sqlite schema migrated to version 10");
     }
 
+    if current < 11 {
+        conn.execute_batch(
+            "
+            CREATE TABLE IF NOT EXISTS app_preferences (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            PRAGMA user_version = 11;
+            ",
+        )
+        .context("schema migration v11")?;
+        info!("sqlite schema migrated to version 11");
+    }
+
     Ok(())
 }
 
@@ -564,6 +579,41 @@ impl SessionPersistence {
         )
         .context("create session row with metadata")?;
         debug!(session_id = %session_id, name = %name, "session row created");
+        Ok(())
+    }
+
+    const PREF_PRIMARY_PROVIDER: &'static str = "preferred_primary_provider";
+
+    /// Read the user's preferred primary LLM provider (`groq`, `openai`, etc.).
+    pub fn get_preferred_primary_provider(&self) -> Result<Option<String>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT value FROM app_preferences WHERE key = ?1")
+            .context("prepare preferred_primary_provider read")?;
+        let mut rows = stmt
+            .query(params![Self::PREF_PRIMARY_PROVIDER])
+            .context("query preferred_primary_provider")?;
+        if let Some(row) = rows
+            .next()
+            .context("fetch preferred_primary_provider row")?
+        {
+            return Ok(Some(
+                row.get(0)
+                    .context("read preferred_primary_provider value")?,
+            ));
+        }
+        Ok(None)
+    }
+
+    /// Persist the user's preferred primary LLM provider for new sessions.
+    pub fn set_preferred_primary_provider(&self, provider: &str) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        conn.execute(
+            "INSERT INTO app_preferences (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![Self::PREF_PRIMARY_PROVIDER, provider],
+        )
+        .context("write preferred_primary_provider")?;
         Ok(())
     }
 
@@ -1025,6 +1075,22 @@ impl SessionPersistence {
             domain,
             last_chunk_timestamp_ms: last_chunk_ms,
         }))
+    }
+
+    /// Count sessions that count toward the concurrent open-session cap.
+    ///
+    /// Open = any state other than `IDLE` or `ENDED`. See `session::limits`.
+    pub fn count_open_sessions(&self) -> Result<usize> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sessions
+                 WHERE state NOT IN ('IDLE', 'ENDED')",
+                [],
+                |r| r.get(0),
+            )
+            .context("count open sessions")?;
+        Ok(count as usize)
     }
 
     /// List all sessions in the database, most recent first.
@@ -2366,6 +2432,30 @@ mod tests {
             .unwrap();
         let found = db.find_incomplete_session().unwrap();
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn count_open_sessions_excludes_idle_and_ended() {
+        let db = new_db();
+        let open = Uuid::new_v4();
+        let ended = Uuid::new_v4();
+        let idle = Uuid::new_v4();
+
+        db.create_session_row(open, "Open", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(open, &SessionState::Rehearsing)
+            .unwrap();
+
+        db.create_session_row(ended, "Done", "interview", "swe")
+            .unwrap();
+        db.write_state_transition(ended, &SessionState::Ended)
+            .unwrap();
+
+        db.create_session_row(idle, "", "interview", "").unwrap();
+        db.write_state_transition(idle, &SessionState::Idle)
+            .unwrap();
+
+        assert_eq!(db.count_open_sessions().unwrap(), 1);
     }
 
     // ── Phase 7.5 hardening ──────────────────────────────────────────────────

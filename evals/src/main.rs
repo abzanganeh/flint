@@ -94,6 +94,8 @@ enum VariantArg {
     Gpt,
     Claude,
     Llama,
+    Deepseek,
+    Openai,
 }
 
 impl From<VariantArg> for PromptVariant {
@@ -102,6 +104,8 @@ impl From<VariantArg> for PromptVariant {
             VariantArg::Gpt => PromptVariant::Gpt,
             VariantArg::Claude => PromptVariant::Claude,
             VariantArg::Llama => PromptVariant::Llama,
+            VariantArg::Deepseek => PromptVariant::Deepseek,
+            VariantArg::Openai => PromptVariant::Openai,
         }
     }
 }
@@ -142,7 +146,10 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
     }
 
     let questions = select_questions(&bank, cli.domain.map(Into::into), cli.limit);
-    info!(count = questions.len(), "running eval on selected questions");
+    info!(
+        count = questions.len(),
+        "running eval on selected questions"
+    );
 
     let provider: Arc<dyn LLMProvider> =
         Arc::new(OllamaProvider::new().context("constructing Ollama provider")?);

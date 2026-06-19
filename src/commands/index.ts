@@ -163,8 +163,11 @@ export const rephraseResponse = (
 export const copyTextToClipboard = (text: string): Promise<void> =>
   invoke<void>("copy_text_to_clipboard", { text });
 
-export const switchProvider = (name: string): Promise<void> =>
+export const switchProvider = (name: PrimaryLlmProvider): Promise<void> =>
   invoke<void>("switch_provider", { name });
+
+export const getPreferredPrimaryProvider = (): Promise<string | null> =>
+  invoke<string | null>("get_preferred_primary_provider");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Session design commands (Phase 2)
@@ -337,6 +340,12 @@ export interface SessionSummaryDto {
   domain: string;
 }
 
+export interface OpenSessionLimitsDto {
+  openCount: number;
+  openLimit: number;
+  plan: "free" | "premium";
+}
+
 /** On app startup: check for a crashed session. Returns null if none. */
 export const checkCrashRecovery = (): Promise<RecoveryOffer | null> =>
   invoke<RecoveryOffer | null>("check_crash_recovery");
@@ -356,6 +365,10 @@ export const generateSessionSummary = (): Promise<string> =>
 /** List all sessions stored locally. */
 export const listSessions = (): Promise<SessionSummaryDto[]> =>
   invoke<SessionSummaryDto[]>("list_sessions");
+
+/** Concurrent open-session cap for the current plan. */
+export const getOpenSessionLimits = (): Promise<OpenSessionLimitsDto> =>
+  invoke<OpenSessionLimitsDto>("get_open_session_limits");
 
 /** Mark a session as promoted (exempt from 30-day expiry). */
 export const promoteSession = (sessionId: string): Promise<void> =>
@@ -550,7 +563,15 @@ export const getFeatureFlagsSnapshot = async (): Promise<FeatureFlagsSnapshot> =
 
 // ── Phase 7.7 — Provider API key management ──────────────────────────────────
 
-export type ApiKeyProvider = "groq" | "openrouter" | "openai" | "anthropic" | "tavily";
+export type ApiKeyProvider =
+  | "groq"
+  | "deepseek"
+  | "openrouter"
+  | "openai"
+  | "anthropic"
+  | "tavily";
+
+export type PrimaryLlmProvider = "groq" | "openai" | "anthropic" | "deepseek";
 
 /** @deprecated Use ApiKeyProvider */
 export type LlmProvider = Extract<ApiKeyProvider, "groq" | "openai" | "anthropic">;

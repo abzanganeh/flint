@@ -13,8 +13,9 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion};
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto, SessionConfigDto,
-    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
+    AppendResearchResultDto, DigestDto, HardwareProfileDto, HealthCheckResultDto,
+    OpenSessionLimitsDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
+    SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_mock_coach_feedback, emit_mock_suggested_token, emit_session_state_change,
@@ -22,16 +23,14 @@ use crate::events::{
     SessionStateChangePayload, TokenUsageUpdatePayload,
 };
 use crate::health::{checks, hardware};
-use crate::interfaces::auth::AuthToken;
+use crate::interfaces::auth::{AuthToken, Plan};
 use crate::interfaces::vector::Chunk;
 use crate::keychain;
 use crate::knowledge::packs_for_role;
 use crate::llm::failover::FailoverManager;
-use crate::llm::groq::GroqProvider;
 use crate::llm::ollama::OllamaProvider;
-use crate::llm::openrouter;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
-use crate::llm::rate_limiter::RateLimiter;
+use crate::llm::stack::{self, PRIMARY_PROVIDERS};
 use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
 use crate::mock::mic_capture::MicCapture;
@@ -48,6 +47,7 @@ const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
 /// Number of Tavily results to fetch per enrichment query.
 const ENRICHMENT_RESULTS_PER_QUERY: usize = 4;
 use crate::session::draft;
+use crate::session::limits;
 use crate::session::memory::ConversationMemory;
 use crate::session::recovery;
 use crate::session::state::SessionState;
@@ -344,27 +344,41 @@ pub async fn run_health_check(
 /// The real HTTP/network error is included via `{:#}` (full anyhow chain).
 async fn extract_digest_resilient(
     context_text: &str,
-    _state: &AppState,
+    state: &AppState,
 ) -> Result<crate::digest::Digest, String> {
     let mut failures: Vec<String> = Vec::new();
+    let mut tried_primary: Option<String> = None;
 
-    // ── 1. Groq ──────────────────────────────────────────────────────────────
-    if let Ok(api_key) = keychain::get_api_key("groq") {
-        match GroqProvider::new(api_key) {
-            Ok(provider) => match extract_digest(context_text, &provider).await {
-                Ok(digest) => return Ok(digest),
-                Err(e) => {
-                    let detail = format!("{e:#}");
-                    warn!(error = %detail, "digest extraction via Groq failed");
-                    failures.push(format!("Groq: {detail}"));
-                }
-            },
-            Err(e) => failures.push(format!("Groq provider init: {e}")),
+    if let Some(provider) = stack::resolve_primary(&state.persistence) {
+        let name = provider.name().to_string();
+        tried_primary = Some(name.clone());
+        match extract_digest(context_text, provider.as_ref()).await {
+            Ok(digest) => return Ok(digest),
+            Err(e) => {
+                let detail = format!("{e:#}");
+                warn!(provider = %name, error = %detail, "digest extraction failed");
+                failures.push(format!("{name}: {detail}"));
+            }
         }
     }
 
-    // ── 2. OpenRouter ─────────────────────────────────────────────────────────
-    if let Some(provider) = openrouter::resolve_openrouter() {
+    for provider_name in stack::PRIMARY_PROVIDERS {
+        if tried_primary.as_deref() == Some(*provider_name) {
+            continue;
+        }
+        if let Some(provider) = stack::resolve_primary_by_name(provider_name) {
+            match extract_digest(context_text, provider.as_ref()).await {
+                Ok(digest) => return Ok(digest),
+                Err(e) => {
+                    let detail = format!("{e:#}");
+                    warn!(provider = %provider_name, error = %detail, "digest extraction failed");
+                    failures.push(format!("{provider_name}: {detail}"));
+                }
+            }
+        }
+    }
+
+    if let Some(provider) = crate::llm::openrouter::resolve_openrouter() {
         match extract_digest(context_text, provider.as_ref()).await {
             Ok(digest) => return Ok(digest),
             Err(e) => {
@@ -375,7 +389,6 @@ async fn extract_digest_resilient(
         }
     }
 
-    // ── 3. Ollama ─────────────────────────────────────────────────────────────
     if let Ok(ollama) = OllamaProvider::new() {
         if ollama.health_check().await {
             match extract_digest(context_text, &ollama).await {
@@ -410,6 +423,33 @@ async fn extract_digest_resilient(
     } else {
         format!("{guidance}\n\nDetail: {detail}")
     })
+}
+
+/// Plan used for open-session caps — Free when logged out or auth lookup fails.
+async fn open_session_plan(state: &AppState) -> Plan {
+    evaluation_context(state).await.plan
+}
+
+/// Refuse when adding another open session would exceed the user's plan cap.
+async fn ensure_open_session_capacity(
+    state: &AppState,
+    adding_new_open: bool,
+) -> Result<(), String> {
+    if !adding_new_open {
+        return Ok(());
+    }
+
+    let plan = open_session_plan(state).await;
+    let limit = limits::open_session_limit(plan);
+    let count = state
+        .persistence
+        .count_open_sessions()
+        .map_err(|e| e.to_string())?;
+
+    if count >= limit {
+        return Err(limits::open_session_limit_message(plan, limit));
+    }
+    Ok(())
 }
 
 /// Discard an in-progress session setup and return to IDLE (Start Over).
@@ -468,6 +508,8 @@ pub async fn create_session(
     state: State<'_, AppState>,
     config: SessionConfigDto,
 ) -> Result<String, String> {
+    ensure_open_session_capacity(&state, true).await?;
+
     let session_id = Uuid::new_v4();
 
     {
@@ -1244,6 +1286,8 @@ pub async fn reopen_session(
         .get_session_metadata(sid)
         .map_err(|e| format!("Session not found: {e}"))?;
 
+    ensure_open_session_capacity(&state, !limits::is_open_session_state(meta.state)).await?;
+
     let has_digest = state
         .persistence
         .load_session_digest(sid)
@@ -1492,6 +1536,8 @@ pub async fn reopen_past_session(
         ));
     }
 
+    ensure_open_session_capacity(&state, true).await?;
+
     {
         let machine = state.state_machine.lock().await;
         let current = *machine.current();
@@ -1675,50 +1721,32 @@ async fn abort_local_live_handles(handles: LiveTaskHandles) {
 /// Build the failover manager and local LLM provider used by live and rehearsal paths.
 async fn build_failover_stack(
     app: &AppHandle,
-    _state: &AppState,
+    state: &AppState,
 ) -> Result<(Arc<FailoverManager>, Arc<dyn LLMProvider>, usize), String> {
-    let (primary_provider, context_window) = match keychain::get_api_key("groq") {
-        Ok(api_key) => match GroqProvider::new(api_key) {
-            Ok(p) => {
-                let cw = p.context_window();
-                (Arc::new(p) as Arc<dyn LLMProvider>, cw)
-            }
-            Err(e) => {
-                return Err(format!(
-                    "Groq API key is stored but the provider failed to initialize: {e}. \
-                     Re-enter your key in Settings → API Keys."
-                ));
-            }
-        },
-        Err(_) => {
-            return Err(
-                "No Groq API key found. Add your key in Settings → API Keys (Groq) \
-                 before running rehearsal turns."
-                    .to_string(),
-            );
-        }
-    };
+    let primary_provider = stack::resolve_primary(&state.persistence).ok_or_else(|| {
+        format!(
+            "No cloud LLM API key found. Add a key for one of {:?} in Settings → API Keys \
+             before starting a session.",
+            PRIMARY_PROVIDERS
+        )
+    })?;
+    let context_window = primary_provider.context_window();
+    let primary_name = primary_provider.name().to_string();
 
     let local_provider: Arc<dyn LLMProvider> = Arc::new(
         OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
     );
-    let rate_limiter = Arc::new(RateLimiter::new(
-        primary_provider.name(),
-        primary_provider.rate_limit().requests_per_minute,
-        primary_provider.rate_limit().tokens_per_minute,
-    ));
-    let cloud_fallback = openrouter::resolve_openrouter();
-    if cloud_fallback.is_some() {
-        info!("failover stack: OpenRouter cloud fallback configured");
+
+    let cloud_tiers = stack::resolve_cloud_tiers(&primary_name);
+    if cloud_tiers.is_empty() {
+        info!("failover stack: no cloud fallback tiers configured — primary → Ollama only");
     } else {
-        info!("failover stack: no OpenRouter key in Settings — Groq 429 will use Ollama only");
+        let names: Vec<_> = cloud_tiers.iter().map(|p| p.name()).collect();
+        info!(tiers = ?names, "failover stack: cloud fallback tiers configured");
     }
-    let mut failover = FailoverManager::new(
-        primary_provider,
-        cloud_fallback,
-        Arc::clone(&local_provider),
-        rate_limiter,
-    );
+
+    let mut failover =
+        stack::build_failover_manager(primary_provider, cloud_tiers, Arc::clone(&local_provider));
     failover.start_ping_loop(app.clone());
     Ok((Arc::new(failover), local_provider, context_window))
 }
@@ -2872,14 +2900,48 @@ pub async fn panic_hide_overlay(
     Ok(*hidden)
 }
 
-/// Switch the active LLM provider.
-///
-/// Mid-session model switching is explicitly out of v1 scope.
-/// This command is registered so the frontend IPC contract compiles;
-/// it will always return an error.
+/// Switch the active LLM primary provider (pre-session only in v1).
 #[tauri::command]
-pub async fn switch_provider(_name: String) -> Result<(), String> {
-    Err("Provider switching is not available in v1. Configure your provider before starting a session.".to_string())
+pub async fn switch_provider(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    if !stack::PRIMARY_PROVIDERS.contains(&name.as_str()) {
+        return Err(format!(
+            "Unknown provider '{name}'. Choose one of {:?}.",
+            stack::PRIMARY_PROVIDERS
+        ));
+    }
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() == SessionState::Live {
+            return Err(
+                "Provider switching is not available during a live session. \
+                 Configure your provider before starting."
+                    .to_string(),
+            );
+        }
+    }
+
+    if stack::resolve_primary_by_name(&name).is_none() {
+        return Err(format!(
+            "No API key stored for '{name}'. Add your key in Settings → API Keys first."
+        ));
+    }
+
+    state
+        .persistence
+        .set_preferred_primary_provider(&name)
+        .map_err(|e| e.to_string())
+}
+
+/// Return the user's preferred primary LLM provider, if set.
+#[tauri::command]
+pub async fn get_preferred_primary_provider(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    state
+        .persistence
+        .get_preferred_primary_provider()
+        .map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -3020,13 +3082,8 @@ pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<Stri
     }
 
     // Build a one-shot provider for the summary call.
-    let provider: Arc<dyn LLMProvider> = match keychain::get_api_key("groq") {
-        Ok(api_key) => match GroqProvider::new(api_key) {
-            Ok(p) => Arc::new(p),
-            Err(_) => Arc::clone(&state.llm),
-        },
-        Err(_) => Arc::clone(&state.llm),
-    };
+    let provider: Arc<dyn LLMProvider> =
+        stack::resolve_primary(&state.persistence).unwrap_or_else(|| Arc::clone(&state.llm));
 
     let summary = provider
         .complete(
@@ -3054,6 +3111,28 @@ pub async fn list_sessions(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::dto::SessionSummaryDto>, String> {
     state.persistence.list_sessions().map_err(|e| e.to_string())
+}
+
+/// Open-session cap snapshot for the Past Sessions screen.
+#[tauri::command]
+pub async fn get_open_session_limits(
+    state: State<'_, AppState>,
+) -> Result<OpenSessionLimitsDto, String> {
+    let plan = open_session_plan(&state).await;
+    let open_limit = limits::open_session_limit(plan);
+    let open_count = state
+        .persistence
+        .count_open_sessions()
+        .map_err(|e| e.to_string())?;
+
+    Ok(OpenSessionLimitsDto {
+        open_count,
+        open_limit,
+        plan: match plan {
+            Plan::Free => "free".to_string(),
+            Plan::Premium => "premium".to_string(),
+        },
+    })
 }
 
 /// Mark a session as promoted (exempted from 30-day expiry).

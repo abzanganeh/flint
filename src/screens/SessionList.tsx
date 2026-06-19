@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useState } from "react";
-import type { DigestDto, SessionSummaryDto } from "../commands";
+import type { DigestDto, OpenSessionLimitsDto, SessionSummaryDto } from "../commands";
 import {
   deleteSession,
   demoteSession,
   getDigest,
+  getOpenSessionLimits,
   getSessionContext,
   getSessionContextFields,
   listSessions,
@@ -82,10 +83,20 @@ const IN_PROGRESS_STATES = new Set([
   "DIGEST_REVIEW",
   "PRE_WARMING",
   "REHEARSING",
+  "MOCK_INTERVIEW",
   "READY",
 ]);
 
-const REOPEN_STATES = new Set(["ENDED", "READY"]);
+/** Sessions that can be re-bound via `reopen_session` (everything except orphan IDLE rows). */
+const OPENABLE_STATES = new Set([
+  ...IN_PROGRESS_STATES,
+  "ENDED",
+  "LIVE",
+  "PAUSED",
+  "ENDING",
+  "CRASHED",
+  "RECOVERING",
+]);
 
 export const SessionList: React.FC<Props> = ({
   onBack,
@@ -95,6 +106,7 @@ export const SessionList: React.FC<Props> = ({
   onReopenSession,
 }) => {
   const [sessions, setSessions] = useState<SessionSummaryDto[]>([]);
+  const [limits, setLimits] = useState<OpenSessionLimitsDto | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [actionInFlight, setActionInFlight] = useState<string | null>(null);
@@ -106,8 +118,9 @@ export const SessionList: React.FC<Props> = ({
     setLoading(true);
     setError(null);
     try {
-      const rows = await listSessions();
+      const [rows, cap] = await Promise.all([listSessions(), getOpenSessionLimits()]);
       setSessions(rows);
+      setLimits(cap);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -284,7 +297,7 @@ export const SessionList: React.FC<Props> = ({
                       Resume
                     </button>
                   )}
-                  {isSelected && onReopenSession && REOPEN_STATES.has(session.state) && (
+                  {isSelected && onReopenSession && OPENABLE_STATES.has(session.state) && (
                     <button
                       className="sl-action-btn sl-action-btn--resume"
                       onClick={() => void handleReopen(session)}
@@ -292,7 +305,7 @@ export const SessionList: React.FC<Props> = ({
                       type="button"
                       title="Restore this session with all fields and questions"
                     >
-                      {reopening === session.id ? "Opening…" : "Reopen"}
+                      {reopening === session.id ? "Opening…" : "Open"}
                     </button>
                   )}
                   {isSelected && onStartSimilar && (
@@ -341,8 +354,15 @@ export const SessionList: React.FC<Props> = ({
 
         {sessions.length > 0 && (
           <p className="sl-footer-note">
-            Click a session to reveal actions. Sessions are kept for 30 days. Pin a session to
-            exempt it from automatic deletion.
+            Click a session to reveal actions.{" "}
+            {limits && (
+              <>
+                Open sessions: {limits.openCount} of {limits.openLimit}
+                {limits.plan === "free" ? " (free plan)" : " (Premium)"}.{" "}
+              </>
+            )}
+            Completed sessions do not count toward the open limit. Sessions are kept for 30 days.
+            Pin a session to exempt it from automatic deletion.
           </p>
         )}
       </main>

@@ -2,9 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 
 import {
   clearProviderKey,
+  getPreferredPrimaryProvider,
   isProviderKeyPresent,
   saveProviderKey,
+  switchProvider,
   type ApiKeyProvider,
+  type PrimaryLlmProvider,
 } from "../commands";
 
 interface ProviderRow {
@@ -15,21 +18,34 @@ interface ProviderRow {
   description?: string;
 }
 
+const PRIMARY_OPTIONS: { id: PrimaryLlmProvider; label: string }[] = [
+  { id: "groq", label: "Groq (default)" },
+  { id: "deepseek", label: "DeepSeek" },
+  { id: "openai", label: "OpenAI" },
+  { id: "anthropic", label: "Anthropic" },
+];
+
 const LLM_PROVIDERS: ProviderRow[] = [
   {
     provider: "groq",
     label: "Groq",
     placeholder: "gsk_…",
     helpUrl: "https://console.groq.com/keys",
-    description: "Primary LLM for rehearsal answers and digest extraction.",
+    description: "Default primary LLM for rehearsal and live sessions.",
+  },
+  {
+    provider: "deepseek",
+    label: "DeepSeek",
+    placeholder: "sk-…",
+    helpUrl: "https://platform.deepseek.com/api_keys",
+    description: "Cloud fallback tier #1 when primary is unavailable.",
   },
   {
     provider: "openrouter",
     label: "OpenRouter (fallback)",
     placeholder: "sk-or-…",
     helpUrl: "https://openrouter.ai/keys",
-    description:
-      "Used automatically when Groq is rate-limited or unavailable. Same Llama 3.3 70B model.",
+    description: "Cloud fallback tier #2 — multi-model gateway.",
   },
   {
     provider: "openai",
@@ -57,9 +73,10 @@ const WEB_PROVIDERS: ProviderRow[] = [
 
 interface ProviderEntryProps {
   row: ProviderRow;
+  onKeyChanged?: () => void;
 }
 
-function ProviderEntry({ row }: ProviderEntryProps) {
+function ProviderEntry({ row, onKeyChanged }: ProviderEntryProps) {
   const [keyPresent, setKeyPresent] = useState<boolean | null>(null);
   const [input, setInput] = useState("");
   const [editing, setEditing] = useState(false);
@@ -92,6 +109,7 @@ function ProviderEntry({ row }: ProviderEntryProps) {
       setEditing(false);
       setSuccess(true);
       setKeyPresent(true);
+      onKeyChanged?.();
       setTimeout(() => setSuccess(false), 2000);
     } catch (e) {
       setError(String(e));
@@ -105,6 +123,7 @@ function ProviderEntry({ row }: ProviderEntryProps) {
       await clearProviderKey(row.provider);
       setKeyPresent(false);
       setEditing(false);
+      onKeyChanged?.();
     } catch (e) {
       setError(String(e));
     }
@@ -195,11 +214,97 @@ function ProviderEntry({ row }: ProviderEntryProps) {
   );
 }
 
+function PrimaryProviderPicker() {
+  const [selected, setSelected] = useState<PrimaryLlmProvider | null>(null);
+  const [keyStatus, setKeyStatus] = useState<Record<PrimaryLlmProvider, boolean>>({
+    groq: false,
+    deepseek: false,
+    openai: false,
+    anthropic: false,
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const refresh = useCallback(async () => {
+    const [pref, groq, deepseek, openai, anthropic] = await Promise.all([
+      getPreferredPrimaryProvider(),
+      isProviderKeyPresent("groq"),
+      isProviderKeyPresent("deepseek"),
+      isProviderKeyPresent("openai"),
+      isProviderKeyPresent("anthropic"),
+    ]);
+    setKeyStatus({ groq, deepseek, openai, anthropic });
+    if (pref && PRIMARY_OPTIONS.some((o) => o.id === pref)) {
+      setSelected(pref as PrimaryLlmProvider);
+    } else if (groq) {
+      setSelected("groq");
+    } else if (deepseek) {
+      setSelected("deepseek");
+    } else if (openai) {
+      setSelected("openai");
+    } else if (anthropic) {
+      setSelected("anthropic");
+    } else {
+      setSelected(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const handleChange = async (provider: PrimaryLlmProvider) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await switchProvider(provider);
+      setSelected(provider);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="provider-settings__primary">
+      <h3 className="provider-settings__section-title">Primary LLM</h3>
+      <p className="provider-settings__subtitle">
+        Used for rehearsal and live sessions. Failover order: primary → DeepSeek (if keyed) →
+        OpenRouter (if keyed) → Ollama. Cannot change during a live session.
+      </p>
+      {error && <p className="provider-settings__error">{error}</p>}
+      <div className="provider-settings__primary-options">
+        {PRIMARY_OPTIONS.map((opt) => (
+          <label key={opt.id} className="provider-settings__primary-option">
+            <input
+              type="radio"
+              name="primary-llm"
+              value={opt.id}
+              checked={selected === opt.id}
+              disabled={!keyStatus[opt.id] || saving}
+              onChange={() => void handleChange(opt.id)}
+            />
+            <span>{opt.label}</span>
+            {!keyStatus[opt.id] && (
+              <span className="provider-settings__status provider-settings__status--missing">
+                Add key below
+              </span>
+            )}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface ProviderSettingsProps {
   onBack?: () => void;
 }
 
 export default function ProviderSettings({ onBack }: ProviderSettingsProps) {
+  const [, setKeysVersion] = useState(0);
+
   return (
     <div className="provider-settings">
       <div className="provider-settings__header">
@@ -211,15 +316,20 @@ export default function ProviderSettings({ onBack }: ProviderSettingsProps) {
         <h2 className="provider-settings__title">API Keys</h2>
         <p className="provider-settings__subtitle">
           Keys are stored in your OS keychain — never in plain text or uploaded anywhere.
-          Groq is required for digest extraction. OpenRouter is used as fallback when Groq
-          is rate-limited. Tavily enables web research during rehearsal prep.
+          At least one cloud LLM key is required. Tavily enables web research during rehearsal prep.
         </p>
       </div>
+
+      <PrimaryProviderPicker />
 
       <h3 className="provider-settings__section-title">LLM providers</h3>
       <div className="provider-settings__list">
         {LLM_PROVIDERS.map((row) => (
-          <ProviderEntry key={row.provider} row={row} />
+          <ProviderEntry
+            key={row.provider}
+            row={row}
+            onKeyChanged={() => setKeysVersion((v) => v + 1)}
+          />
         ))}
       </div>
 

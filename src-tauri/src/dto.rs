@@ -314,6 +314,15 @@ pub struct AppendResearchResultDto {
 // Session list DTOs (Phase 6)
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Open-session cap snapshot for the session list UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenSessionLimitsDto {
+    pub open_count: usize,
+    pub open_limit: usize,
+    pub plan: String,
+}
+
 /// One row in the session list screen.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

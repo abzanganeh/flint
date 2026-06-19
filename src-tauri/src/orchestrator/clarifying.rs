@@ -155,7 +155,7 @@ mod tests {
             provider_name: "ollama".to_string(),
         });
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-        Arc::new(FailoverManager::new(primary, None, local, rl))
+        Arc::new(FailoverManager::new(primary, vec![], local, rl))
     }
 
     #[tokio::test]
@@ -206,7 +206,7 @@ mod tests {
             error_message: "local also down".to_string(),
         });
         let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
-        let failover = Arc::new(FailoverManager::new(primary, None, local, rl));
+        let failover = Arc::new(FailoverManager::new(primary, vec![], local, rl));
         let app = mock_app_handle();
 
         let ctx = test_context("Could you clarify?");
