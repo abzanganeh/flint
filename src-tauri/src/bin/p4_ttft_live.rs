@@ -59,10 +59,7 @@ fn parse_args() -> Result<Args> {
         match raw[i].as_str() {
             "--provider" => {
                 i += 1;
-                provider = raw
-                    .get(i)
-                    .context("--provider requires a value")?
-                    .clone();
+                provider = raw.get(i).context("--provider requires a value")?.clone();
             }
             "--runs" => {
                 i += 1;
@@ -152,7 +149,10 @@ fn build_directional_prompt(provider_name: &str, question: &str) -> Result<Strin
     let template = load_prompt("directional", provider_name, &prompts_dir())?;
     Ok(template
         .replace("{session_domain}", "Software Engineering")
-        .replace("{rag_chunks}", "[1] Led platform reliability work on a distributed API.")
+        .replace(
+            "{rag_chunks}",
+            "[1] Led platform reliability work on a distributed API.",
+        )
         .replace("{qa_chunks}", "")
         .replace("{rolling_summary_if_compressed}", "")
         .replace("{last_n_turns}", "")
@@ -231,7 +231,11 @@ async fn main() -> Result<()> {
             }
         };
 
-        let flag = if ttft_ms > TTFT_GATE_MS { " BREACH" } else { "" };
+        let flag = if ttft_ms > TTFT_GATE_MS {
+            " BREACH"
+        } else {
+            ""
+        };
         println!("{label}: ttft_ms={ttft_ms}{flag}");
         samples.push(ttft_ms);
     }

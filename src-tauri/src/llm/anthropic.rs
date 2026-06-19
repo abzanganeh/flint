@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
-use reqwest::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use reqwest::header::{HeaderName, HeaderValue, CONTENT_TYPE};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -109,9 +109,7 @@ impl AnthropicProvider {
         if event.event_type != "content_block_delta" {
             return None;
         }
-        event
-            .delta
-            .and_then(|d| d.text)
+        event.delta.and_then(|d| d.text)
     }
 }
 
@@ -138,10 +136,7 @@ impl LLMProvider for AnthropicProvider {
             .client
             .post(&self.base_url)
             .header(api_key_header, self.api_key.expose_secret())
-            .header(
-                version_header,
-                HeaderValue::from_static(ANTHROPIC_VERSION),
-            )
+            .header(version_header, HeaderValue::from_static(ANTHROPIC_VERSION))
             .header(CONTENT_TYPE, "application/json")
             .json(&body)
             .send()

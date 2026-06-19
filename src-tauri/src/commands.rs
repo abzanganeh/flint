@@ -3047,8 +3047,8 @@ pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<Stri
     }
 
     // Build a one-shot provider for the summary call.
-    let provider: Arc<dyn LLMProvider> = stack::resolve_primary(&state.persistence)
-        .unwrap_or_else(|| Arc::clone(&state.llm));
+    let provider: Arc<dyn LLMProvider> =
+        stack::resolve_primary(&state.persistence).unwrap_or_else(|| Arc::clone(&state.llm));
 
     let summary = provider
         .complete(

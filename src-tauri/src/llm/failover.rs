@@ -325,7 +325,8 @@ impl FailoverManager {
             ));
         }
 
-        self.active_tier.store(self.local_index(), Ordering::Release);
+        self.active_tier
+            .store(self.local_index(), Ordering::Release);
         emit_failover_triggered(
             app,
             FailoverTriggeredPayload {

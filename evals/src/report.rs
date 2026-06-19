@@ -52,13 +52,7 @@ impl Report {
                     (d, summarise(&in_domain))
                 })
                 .collect();
-            variants.insert(
-                variant,
-                VariantSummary {
-                    overall,
-                    by_domain,
-                },
-            );
+            variants.insert(variant, VariantSummary { overall, by_domain });
         }
         Self {
             run_id: run.run_id.clone(),
@@ -99,7 +93,10 @@ impl Report {
                 summary.overall.mean_stream_ms
             );
 
-            let _ = writeln!(out, "\n| Domain | Q | Errors | Conciseness | Relevance | Grounding | TTFT (ms) |");
+            let _ = writeln!(
+                out,
+                "\n| Domain | Q | Errors | Conciseness | Relevance | Grounding | TTFT (ms) |"
+            );
             let _ = writeln!(out, "|---|---|---|---|---|---|---|");
             for (domain, d) in &summary.by_domain {
                 let _ = writeln!(
@@ -236,9 +233,7 @@ mod tests {
         let gpt = report.variants.get(&PromptVariant::Gpt).unwrap();
         assert!((gpt.overall.mean_relevance - 0.65).abs() < 0.01);
         assert!((gpt.overall.directional_conciseness_pass_rate - 0.5).abs() < 0.01);
-        assert!(gpt
-            .by_domain
-            .contains_key(&Domain::SoftwareEngineering));
+        assert!(gpt.by_domain.contains_key(&Domain::SoftwareEngineering));
     }
 
     #[test]

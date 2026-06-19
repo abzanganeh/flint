@@ -593,8 +593,14 @@ impl SessionPersistence {
         let mut rows = stmt
             .query(params![Self::PREF_PRIMARY_PROVIDER])
             .context("query preferred_primary_provider")?;
-        if let Some(row) = rows.next().context("fetch preferred_primary_provider row")? {
-            return Ok(Some(row.get(0).context("read preferred_primary_provider value")?));
+        if let Some(row) = rows
+            .next()
+            .context("fetch preferred_primary_provider row")?
+        {
+            return Ok(Some(
+                row.get(0)
+                    .context("read preferred_primary_provider value")?,
+            ));
         }
         Ok(None)
     }

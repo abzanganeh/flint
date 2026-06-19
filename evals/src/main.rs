@@ -146,7 +146,10 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
     }
 
     let questions = select_questions(&bank, cli.domain.map(Into::into), cli.limit);
-    info!(count = questions.len(), "running eval on selected questions");
+    info!(
+        count = questions.len(),
+        "running eval on selected questions"
+    );
 
     let provider: Arc<dyn LLMProvider> =
         Arc::new(OllamaProvider::new().context("constructing Ollama provider")?);

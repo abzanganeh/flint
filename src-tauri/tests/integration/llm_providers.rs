@@ -18,9 +18,7 @@ async fn collect_stream(
         temperature: 0.0,
         stream: true,
     };
-    let mut stream = provider
-        .complete_stream(prompt.to_string(), config)
-        .await?;
+    let mut stream = provider.complete_stream(prompt.to_string(), config).await?;
     let mut out = String::new();
     while let Some(token) = stream.next().await {
         out.push_str(&token?);

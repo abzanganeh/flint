@@ -26,9 +26,7 @@ use crate::metrics::{
 
 /// Prompt variant identifier — matches the filename under
 /// `prompts/<category>/<variant>.txt`.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptVariant {
     Gpt,
@@ -133,8 +131,9 @@ impl EvalRunner {
         question: &Question,
         variant: PromptVariant,
     ) -> Result<EvalRow, EvalError> {
-        let directional =
-            self.run_thread("directional", question, variant, 200).await?;
+        let directional = self
+            .run_thread("directional", question, variant, 200)
+            .await?;
         let depth = self.run_thread("depth", question, variant, 400).await?;
 
         let conciseness = score_conciseness(&directional.response_text);
