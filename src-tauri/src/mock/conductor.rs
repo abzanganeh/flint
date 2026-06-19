@@ -600,9 +600,12 @@ fn emit_preferred_suggested_tokens<R: Runtime>(
             buf.push_str(word);
         }
         if mode == MockMode::Study {
-            emit_mock_suggested_token(app, MockSuggestedTokenPayload {
-                token: word.to_string(),
-            });
+            emit_mock_suggested_token(
+                app,
+                MockSuggestedTokenPayload {
+                    token: word.to_string(),
+                },
+            );
         }
     }
 }

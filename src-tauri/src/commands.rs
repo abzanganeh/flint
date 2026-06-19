@@ -1077,10 +1077,7 @@ pub async fn confirm_digest(
 
         if let Some(ref context_blob) = context_blob_opt {
             let extracted = extract_questions_from_text(context_blob);
-            let bank_lower: Vec<String> = bank
-                .iter()
-                .map(|e| e.question.to_lowercase())
-                .collect();
+            let bank_lower: Vec<String> = bank.iter().map(|e| e.question.to_lowercase()).collect();
             for q in extracted {
                 if !bank_lower
                     .iter()
@@ -2078,7 +2075,9 @@ fn extract_qa_pairs_from_text(text: &str) -> Vec<String> {
     pairs
 }
 
-fn session_focus_to_dto(focus: crate::session::persistence::SessionFocus) -> crate::dto::SessionFocusDto {
+fn session_focus_to_dto(
+    focus: crate::session::persistence::SessionFocus,
+) -> crate::dto::SessionFocusDto {
     crate::dto::SessionFocusDto {
         focus_name: focus.focus_name,
         focus_tags: focus.focus_tags,
@@ -2300,9 +2299,7 @@ pub async fn save_preferred_answer(
         .save_preferred_answer(sid, &question, &answer)
         .map_err(|e| e.to_string())?;
 
-    let qa_text = format!(
-        "[PREFERRED ANSWER]\nQ: {question}\nA: {answer}"
-    );
+    let qa_text = format!("[PREFERRED ANSWER]\nQ: {question}\nA: {answer}");
     let embedder = state
         .wait_for_embedder(std::time::Duration::from_secs(30))
         .await
@@ -4159,7 +4156,10 @@ pub async fn regrade_mock_turn(
             .read()
             .map(|g| g.clone())
             .unwrap_or_default();
-        let turns = state.persistence.load_mock_turns(session_id).map_err(|e| e.to_string())?;
+        let turns = state
+            .persistence
+            .load_mock_turns(session_id)
+            .map_err(|e| e.to_string())?;
         let row = turns
             .into_iter()
             .find(|t| t.turn_n == turn_n)
@@ -4243,14 +4243,9 @@ pub async fn regrade_mock_turn(
 
     if !question.is_empty() {
         let satisfied = crate::session::question_attempts::mock_attempt_satisfied(score, false);
-        let _ = state.persistence.upsert_question_attempt(
-            session_id,
-            &question,
-            "mock",
-            0.0,
-            score,
-            satisfied,
-        );
+        let _ = state
+            .persistence
+            .upsert_question_attempt(session_id, &question, "mock", 0.0, score, satisfied);
     }
 
     spawn_mock_qa_embed_if_qualified(
@@ -4299,12 +4294,11 @@ fn spawn_mock_qa_embed_if_qualified(
     let question = question.to_string();
     tokio::spawn(async move {
         let text_clone = qa_text.clone();
-        let embedding = match tokio::task::spawn_blocking(move || embedder.embed_one(&text_clone))
-            .await
-        {
-            Ok(Ok(v)) => v,
-            _ => return,
-        };
+        let embedding =
+            match tokio::task::spawn_blocking(move || embedder.embed_one(&text_clone)).await {
+                Ok(Ok(v)) => v,
+                _ => return,
+            };
         let chunk = Chunk {
             id: uuid::Uuid::new_v4(),
             text: qa_text,

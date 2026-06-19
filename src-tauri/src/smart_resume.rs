@@ -172,7 +172,9 @@ pub fn merge_question_bank(
     local: &mut Vec<crate::session::question_bank::BankQuestionEntry>,
     remote: &[InterviewQuestionDto],
 ) {
-    use crate::session::question_bank::{infer_question_tags, tag_from_subdomain, BankQuestionEntry};
+    use crate::session::question_bank::{
+        infer_question_tags, tag_from_subdomain, BankQuestionEntry,
+    };
     let existing: std::collections::HashSet<String> = local
         .iter()
         .map(|e| e.question.trim().to_lowercase())

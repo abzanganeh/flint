@@ -112,10 +112,7 @@ pub fn infer_question_tags(question: &str) -> Vec<String> {
     {
         add(&mut tags, "competency");
     }
-    if lower.contains("strength")
-        || lower.contains("weakness")
-        || lower.contains("yourself")
-    {
+    if lower.contains("strength") || lower.contains("weakness") || lower.contains("yourself") {
         add(&mut tags, "self-assessment");
     }
 
@@ -160,11 +157,7 @@ pub fn filter_by_focus_tags(
     }
     entries
         .iter()
-        .filter(|e| {
-            e.tags
-                .iter()
-                .any(|t| wanted.contains(&t.to_lowercase()))
-        })
+        .filter(|e| e.tags.iter().any(|t| wanted.contains(&t.to_lowercase())))
         .cloned()
         .collect()
 }

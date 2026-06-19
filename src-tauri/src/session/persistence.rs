@@ -1324,7 +1324,9 @@ impl SessionPersistence {
     /// `questions` is the full ordered list; the caller owns de-dup / ordering.
     pub fn store_question_bank(&self, session_id: Uuid, questions: &[String]) -> Result<()> {
         use crate::session::question_bank::BankQuestionEntry;
-        let existing = self.load_question_bank_entries(session_id).unwrap_or_default();
+        let existing = self
+            .load_question_bank_entries(session_id)
+            .unwrap_or_default();
         let tag_map: std::collections::HashMap<String, Vec<String>> = existing
             .into_iter()
             .map(|e| (e.question.trim().to_lowercase(), e.tags))
@@ -1385,7 +1387,9 @@ impl SessionPersistence {
     /// when no questions have been saved or the column defaulted to `'[]'`.
     pub fn load_question_bank(&self, session_id: Uuid) -> Result<Vec<String>> {
         use crate::session::question_bank::bank_questions;
-        Ok(bank_questions(&self.load_question_bank_entries(session_id)?))
+        Ok(bank_questions(
+            &self.load_question_bank_entries(session_id)?,
+        ))
     }
 
     /// Load question strings for mock/rehearsal, optionally filtered by session focus tags.
@@ -1429,8 +1433,7 @@ impl SessionPersistence {
     }
 
     pub fn save_session_focus(&self, session_id: Uuid, focus: &SessionFocus) -> Result<()> {
-        let tags_json =
-            serde_json::to_string(&focus.focus_tags).context("serialize focus tags")?;
+        let tags_json = serde_json::to_string(&focus.focus_tags).context("serialize focus tags")?;
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         conn.execute(
@@ -1587,9 +1590,7 @@ impl SessionPersistence {
             |r| r.get::<_, String>(0),
         )
         .map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => {
-                rusqlite::Error::QueryReturnedNoRows
-            }
+            rusqlite::Error::QueryReturnedNoRows => rusqlite::Error::QueryReturnedNoRows,
             other => other,
         })
         .or_else(|e| {
