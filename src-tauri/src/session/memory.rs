@@ -31,6 +31,8 @@ pub struct Turn {
     pub directional_response: String,
     /// The depth response that was shown (empty if none yet).
     pub depth_response: String,
+    /// Unix epoch milliseconds when the turn was recorded.
+    pub created_at_ms: i64,
 }
 
 /// Budget allocation computed once per LLM call from the provider's context
@@ -75,9 +77,18 @@ pub struct MemoryContext {
 /// dependency.
 fn estimate_tokens(text: &str) -> usize {
     let words = text.split_whitespace().count();
-    // Use 1.33 tokens/word as a safe over-estimate.
     (words as f64 * 1.33).ceil() as usize
 }
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+const HISTORY_COMPRESSION_THRESHOLD: f64 = 0.60;
+const ROLLING_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ConversationMemory
@@ -107,6 +118,116 @@ impl ConversationMemory {
     /// responses for the turn so both fields can be populated at once.
     pub fn push_turn(&mut self, turn: Turn) {
         self.turns.push(turn);
+    }
+
+    pub async fn maintain_history(
+        &mut self,
+        budget: &ContextBudget,
+        llm: Option<&Arc<dyn LLMProvider>>,
+        compression_prompt_template: &str,
+        session_id: uuid::Uuid,
+    ) -> Result<()> {
+        self.compress_turns_older_than(
+            ROLLING_WINDOW_MS,
+            llm,
+            compression_prompt_template,
+            session_id,
+        )
+        .await?;
+        self.maybe_compress_at_budget_threshold(budget, llm, compression_prompt_template, session_id)
+            .await
+    }
+
+    pub async fn compress_turns_older_than(
+        &mut self,
+        window_ms: i64,
+        llm: Option<&Arc<dyn LLMProvider>>,
+        compression_prompt_template: &str,
+        session_id: uuid::Uuid,
+    ) -> Result<()> {
+        if self.turns.is_empty() {
+            return Ok(());
+        }
+        let cutoff = now_ms().saturating_sub(window_ms);
+        let split_at = self
+            .turns
+            .iter()
+            .position(|turn| turn.created_at_ms >= cutoff)
+            .unwrap_or(self.turns.len());
+        if split_at == 0 {
+            return Ok(());
+        }
+        self.compress_and_remove_oldest(split_at, llm, compression_prompt_template, session_id)
+            .await
+    }
+
+    pub async fn maybe_compress_at_budget_threshold(
+        &mut self,
+        budget: &ContextBudget,
+        llm: Option<&Arc<dyn LLMProvider>>,
+        compression_prompt_template: &str,
+        session_id: uuid::Uuid,
+    ) -> Result<()> {
+        if self.turns.len() < 2 {
+            return Ok(());
+        }
+        let tokens = estimate_tokens(&self.serialise_turns(&self.turns));
+        let threshold = (budget.history_tokens as f64 * HISTORY_COMPRESSION_THRESHOLD) as usize;
+        if tokens <= threshold {
+            return Ok(());
+        }
+        let compress_count = (self.turns.len() / 2).max(1);
+        self.compress_and_remove_oldest(compress_count, llm, compression_prompt_template, session_id)
+            .await
+    }
+
+    async fn compress_and_remove_oldest(
+        &mut self,
+        count: usize,
+        llm: Option<&Arc<dyn LLMProvider>>,
+        compression_prompt_template: &str,
+        session_id: uuid::Uuid,
+    ) -> Result<()> {
+        if count == 0 || count >= self.turns.len() {
+            return Ok(());
+        }
+        let old_turns: Vec<Turn> = self.turns.drain(..count).collect();
+        let old_text = self.serialise_turns(&old_turns);
+        if let Some(provider) = llm {
+            match self
+                .compress(&old_text, provider, compression_prompt_template)
+                .await
+            {
+                Ok(summary) => {
+                    info!(
+                        session_id = %session_id,
+                        compressed_turns = old_turns.len(),
+                        "conversation history compressed proactively"
+                    );
+                    self.rolling_summary = if self.rolling_summary.is_empty() {
+                        summary
+                    } else {
+                        format!("{}\n{}", self.rolling_summary, summary)
+                    };
+                }
+                Err(e) => {
+                    warn!(
+                        session_id = %session_id,
+                        error = %e,
+                        "proactive history compression failed"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn history_budget_usage(&self, budget: &ContextBudget) -> f32 {
+        if budget.history_tokens == 0 {
+            return 0.0;
+        }
+        let tokens = estimate_tokens(&self.serialise_turns(&self.turns));
+        (tokens as f32 / budget.history_tokens as f32).min(1.0)
     }
 
     /// Update the directional/depth responses on the most recent turn if they
@@ -278,6 +399,16 @@ mod tests {
             question: q.to_string(),
             directional_response: format!("Brief answer to: {q}"),
             depth_response: format!("Full answer to: {q}"),
+            created_at_ms: now_ms(),
+        }
+    }
+
+    fn make_turn_at(q: &str, created_at_ms: i64) -> Turn {
+        Turn {
+            question: q.to_string(),
+            directional_response: format!("Brief answer to: {q}"),
+            depth_response: format!("Full answer to: {q}"),
+            created_at_ms,
         }
     }
 
@@ -332,6 +463,7 @@ mod tests {
             question: "x".repeat(2000),
             directional_response: "y".repeat(2000),
             depth_response: "z".repeat(2000),
+            created_at_ms: now_ms(),
         };
         mem.push_turn(long_turn.clone());
         mem.push_turn(long_turn.clone());
@@ -353,6 +485,7 @@ mod tests {
             question: "Q1".to_string(),
             directional_response: String::new(),
             depth_response: String::new(),
+            created_at_ms: now_ms(),
         });
         mem.update_last_responses(Some("brief".to_string()), Some("full".to_string()));
         assert_eq!(mem.turns[0].directional_response, "brief");
@@ -386,6 +519,7 @@ mod tests {
             question: "word ".repeat(2000),
             directional_response: "ans ".repeat(2000),
             depth_response: "ans ".repeat(2000),
+            created_at_ms: now_ms(),
         };
         mem.push_turn(huge);
 
@@ -515,5 +649,64 @@ mod tests {
         assert_eq!(ctx.rolling_summary, "Prior summary kept verbatim.");
         assert!(ctx.recent_turns.contains("Q9"));
         assert!(!ctx.truncated);
+    }
+
+    #[tokio::test]
+    async fn compression_triggers_at_sixty_percent_budget() {
+        use crate::llm::provider::MockLLMProvider;
+
+        let mut mem = ConversationMemory::new(4_096);
+        for i in 0..8 {
+            mem.push_turn(make_turn(format!("Question {i} with enough words to consume budget ").repeat(20).as_str()));
+        }
+
+        let budget = ContextBudget::from_window(512);
+        assert!(mem.history_budget_usage(&budget) > 0.60);
+
+        let provider: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "Earlier topics were covered.".to_string(),
+            provider_name: "default".to_string(),
+        });
+
+        let before = mem.turn_count();
+        mem.maybe_compress_at_budget_threshold(
+            &budget,
+            Some(&provider),
+            "Summarise:\n{old_turns}",
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(mem.turn_count(), before / 2);
+        assert!(mem.rolling_summary.contains("Earlier topics"));
+    }
+
+    #[tokio::test]
+    async fn rolling_window_compresses_old_turns() {
+        use crate::llm::provider::MockLLMProvider;
+
+        let mut mem = ConversationMemory::new(128_000);
+        let old_ts = now_ms() - (6 * 60 * 1000);
+        mem.push_turn(make_turn_at("Old question one", old_ts));
+        mem.push_turn(make_turn_at("Old question two", old_ts + 1_000));
+        mem.push_turn(make_turn("Recent question"));
+
+        let provider: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "Earlier in the call they discussed leadership.".to_string(),
+            provider_name: "default".to_string(),
+        });
+
+        mem.compress_turns_older_than(
+            ROLLING_WINDOW_MS,
+            Some(&provider),
+            "Summarise:\n{old_turns}",
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(mem.turn_count(), 1);
+        assert!(mem.rolling_summary.contains("Earlier in the call"));
     }
 }
