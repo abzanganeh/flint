@@ -63,43 +63,21 @@ pub struct DetectedQuestion {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Cross-channel echo suppression — first-arrival wins
+// Cross-channel echo gate — near-identical duplicates only (M10 Slice 1)
 // ────────────────────────────────────────────────────────────────────────────
 //
-// The dual-channel architecture assumes headphones. Without them, content
-// leaks across channels in BOTH directions:
+// In loopback mode, channel identity IS speaker identity:
+//   System = interviewer (loopback), Mic = user.
 //
-//   - Interviewer audio (speakers) → picked up by the mic → duplicate on MIC.
-//   - The user's own voice → looped back in the conferencing app's call mix
-//     (Teams/Zoom sidetone, far-end echo) → duplicate on SYSTEM.
+// Echo is acoustic/hardware bleed of the *same* words on the opposite channel,
+// not overlapping conversation. Suppress only when Jaccard ≥ 0.85 within 500ms.
+// Concurrent speakers with partial overlap (Jaccard < 0.85) are never dropped.
 //
-// Attribution rule: the genuine source always transcribes FIRST — the echo
-// arrives later because it travels through speakers/network/DSP before being
-// re-captured. So whichever channel produced the content first is the true
-// speaker; a near-duplicate arriving on the opposite channel within the
-// window is the echo and is dropped. This replaces the old "SYSTEM always
-// wins" rule, which mislabelled the user's answers as Interviewer whenever
-// the call mix echoed their voice back.
-//
-// Near-duplicate matching uses two complementary signals:
-//
-//  1. Jaccard word-set overlap (≥ 0.5).  Effective for long utterances where
-//     Whisper's two transcriptions cover the same vocabulary.
-//
-//  2. Ordered prefix match: if the first ⌈N/2⌉ words of both transcriptions
-//     match exactly in order, treat it as an echo.  This catches the common
-//     failure mode where room acoustics cause Whisper to diverge only at the
-//     END of a phrase ("All right, let's take our" vs "All right, let's say
-//     guard") — Jaccard of 0.43 misses it, but the first 3 words agree exactly.
-//
-// Lowering ECHO_JACCARD_THRESHOLD from 0.6 → 0.5 and adding the prefix check
-// substantially reduces bleed-through when the user is not wearing headphones.
+// Phone mode disables this gate entirely (single mixed channel — Slice 7).
 
-const ECHO_WINDOW: Duration = Duration::from_secs(10);
+const ECHO_WINDOW: Duration = Duration::from_millis(500);
 const ECHO_MIN_WORDS: usize = 3;
-/// Minimum words that must agree in the ordered prefix check.
-const ECHO_PREFIX_MATCH_WORDS: usize = 3;
-const ECHO_JACCARD_THRESHOLD: f32 = 0.5;
+const ECHO_JACCARD_THRESHOLD: f32 = 0.85;
 
 const MIC_QUALITY_WINDOW: usize = 8;
 const MIC_QUALITY_LOGPROB_THRESHOLD: f32 = -0.5;
@@ -158,10 +136,7 @@ impl CrossChannelDedup {
             AudioSource::Microphone => &self.recent_system,
             AudioSource::System => &self.recent_mic,
         };
-        opposite.iter().any(|entry| {
-            jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD
-                || prefix_matches(&tokens, &entry.tokens)
-        })
+        opposite.iter().any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
     }
 
     /// Record an accepted transcript so later echoes on the opposite channel
@@ -209,27 +184,6 @@ fn jaccard(a: &[String], b: &[String]) -> f32 {
     } else {
         intersection / union
     }
-}
-
-/// True when both token sequences share at least `ECHO_PREFIX_MATCH_WORDS`
-/// ordered tokens at the start of the shorter sequence.
-///
-/// Jaccard is a bag-of-words metric and misses cases where Whisper diverges
-/// only at the end of a phrase due to different acoustic quality on each
-/// channel.  E.g. "all right lets take our" vs "all right lets say guard"
-/// has Jaccard = 0.43 but the first 3 tokens are identical → echo.
-fn prefix_matches(a: &[String], b: &[String]) -> bool {
-    let check = a.len().min(b.len()).min(ECHO_PREFIX_MATCH_WORDS * 2);
-    if check < ECHO_PREFIX_MATCH_WORDS {
-        return false;
-    }
-    let agree = a
-        .iter()
-        .zip(b.iter())
-        .take(check)
-        .filter(|(x, y)| x == y)
-        .count();
-    agree >= ECHO_PREFIX_MATCH_WORDS
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -290,6 +244,7 @@ pub async fn run_audio_pipeline(
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
     mic_quality: Arc<Mutex<MicQualityMonitor>>,
+    echo_suppression_enabled: bool,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
@@ -325,6 +280,7 @@ pub async fn run_audio_pipeline(
             &persistence,
             &dedup,
             &mic_quality,
+            echo_suppression_enabled,
         )
         .await
         {
@@ -352,6 +308,7 @@ async fn process_frame(
     persistence: &Arc<SessionPersistence>,
     dedup: &Mutex<CrossChannelDedup>,
     mic_quality: &Arc<Mutex<MicQualityMonitor>>,
+    echo_suppression_enabled: bool,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -384,7 +341,7 @@ async fn process_frame(
     };
 
     let now = Instant::now();
-    {
+    if echo_suppression_enabled {
         let mut guard = match dedup.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -393,7 +350,7 @@ async fn process_frame(
             tracing::debug!(
                 source = %source,
                 text = %result.text,
-                "suppressed cross-channel echo (first arrival wins)"
+                "suppressed near-identical cross-channel echo"
             );
             return Ok(());
         }
@@ -538,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn jaccard_word_overlap_matches_near_duplicate_transcripts() {
+    fn jaccard_high_overlap_matches_near_duplicate_transcripts() {
         let a = tokenize_for_echo("Why do you like to work with Fisher Investors?");
         let b = tokenize_for_echo("Why do you like work with Fisher Investors");
         assert!(jaccard(&a, &b) >= ECHO_JACCARD_THRESHOLD);
@@ -548,40 +505,59 @@ mod tests {
     }
 
     #[test]
-    fn dedup_suppresses_mic_echo_when_system_spoke_first() {
-        // Interviewer speaks through speakers → mic re-captures it.
+    fn concurrent_speakers_with_partial_overlap_not_suppressed() {
         let mut dedup = CrossChannelDedup::default();
         let now = Instant::now();
         dedup.record(
             AudioSource::System,
-            "Why do you like to work with Fisher Investors?",
+            "tell me about a project you led at your company",
             now,
         );
+        assert!(!dedup.should_suppress(
+            AudioSource::Microphone,
+            "I led the fraud detection platform migration last year",
+            now + Duration::from_millis(200),
+        ));
+    }
+
+    #[test]
+    fn exact_echo_suppressed_at_high_jaccard_within_window() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
+        dedup.record(AudioSource::Microphone, text, now);
+        assert!(dedup.should_suppress(
+            AudioSource::System,
+            text,
+            now + Duration::from_millis(300),
+        ));
+    }
+
+    #[test]
+    fn dedup_suppresses_mic_echo_when_system_spoke_first() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        let text = "Why do you like to work with Fisher Investors";
+        dedup.record(AudioSource::System, text, now);
 
         assert!(dedup.should_suppress(
             AudioSource::Microphone,
-            "Why do you like work with Fisher Investors",
-            now + Duration::from_millis(500),
+            text,
+            now + Duration::from_millis(200),
         ));
     }
 
     #[test]
     fn dedup_suppresses_system_echo_when_mic_spoke_first() {
-        // User answers → conferencing app loops their voice back into the
-        // call mix → SYSTEM channel transcribes the duplicate. The user's
-        // answer must NOT be re-attributed to the interviewer.
         let mut dedup = CrossChannelDedup::default();
         let now = Instant::now();
-        dedup.record(
-            AudioSource::Microphone,
-            "I am excited about the AI Engineer opportunity at Fisher",
-            now,
-        );
+        let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
+        dedup.record(AudioSource::Microphone, text, now);
 
         assert!(dedup.should_suppress(
             AudioSource::System,
-            "I am excited about the AI Engineer opportunity at Fisher",
-            now + Duration::from_millis(800),
+            text,
+            now + Duration::from_millis(200),
         ));
     }
 
@@ -602,12 +578,29 @@ mod tests {
     fn dedup_drops_entries_outside_the_window() {
         let mut dedup = CrossChannelDedup::default();
         let now = Instant::now();
-        dedup.record(AudioSource::System, "alpha bravo charlie delta", now);
-        let later = now + ECHO_WINDOW + Duration::from_secs(1);
+        let text = "alpha bravo charlie delta echo test phrase here";
+        dedup.record(AudioSource::System, text, now);
+        let later = now + ECHO_WINDOW + Duration::from_millis(1);
         assert!(!dedup.should_suppress(
             AudioSource::Microphone,
-            "alpha bravo charlie delta",
+            text,
             later,
+        ));
+    }
+
+    #[test]
+    fn prefix_match_alone_does_not_suppress_without_high_jaccard() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        dedup.record(
+            AudioSource::System,
+            "all right lets take our time with this question",
+            now,
+        );
+        assert!(!dedup.should_suppress(
+            AudioSource::Microphone,
+            "all right lets say guard over here now",
+            now + Duration::from_millis(300),
         ));
     }
 
@@ -619,53 +612,6 @@ mod tests {
         use crate::audio::rnnoise::DOWNSAMPLED_FRAME_SIZE;
         assert_eq!(RNNOISE_FRAME_SIZE, 480);
         assert_eq!(DOWNSAMPLED_FRAME_SIZE * 2, VAD_FRAME_SAMPLES);
-    }
-
-    #[test]
-    fn prefix_match_catches_whisper_end_of_utterance_divergence() {
-        // Whisper transcribes the same audio differently on each channel because
-        // room acoustics degrade the mic capture. Jaccard alone misses these
-        // (Jaccard = 0.43 < 0.5), but the first three tokens are identical.
-        let system = tokenize_for_echo("all right lets take our");
-        let mic = tokenize_for_echo("all right lets say guard");
-        assert!(
-            jaccard(&system, &mic) < ECHO_JACCARD_THRESHOLD,
-            "Jaccard should NOT trigger on its own"
-        );
-        assert!(
-            prefix_matches(&system, &mic),
-            "prefix_matches should catch the shared prefix"
-        );
-    }
-
-    #[test]
-    fn dedup_suppresses_acoustic_bleed_via_prefix_match() {
-        // The system channel transcribes the interviewer's question. The mic
-        // picks it up acoustically and Whisper produces a divergent ending.
-        let mut dedup = CrossChannelDedup::default();
-        let now = Instant::now();
-        dedup.record(
-            AudioSource::System,
-            "all right lets take our time with this",
-            now,
-        );
-        assert!(
-            dedup.should_suppress(
-                AudioSource::Microphone,
-                "all right lets say guard over here",
-                now + Duration::from_millis(300),
-            ),
-            "prefix-matched acoustic echo should be suppressed"
-        );
-    }
-
-    #[test]
-    fn prefix_match_does_not_suppress_distinct_content_sharing_a_short_preamble() {
-        // Both could start with "so" but diverge quickly — must NOT suppress.
-        let a = tokenize_for_echo("so tell me about your leadership experience");
-        let b = tokenize_for_echo("so the biggest challenge was aligning stakeholders");
-        // Only "so" matches at position 0 — well below ECHO_PREFIX_MATCH_WORDS.
-        assert!(!prefix_matches(&a, &b));
     }
 
     #[test]

@@ -2883,6 +2883,7 @@ pub async fn start_session(
         mic_rx,
         Arc::clone(&state.persistence),
         Arc::new(std::sync::Mutex::new(MicQualityMonitor::default())),
+        !is_phone_call_mode,
     ));
 
     let handles = LiveTaskHandles {
