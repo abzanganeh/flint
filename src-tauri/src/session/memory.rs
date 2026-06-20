@@ -134,8 +134,13 @@ impl ConversationMemory {
             session_id,
         )
         .await?;
-        self.maybe_compress_at_budget_threshold(budget, llm, compression_prompt_template, session_id)
-            .await
+        self.maybe_compress_at_budget_threshold(
+            budget,
+            llm,
+            compression_prompt_template,
+            session_id,
+        )
+        .await
     }
 
     pub async fn compress_turns_older_than(
@@ -177,8 +182,13 @@ impl ConversationMemory {
             return Ok(());
         }
         let compress_count = (self.turns.len() / 2).max(1);
-        self.compress_and_remove_oldest(compress_count, llm, compression_prompt_template, session_id)
-            .await
+        self.compress_and_remove_oldest(
+            compress_count,
+            llm,
+            compression_prompt_template,
+            session_id,
+        )
+        .await
     }
 
     async fn compress_and_remove_oldest(
@@ -657,7 +667,11 @@ mod tests {
 
         let mut mem = ConversationMemory::new(4_096);
         for i in 0..8 {
-            mem.push_turn(make_turn(format!("Question {i} with enough words to consume budget ").repeat(20).as_str()));
+            mem.push_turn(make_turn(
+                format!("Question {i} with enough words to consume budget ")
+                    .repeat(20)
+                    .as_str(),
+            ));
         }
 
         let budget = ContextBudget::from_window(512);

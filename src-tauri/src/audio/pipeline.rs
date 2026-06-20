@@ -139,7 +139,9 @@ impl CrossChannelDedup {
             AudioSource::Microphone => &self.recent_system,
             AudioSource::System => &self.recent_mic,
         };
-        opposite.iter().any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
+        opposite
+            .iter()
+            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
     }
 
     /// Record an accepted transcript so later echoes on the opposite channel
@@ -591,11 +593,7 @@ mod tests {
         let now = Instant::now();
         let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
         dedup.record(AudioSource::Microphone, text, now);
-        assert!(dedup.should_suppress(
-            AudioSource::System,
-            text,
-            now + Duration::from_millis(300),
-        ));
+        assert!(dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(300),));
     }
 
     #[test]
@@ -619,11 +617,7 @@ mod tests {
         let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
         dedup.record(AudioSource::Microphone, text, now);
 
-        assert!(dedup.should_suppress(
-            AudioSource::System,
-            text,
-            now + Duration::from_millis(200),
-        ));
+        assert!(dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(200),));
     }
 
     #[test]
@@ -646,11 +640,7 @@ mod tests {
         let text = "alpha bravo charlie delta echo test phrase here";
         dedup.record(AudioSource::System, text, now);
         let later = now + ECHO_WINDOW + Duration::from_millis(1);
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            text,
-            later,
-        ));
+        assert!(!dedup.should_suppress(AudioSource::Microphone, text, later,));
     }
 
     #[test]

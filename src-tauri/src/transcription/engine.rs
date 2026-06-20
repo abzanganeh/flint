@@ -133,11 +133,7 @@ impl WhisperEngine {
         self.decode_chunk(chunk, true)
     }
 
-    fn decode_chunk(
-        &self,
-        chunk: &VadChunk,
-        greedy: bool,
-    ) -> Result<Option<TranscriptionResult>> {
+    fn decode_chunk(&self, chunk: &VadChunk, greedy: bool) -> Result<Option<TranscriptionResult>> {
         let mut state = self
             .model
             .create_state()

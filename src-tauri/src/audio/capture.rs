@@ -914,7 +914,9 @@ mod tests {
     #[test]
     fn phone_mode_opens_single_system_stream_only() {
         let src = include_str!("capture.rs");
-        let start = src.find("pub fn start_phone_mode").expect("start_phone_mode");
+        let start = src
+            .find("pub fn start_phone_mode")
+            .expect("start_phone_mode");
         let end = src[start..]
             .find("pub fn start(")
             .map(|i| start + i)

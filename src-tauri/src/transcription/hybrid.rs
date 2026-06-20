@@ -111,10 +111,7 @@ pub enum ConfirmPlan {
 }
 
 impl HybridQuestionDetector {
-    pub fn new(
-        failover: Arc<FailoverManager>,
-        prompts_dir: &Path,
-    ) -> Result<Self> {
+    pub fn new(failover: Arc<FailoverManager>, prompts_dir: &Path) -> Result<Self> {
         let prompt_path = prompts_dir.join("question_detection").join("llama.txt");
         let prompt_template = std::fs::read_to_string(&prompt_path).with_context(|| {
             format!(
@@ -196,9 +193,7 @@ impl HybridQuestionDetector {
     }
 
     fn build_verify_prompt(&self, utterance: &str) -> String {
-        let sanitized = utterance
-            .replace('{', "\u{FF5B}")
-            .replace('}', "\u{FF5D}");
+        let sanitized = utterance.replace('{', "\u{FF5B}").replace('}', "\u{FF5D}");
         self.prompt_template.replace("{utterance}", &sanitized)
     }
 
@@ -267,7 +262,10 @@ pub async fn finalize_confirmation<R: Runtime>(
                     "YES" => LlmVerifyOutcome::Confirmed,
                     "NO" => LlmVerifyOutcome::Rejected,
                     other => {
-                        warn!(response = other, "LLM verify unexpected response — treating as skip");
+                        warn!(
+                            response = other,
+                            "LLM verify unexpected response — treating as skip"
+                        );
                         let mut guard = hybrid.lock().await;
                         guard.unknown_cached_until = Some(Instant::now() + UNKNOWN_CACHE);
                         LlmVerifyOutcome::Skipped
@@ -365,14 +363,12 @@ mod tests {
         let failover = mock_failover("YES");
         let mut detector = HybridQuestionDetector::new(failover, &prompts_dir()).unwrap();
         detector.last_checked_snapshot.clear();
-        assert!(
-            detector
-                .ingest_transcript(
-                    "okay sure I understand that part completely",
-                    SILENCE_CONFIRM_MS,
-                )
-                .is_none()
-        );
+        assert!(detector
+            .ingest_transcript(
+                "okay sure I understand that part completely",
+                SILENCE_CONFIRM_MS,
+            )
+            .is_none());
     }
 
     #[tokio::test]

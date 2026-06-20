@@ -198,7 +198,8 @@ impl VadChunker {
 
     fn append_post_padding(&mut self) {
         let pad_samples = (PRE_POST_PADDING_MS as usize * VAD_SAMPLE_RATE as usize) / 1000;
-        self.speech_buf.extend(std::iter::repeat_n(0.0f32, pad_samples));
+        self.speech_buf
+            .extend(std::iter::repeat_n(0.0f32, pad_samples));
     }
 
     /// Process one frame of 16kHz PCM mono audio.
