@@ -3284,13 +3284,34 @@ pub async fn discard_all_crashed_sessions(
 // 6.4 — Post-session summary
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// JSON returned when every provider in the failover chain rejects the summary call.
+/// Returns `Ok` (not `Err`) so session end is never blocked on summary failure.
+fn summary_unavailable_json() -> String {
+    serde_json::json!({
+        "date": "",
+        "domain": "",
+        "role": "",
+        "company": "",
+        "questions_count": 0,
+        "topics_covered": [],
+        "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+        "key_moments": [],
+        "follow_up_actions": [],
+        "one_line_summary": "Summary unavailable — rate limited or offline. Retry from Past Sessions."
+    })
+    .to_string()
+}
+
 /// Generate a structured post-session summary using the `session_essence` prompt.
 ///
 /// Loads the full transcript from SQLite, passes it through the LLM prompt
 /// defined in `/prompts/session_essence/`, and returns a JSON summary blob.
 /// Only callable after the session has reached `ENDED`.
 #[tauri::command]
-pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn generate_session_summary(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let sid = {
         let machine = state.state_machine.lock().await;
         machine.session_id().ok_or("No session to summarise.")?
@@ -3346,23 +3367,42 @@ pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<Stri
         }
     }
 
-    // Build a one-shot provider for the summary call.
-    let provider: Arc<dyn LLMProvider> =
-        stack::resolve_primary(&state.persistence).unwrap_or_else(|| Arc::clone(&state.llm));
+    let config = CompletionConfig {
+        max_tokens: Some(600),
+        temperature: 0.0,
+        stream: false,
+    };
 
-    let summary = provider
-        .complete(
-            prompt,
-            CompletionConfig {
-                max_tokens: Some(600),
-                temperature: 0.0,
-                stream: false,
-            },
-        )
-        .await
-        .map_err(|e| format!("LLM summary call failed: {e}"))?;
+    // Route through FailoverManager — Groq 429 must cascade to cloud tiers → Ollama.
+    let (failover, _, _) = match build_failover_stack(&app, &state).await {
+        Ok(stack) => stack,
+        Err(e) => {
+            warn!(
+                session_id = %sid,
+                error = %e,
+                "post-session summary skipped — no failover stack"
+            );
+            return Ok(summary_unavailable_json());
+        }
+    };
 
-    info!(session_id = %sid, "post-session summary generated");
+    let summary = match failover.complete(prompt, config, &app, 800).await {
+        Ok(text) => text,
+        Err(e) => {
+            warn!(
+                session_id = %sid,
+                error = %e,
+                "post-session summary failed after failover cascade"
+            );
+            return Ok(summary_unavailable_json());
+        }
+    };
+
+    info!(
+        session_id = %sid,
+        provider = %failover.active_provider_name(),
+        "post-session summary generated"
+    );
     Ok(summary)
 }
 
@@ -4682,4 +4722,22 @@ pub struct MockTurnDto {
     pub coach_json: String,
     pub suggested: String,
     pub score: u8,
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::summary_unavailable_json;
+
+    #[test]
+    fn summary_unavailable_json_is_valid_and_non_blocking() {
+        let raw = summary_unavailable_json();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert!(parsed.get("one_line_summary").is_some());
+        assert!(
+            parsed["one_line_summary"]
+                .as_str()
+                .unwrap()
+                .contains("Retry from Past Sessions")
+        );
+    }
 }
