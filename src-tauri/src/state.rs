@@ -14,6 +14,7 @@ use crate::knowledge::{knowledge_base_dir, GlobalKnowledgeBase, PackId};
 use crate::mock::conductor::{Conductor, MockMode};
 use crate::mock::mic_capture::MicCapture;
 
+use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::DetectedQuestion;
 use crate::transcription::hybrid::SystemTranscriptBuffer;
 
@@ -85,6 +86,8 @@ pub struct LiveTaskHandles {
     pub turn_cancel: Arc<Mutex<Option<TurnCancelFlag>>>,
     /// Rolling System-channel transcript since last Ctrl+Q (M10 Slice 2).
     pub system_transcript_buffer: Arc<std::sync::Mutex<SystemTranscriptBuffer>>,
+    /// Phone-mode diarization state (M10 Slice 8).
+    pub diarizer: Arc<std::sync::Mutex<DiarizerManager>>,
 }
 
 /// Shared application state for Tauri commands.

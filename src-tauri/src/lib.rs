@@ -229,6 +229,7 @@ pub fn run() {
             commands::stop_session,
             commands::trigger_response,
             commands::signal_question_ended,
+            commands::assign_speaker,
             commands::cancel_inference,
             commands::panic_hide_overlay,
             commands::switch_provider,

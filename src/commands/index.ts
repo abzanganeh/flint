@@ -113,6 +113,9 @@ export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 export const signalQuestionEnded = (sessionId: string): Promise<void> =>
   invoke<void>("signal_question_ended", { sessionId });
 
+export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
+  invoke<void>("assign_speaker", { sessionId, speakerId });
+
 /** Manual turn: rehearsal uses `run_rehearsal_turn`; live uses `trigger_response`. */
 export const triggerResponse = async (
   question: string,

@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::audio::capture::AudioCapture;
+use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
 use crate::calibration::{
     device_fingerprint_or_fallback, load_mic_paragraph_text, load_system_clip_text,
@@ -18,9 +19,10 @@ use crate::calibration::{
 };
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto, HardwareProfileDto,
-    HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto, SessionConfigDto,
-    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
+    AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto,
+    HardwareProfileDto, HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto,
+    SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto,
+    WebSourceDto,
 };
 use crate::events::{
     emit_calibration_mic_complete, emit_calibration_system_complete, emit_mock_coach_feedback,
@@ -1845,7 +1847,8 @@ pub async fn run_rehearsal_turn(
 
     let digest = resolve_session_digest(state.inner(), sid).await?;
 
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true).await?;
+    let (failover, local_provider, context_window) =
+        build_failover_stack(&app, &state, true).await?;
 
     let memory = {
         let mut guard = state.session_memory.lock().await;
@@ -2769,7 +2772,8 @@ pub async fn start_session(
         HybridQuestionDetector::new(Arc::clone(&failover), &prompts_base_dir())
             .map_err(|e| start_session_step_err("hybrid question detector init", e))?,
     ));
-    let system_transcript_buffer = Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
+    let system_transcript_buffer =
+        Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
 
     // ── 3. Audio channels ─────────────────────────────────────────────────
     //
@@ -2886,6 +2890,8 @@ pub async fn start_session(
         is_phone_call_mode,
     ));
 
+    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+
     let handles = LiveTaskHandles {
         stop_tx,
         zeroed_rx,
@@ -2894,6 +2900,7 @@ pub async fn start_session(
         question_tx,
         turn_cancel: turn_cancel_slot,
         system_transcript_buffer,
+        diarizer: Arc::clone(&diarizer),
     };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
@@ -3118,7 +3125,10 @@ pub async fn trigger_response(
 /// Grabs the System transcript buffer since the last signal and sends it
 /// directly to the orchestrator, bypassing hybrid detection layers.
 #[tauri::command]
-pub async fn signal_question_ended(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+pub async fn signal_question_ended(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
 
     {
@@ -3152,7 +3162,9 @@ pub async fn signal_question_ended(state: State<'_, AppState>, session_id: Strin
     };
 
     if question_text.trim().is_empty() {
-        return Err("No interviewer transcript captured since the last question signal.".to_string());
+        return Err(
+            "No interviewer transcript captured since the last question signal.".to_string(),
+        );
     }
 
     let detected = DetectedQuestion {
@@ -3172,6 +3184,27 @@ pub async fn signal_question_ended(state: State<'_, AppState>, session_id: Strin
     );
 
     Ok(())
+}
+
+/// Assign which diarized speaker is the interviewer (M10 Slice 8).
+#[tauri::command]
+pub async fn assign_speaker(
+    state: State<'_, AppState>,
+    session_id: String,
+    speaker_id: u8,
+) -> Result<(), String> {
+    let _sid = validate_session_id(&state, &session_id).await?;
+
+    let guard = state.live_tasks.lock().await;
+    let Some(handles) = guard.as_ref() else {
+        return Err("No active live session.".to_string());
+    };
+
+    let mut diarizer = handles
+        .diarizer
+        .lock()
+        .map_err(|_| "Diarizer lock poisoned.".to_string())?;
+    diarizer.assign_interviewer(speaker_id)
 }
 
 /// Cancel any running inference — valid from LIVE or REHEARSING.
@@ -4877,11 +4910,9 @@ mod summary_tests {
         let raw = summary_unavailable_json();
         let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
         assert!(parsed.get("one_line_summary").is_some());
-        assert!(
-            parsed["one_line_summary"]
-                .as_str()
-                .unwrap()
-                .contains("Retry from Past Sessions")
-        );
+        assert!(parsed["one_line_summary"]
+            .as_str()
+            .unwrap()
+            .contains("Retry from Past Sessions"));
     }
 }
