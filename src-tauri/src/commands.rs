@@ -18,7 +18,7 @@ use crate::calibration::{
 };
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, CalibrationResultDto, DigestDto, HardwareProfileDto,
+    AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto, HardwareProfileDto,
     HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto, SessionConfigDto,
     SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
@@ -59,8 +59,8 @@ use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
 use crate::state::{AppState, LiveTaskHandles, MockTaskHandles};
-use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
+use crate::transcription::hybrid::{HybridQuestionDetector, SystemTranscriptBuffer};
 use crate::transcription::prompt::{build_whisper_initial_prompt, FALLBACK_WHISPER_INITIAL_PROMPT};
 
 const GENERIC_AUTH_ERROR: &str = "Authentication failed. Please try again.";
@@ -1792,7 +1792,7 @@ async fn build_failover_stack(
         OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
     );
 
-    let cloud_tiers = stack::resolve_cloud_tiers(&primary_name);
+    let cloud_tiers = stack::resolve_cloud_tiers(&primary_name, &state.persistence);
     if cloud_tiers.is_empty() {
         info!("failover stack: no cloud fallback tiers configured — primary → Ollama only");
     } else {
@@ -2760,15 +2760,16 @@ pub async fn start_session(
     let whisper = init_whisper_engine(&profile, initial_prompt)
         .map_err(|e| start_session_step_err("whisper init", e))?;
 
-    // ── 2. Question detector ──────────────────────────────────────────────
-    let detector = Arc::new(
-        QuestionDetector::new(
-            profile.tier,
-            Some(Arc::clone(&state.llm)),
-            &prompts_base_dir(),
-        )
-        .map_err(|e| start_session_step_err("question detector init", e))?,
-    );
+    // ── 2. Failover stack (needed by hybrid detector) ─────────────────────
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
+        .await
+        .map_err(|e| start_session_step_err("failover stack", e))?;
+
+    let hybrid = Arc::new(tokio::sync::Mutex::new(
+        HybridQuestionDetector::new(Arc::clone(&failover), &prompts_base_dir())
+            .map_err(|e| start_session_step_err("hybrid question detector init", e))?,
+    ));
+    let system_transcript_buffer = Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
 
     // ── 3. Audio channels ─────────────────────────────────────────────────
     //
@@ -2790,6 +2791,7 @@ pub async fn start_session(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
+    *state.phone_mode_manual_only.lock().await = is_phone_call_mode;
 
     std::thread::spawn(move || {
         let capture_result = if is_phone_call_mode {
@@ -2828,11 +2830,7 @@ pub async fn start_session(
         })?
         .map_err(|e| start_session_step_err("audio capture", e))?;
 
-    // ── 5. Build failover manager and conversation memory ─────────────────
-
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
-        .await
-        .map_err(|e| start_session_step_err("failover stack", e))?;
+    // ── 5. Build conversation memory ──────────────────────────────────────
 
     let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
         context_window,
@@ -2877,13 +2875,15 @@ pub async fn start_session(
         app.clone(),
         sid,
         whisper,
-        detector,
+        hybrid,
+        Arc::clone(&system_transcript_buffer),
         question_tx.clone(),
         system_rx,
         mic_rx,
         Arc::clone(&state.persistence),
         Arc::new(std::sync::Mutex::new(MicQualityMonitor::default())),
         !is_phone_call_mode,
+        is_phone_call_mode,
     ));
 
     let handles = LiveTaskHandles {
@@ -2893,6 +2893,7 @@ pub async fn start_session(
         orchestrator,
         question_tx,
         turn_cancel: turn_cancel_slot,
+        system_transcript_buffer,
     };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
@@ -2980,6 +2981,7 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
 
     // Clear per-session memory.
     *state.session_memory.lock().await = None;
+    *state.phone_mode_manual_only.lock().await = false;
 
     // Phase 7.4 — zero the cost tracker so the next session starts fresh.
     state.cost_tracker.reset();
@@ -3111,6 +3113,67 @@ pub async fn trigger_response(
     Ok(())
 }
 
+/// Manual question boundary — Ctrl+Q (M10 Slice 2 Layer 4).
+///
+/// Grabs the System transcript buffer since the last signal and sends it
+/// directly to the orchestrator, bypassing hybrid detection layers.
+#[tauri::command]
+pub async fn signal_question_ended(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "signal_question_ended is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
+    }
+
+    let guard = state.live_tasks.lock().await;
+    let Some(handles) = guard.as_ref() else {
+        return Err("No active live session handles.".to_string());
+    };
+
+    let question_text = {
+        let mut buf = handles
+            .system_transcript_buffer
+            .lock()
+            .map_err(|_| "System transcript buffer lock poisoned.".to_string())?;
+        buf.drain_since_last_signal()
+    };
+
+    if question_text.trim().is_empty() {
+        return Err("No interviewer transcript captured since the last question signal.".to_string());
+    }
+
+    let detected = DetectedQuestion {
+        text: question_text.clone(),
+        session_id: sid,
+        detected_at: std::time::Instant::now(),
+    };
+    handles
+        .question_tx
+        .try_send(detected)
+        .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
+
+    info!(
+        session_id = %sid,
+        question_len = question_text.len(),
+        "signal_question_ended — manual question boundary",
+    );
+
+    Ok(())
+}
+
 /// Cancel any running inference — valid from LIVE or REHEARSING.
 ///
 /// Sets the active turn's cancellation flag so in-flight token streams stop.
@@ -3211,6 +3274,83 @@ pub async fn get_preferred_primary_provider(
         .persistence
         .get_preferred_primary_provider()
         .map_err(|e| e.to_string())
+}
+
+/// Return the user's ordered cloud LLM provider priority (Ollama excluded).
+#[tauri::command]
+pub async fn get_provider_priority(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state
+        .persistence
+        .get_provider_priority()
+        .map_err(|e| e.to_string())
+}
+
+/// Save a new cloud provider priority order. Ollama cannot be included.
+#[tauri::command]
+pub async fn set_provider_priority(
+    order: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() == SessionState::Live {
+            return Err(
+                "Provider priority cannot be changed during a live session. \
+                 Configure providers before starting."
+                    .to_string(),
+            );
+        }
+    }
+
+    for name in &order {
+        if name == "ollama" {
+            return Err("Ollama is always the local fallback and cannot be reordered.".to_string());
+        }
+        if !stack::REORDERABLE_CLOUD_PROVIDERS.contains(&name.as_str()) {
+            return Err(format!(
+                "Unknown provider '{name}'. Choose from {:?}.",
+                stack::REORDERABLE_CLOUD_PROVIDERS
+            ));
+        }
+    }
+
+    state
+        .persistence
+        .set_provider_priority(&order)
+        .map_err(|e| e.to_string())
+}
+
+/// List cloud providers with key presence and reachability for the Settings UI.
+#[tauri::command]
+pub async fn get_configured_providers(
+    state: State<'_, AppState>,
+) -> Result<Vec<ConfiguredProviderDto>, String> {
+    let _ = state;
+    let mut providers = Vec::new();
+
+    for name in stack::REORDERABLE_CLOUD_PROVIDERS {
+        let has_key = crate::keychain::get_api_key(name).is_ok();
+        let is_reachable = stack::resolve_cloud_provider_by_name(name)
+            .map(|p| p.is_available())
+            .unwrap_or(false);
+        providers.push(ConfiguredProviderDto {
+            name: (*name).to_string(),
+            has_key,
+            is_reachable,
+        });
+    }
+
+    let ollama_reachable = OllamaProvider::new()
+        .ok()
+        .map(|p| p.is_available())
+        .unwrap_or(false);
+    providers.push(ConfiguredProviderDto {
+        name: "ollama".to_string(),
+        has_key: true,
+        is_reachable: ollama_reachable,
+    });
+
+    Ok(providers)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
