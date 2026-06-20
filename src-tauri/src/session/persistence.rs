@@ -653,6 +653,67 @@ impl SessionPersistence {
     }
 
     const PREF_PRIMARY_PROVIDER: &'static str = "preferred_primary_provider";
+    const PREF_PROVIDER_PRIORITY: &'static str = "provider_priority";
+
+    /// Read the user's ordered cloud LLM provider priority (excludes Ollama).
+    pub fn get_provider_priority(&self) -> Result<Vec<String>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let mut stmt = conn
+            .prepare("SELECT value FROM app_preferences WHERE key = ?1")
+            .context("prepare provider_priority read")?;
+        let mut rows = stmt
+            .query(params![Self::PREF_PROVIDER_PRIORITY])
+            .context("query provider_priority")?;
+        if let Some(row) = rows.next().context("fetch provider_priority row")? {
+            let raw: String = row.get(0).context("read provider_priority value")?;
+            let parsed: Vec<String> =
+                serde_json::from_str(&raw).context("parse provider_priority JSON")?;
+            return Ok(crate::llm::stack::normalize_provider_priority(&parsed));
+        }
+
+        // Legacy single-provider preference → promote to first slot in default order.
+        drop(rows);
+        drop(stmt);
+        drop(conn);
+
+        if let Some(pref) = self.get_preferred_primary_provider()? {
+            let mut order = crate::llm::stack::default_provider_priority();
+            order.retain(|name| name != &pref);
+            order.insert(0, pref);
+            return Ok(crate::llm::stack::normalize_provider_priority(&order));
+        }
+
+        Ok(crate::llm::stack::default_provider_priority())
+    }
+
+    /// Persist the user's cloud provider priority order. Ollama is rejected.
+    pub fn set_provider_priority(&self, order: &[String]) -> Result<()> {
+        let normalized = crate::llm::stack::normalize_provider_priority(order);
+        if normalized.is_empty() {
+            bail!("provider priority must include at least one cloud provider");
+        }
+
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let json = serde_json::to_string(&normalized).context("serialize provider_priority")?;
+        conn.execute(
+            "INSERT INTO app_preferences (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![Self::PREF_PROVIDER_PRIORITY, json],
+        )
+        .context("write provider_priority")?;
+
+        // Keep legacy preferred-primary in sync with the new default slot.
+        if let Some(first) = normalized.first() {
+            conn.execute(
+                "INSERT INTO app_preferences (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![Self::PREF_PRIMARY_PROVIDER, first],
+            )
+            .context("sync preferred_primary_provider")?;
+        }
+
+        Ok(())
+    }
 
     /// Read the user's preferred primary LLM provider (`groq`, `openai`, etc.).
     pub fn get_preferred_primary_provider(&self) -> Result<Option<String>> {
@@ -2628,6 +2689,21 @@ mod tests {
     }
 
     // ── State persistence ────────────────────────────────────────────────────
+
+    #[test]
+    fn provider_priority_roundtrip() {
+        let db = new_db();
+        db.set_provider_priority(&[
+            "deepseek".to_string(),
+            "groq".to_string(),
+            "openrouter".to_string(),
+        ])
+        .unwrap();
+        let order = db.get_provider_priority().unwrap();
+        assert_eq!(order[0], "deepseek");
+        assert_eq!(order[1], "groq");
+        assert!(order.contains(&"openai".to_string()));
+    }
 
     #[test]
     fn test_write_state_transition_creates_session_row() {
