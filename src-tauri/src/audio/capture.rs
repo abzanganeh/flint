@@ -312,7 +312,9 @@ impl AudioCapture {
             Arc::clone(&recovering_sys),
         )
         .context("Failed to build phone-mode system stream from mic")?;
-        sys_stream.play().context("Failed to start phone-mode system stream")?;
+        sys_stream
+            .play()
+            .context("Failed to start phone-mode system stream")?;
 
         // Mic channel — separate stream on the same device so VAD and quality
         // monitoring still work independently.
@@ -328,7 +330,9 @@ impl AudioCapture {
             Arc::clone(&recovering_mic),
         )
         .context("Failed to build phone-mode mic stream")?;
-        mic_stream.play().context("Failed to start phone-mode mic stream")?;
+        mic_stream
+            .play()
+            .context("Failed to start phone-mode mic stream")?;
 
         Ok(Self {
             system_stream: Some(sys_stream),

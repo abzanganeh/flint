@@ -178,7 +178,11 @@ async fn speak_via_pipewire(text: &str) -> Result<()> {
         .await
         .context("spawn espeak-ng --stdout")?;
 
-    anyhow::ensure!(status.success(), "espeak-ng exited with {:?}", status.code());
+    anyhow::ensure!(
+        status.success(),
+        "espeak-ng exited with {:?}",
+        status.code()
+    );
 
     // paplay routes through PipeWire to the default sink.
     let status = Command::new("paplay")

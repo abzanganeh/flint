@@ -2187,10 +2187,7 @@ pub async fn save_session_focus(
 /// Can be called any time before LIVE. The flag is read by `start_session`
 /// to choose the audio capture path. Safe to call from the Session Focus tab.
 #[tauri::command]
-pub async fn set_phone_call_mode(
-    state: State<'_, AppState>,
-    enabled: bool,
-) -> Result<(), String> {
+pub async fn set_phone_call_mode(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
     *state.phone_call_mode.lock().await = enabled;
     info!(phone_call_mode = %enabled, "phone call mode updated");
     Ok(())
