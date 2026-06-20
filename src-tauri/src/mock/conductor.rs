@@ -276,8 +276,16 @@ async fn conductor_loop<R: Runtime>(
 
             active_turn_n.store(turn_n, Ordering::SeqCst);
 
+            let embedder_q = Arc::clone(&embedder);
+            let question_for_embed = question.clone();
+            let question_embedding =
+                tokio::task::spawn_blocking(move || embedder_q.embed_one(&question_for_embed))
+                    .await
+                    .ok()
+                    .and_then(Result::ok);
+
             let preferred_answer = persistence
-                .get_preferred_answer(session_id, &question)
+                .resolve_preferred_answer(session_id, &question, question_embedding.as_deref())
                 .unwrap_or_default();
             let preferred_hit = !preferred_answer.trim().is_empty();
 

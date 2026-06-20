@@ -188,7 +188,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 15;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -452,6 +452,19 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v14")?;
         info!("sqlite schema migrated to version 14");
+    }
+
+    if current < 15 {
+        conn.execute_batch(
+            "
+            ALTER TABLE question_attempts
+                ADD COLUMN preferred_question_embedding BLOB;
+
+            PRAGMA user_version = 15;
+            ",
+        )
+        .context("schema migration v15")?;
+        info!("sqlite schema migrated to version 15");
     }
 
     Ok(())
@@ -1586,6 +1599,7 @@ impl SessionPersistence {
     }
 
     /// User-tailored script for a question (empty when none saved).
+    /// Exact normalized key match only — use [`Self::resolve_preferred_answer`] for lookup.
     pub fn get_preferred_answer(&self, session_id: Uuid, question: &str) -> Result<String> {
         use crate::session::question_attempts::normalize_question_key;
 
@@ -1614,14 +1628,88 @@ impl SessionPersistence {
         })
     }
 
+    /// Resolve a saved preferred answer: normalized key first, then cosine ≥ 0.85.
+    pub fn resolve_preferred_answer(
+        &self,
+        session_id: Uuid,
+        question: &str,
+        query_embedding: Option<&[f32]>,
+    ) -> Result<String> {
+        let exact = self.get_preferred_answer(session_id, question)?;
+        if !exact.trim().is_empty() {
+            return Ok(exact);
+        }
+        let Some(query) = query_embedding else {
+            return Ok(String::new());
+        };
+        self.find_preferred_answer_semantic(session_id, query)
+    }
+
+    fn find_preferred_answer_semantic(
+        &self,
+        session_id: Uuid,
+        query_embedding: &[f32],
+    ) -> Result<String> {
+        use crate::session::question_attempts::{
+            best_preferred_semantic_match, decode_embedding_blob,
+        };
+
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let mut stmt = conn
+            .prepare(
+                "SELECT preferred_answer, preferred_question_embedding
+                 FROM question_attempts
+                 WHERE session_id = ?1
+                   AND preferred_answer != ''
+                   AND preferred_question_embedding IS NOT NULL",
+            )
+            .context("prepare preferred semantic lookup")?;
+
+        let rows = stmt
+            .query_map(params![sid], |r| {
+                let answer: String = r.get(0)?;
+                let blob: Vec<u8> = r.get(1)?;
+                Ok((answer, blob))
+            })
+            .context("query preferred semantic candidates")?;
+
+        let mut candidates: Vec<(Vec<f32>, String)> = Vec::new();
+        for row in rows {
+            let (answer, blob) = row.context("read preferred semantic row")?;
+            if let Some(embedding) = decode_embedding_blob(&blob) {
+                if embedding.len() == query_embedding.len() {
+                    candidates.push((embedding, answer));
+                }
+            }
+        }
+
+        let refs: Vec<(&[f32], &str)> = candidates
+            .iter()
+            .map(|(emb, ans)| (emb.as_slice(), ans.as_str()))
+            .collect();
+
+        if let Some(matched) = best_preferred_semantic_match(query_embedding, refs) {
+            info!(
+                session_id = %session_id,
+                event = "preferred_answer_semantic_hit",
+                "serving user preferred answer via embedding match"
+            );
+            Ok(matched.to_string())
+        } else {
+            Ok(String::new())
+        }
+    }
+
     /// Persist a user-tailored answer for Live and embed into the Q&A vector store.
     pub fn save_preferred_answer(
         &self,
         session_id: Uuid,
         question: &str,
         answer: &str,
+        question_embedding: Option<&[f32]>,
     ) -> Result<()> {
-        use crate::session::question_attempts::normalize_question_key;
+        use crate::session::question_attempts::{encode_embedding_blob, normalize_question_key};
 
         let key = normalize_question_key(question);
         if key.is_empty() {
@@ -1629,16 +1717,25 @@ impl SessionPersistence {
         }
         let trimmed_q = question.trim();
         let trimmed_a = answer.trim();
+        let embedding_blob = question_embedding.map(encode_embedding_blob);
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         conn.execute(
             "INSERT INTO question_attempts
-                (session_id, question_key, question, preferred_answer, updated_at)
-             VALUES (?1, ?2, ?3, ?4, strftime('%s','now'))
+                (session_id, question_key, question, preferred_answer,
+                 preferred_question_embedding, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))
              ON CONFLICT(session_id, question_key) DO UPDATE SET
                 question = excluded.question,
                 preferred_answer = excluded.preferred_answer,
+                preferred_question_embedding = excluded.preferred_question_embedding,
                 updated_at = excluded.updated_at",
-            params![session_id.to_string(), key, trimmed_q, trimmed_a],
+            params![
+                session_id.to_string(),
+                key,
+                trimmed_q,
+                trimmed_a,
+                embedding_blob,
+            ],
         )
         .context("save preferred answer")?;
         Ok(())
@@ -3255,6 +3352,50 @@ mod tests {
         .unwrap();
         let filtered = db.load_practice_questions(sid, true).unwrap();
         assert_eq!(filtered, vec!["Behavioral Q".to_string()]);
+    }
+
+    #[test]
+    fn resolve_preferred_answer_exact_then_semantic() {
+        use crate::session::question_attempts::encode_embedding_blob;
+
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Preferred", "interview", "swe")
+            .unwrap();
+
+        let stored_emb = vec![1.0_f32, 0.0, 0.0, 0.0];
+        db.save_preferred_answer(
+            sid,
+            "Tell me about yourself",
+            "My intro script",
+            Some(&stored_emb),
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.get_preferred_answer(sid, "Tell me about yourself")
+                .unwrap(),
+            "My intro script"
+        );
+
+        // Normalized key miss, semantic hit (walk me through ≈ tell me about yourself).
+        let query_emb = vec![0.92_f32, 0.38, 0.08, 0.0];
+        assert_eq!(
+            db.resolve_preferred_answer(sid, "Walk me through your background", Some(&query_emb),)
+                .unwrap(),
+            "My intro script"
+        );
+
+        // Unrelated embedding should miss.
+        let unrelated = vec![0.0_f32, 1.0, 0.0, 0.0];
+        assert!(db
+            .resolve_preferred_answer(sid, "Design a rate limiter", Some(&unrelated))
+            .unwrap()
+            .is_empty());
+
+        // Stored blob round-trip sanity.
+        let blob = encode_embedding_blob(&stored_emb);
+        assert!(!blob.is_empty());
     }
 
     #[test]

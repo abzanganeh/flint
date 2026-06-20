@@ -178,6 +178,12 @@ export interface SessionConfigDto {
   /** "interview" | "meeting" | "presentation" | "negotiation" */
   sessionType: string;
   domain: string;
+  /**
+   * When true the interviewer is on a phone call near the laptop.
+   * Flint captures both channels from the microphone and skips
+   * the system audio loopback calibration phase.
+   */
+  phoneCallMode?: boolean;
 }
 
 export interface CompanyIntelDto {
@@ -243,6 +249,8 @@ export interface SessionSnapshotDto {
   contextText?: string;
   /** Structured fields (Phase 5.5.1). Present from CONFIGURING onward. */
   contextFields?: SessionContextFields;
+  /** True when the session was created with phone-call mode enabled. */
+  phoneCallMode?: boolean;
 }
 
 /** Create a new session. Returns the session UUID string. */
@@ -629,6 +637,9 @@ export const saveSessionFocus = (
 
 export const listQuestionBankTags = (sessionId: string): Promise<string[]> =>
   invoke<string[]>("list_question_bank_tags", { sessionId });
+
+export const setPhoneCallMode = (enabled: boolean): Promise<void> =>
+  invoke<void>("set_phone_call_mode", { enabled });
 
 export const getPreferredAnswer = (
   sessionId: string,

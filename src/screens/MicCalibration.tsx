@@ -13,6 +13,7 @@ import {
 interface Props {
   onComplete: () => void;
   forceRetest?: boolean;
+  phoneCallMode?: boolean;
 }
 
 type Phase = "skip-gate" | "system" | "mic" | "failed" | "done";
@@ -24,7 +25,7 @@ const FAILURE_RECOMMENDATIONS = [
   "If using a Bluetooth headset, switch to wired if possible",
 ];
 
-export default function MicCalibration({ onComplete, forceRetest = false }: Props) {
+export default function MicCalibration({ onComplete, forceRetest = false, phoneCallMode = false }: Props) {
   const [status, setStatus] = useState<MicCalibrationStatusDto | null>(null);
   const [phase, setPhase] = useState<Phase>("system");
   const [loading, setLoading] = useState(true);
@@ -57,8 +58,15 @@ export default function MicCalibration({ onComplete, forceRetest = false }: Prop
   }, [forceRetest]);
 
   useEffect(() => {
+    // In phone-call mode skip system loopback test entirely — there is no
+    // system audio to capture. Jump straight to the microphone phase.
+    if (phoneCallMode) {
+      setPhase("mic");
+      setLoading(false);
+      return;
+    }
     void loadStatus();
-  }, [loadStatus]);
+  }, [loadStatus, phoneCallMode]);
 
   const finishCalibration = async (forced: boolean) => {
     const werSystem = systemResult?.wer ?? status?.werSystem ?? 0;
@@ -159,16 +167,18 @@ export default function MicCalibration({ onComplete, forceRetest = false }: Prop
             <li key={item}>{item}</li>
           ))}
         </ul>
-        <button type="button" onClick={() => setPhase("system")}>
-          Re-test
-        </button>
-        <button
-          type="button"
-          data-testid="mic-calibration-continue-anyway"
-          onClick={() => void finishCalibration(true)}
-        >
-          I understand — continue anyway
-        </button>
+        <div className="mic-calibration-actions">
+          <button type="button" onClick={() => setPhase("system")}>
+            Re-test
+          </button>
+          <button
+            type="button"
+            data-testid="mic-calibration-continue-anyway"
+            onClick={() => void finishCalibration(true)}
+          >
+            I understand — continue anyway
+          </button>
+        </div>
       </section>
     );
   }
@@ -190,12 +200,56 @@ export default function MicCalibration({ onComplete, forceRetest = false }: Prop
 
   return (
     <section className="mic-calibration" data-testid="mic-calibration-active">
-      <h2>{isSystem ? "Phase 1 — System audio" : "Phase 2 — Microphone"}</h2>
-      {isSystem ? (
-        <p>
-          Flint will play a short clip through your speakers and capture it via system audio
-          loopback — the same path used in live sessions.
+      <h2>{isSystem ? "Phase 1 — System audio" : phoneCallMode ? "Microphone check" : "Phase 2 — Microphone"}</h2>
+      {phoneCallMode && (
+        <p className="mic-calibration-phone-banner">
+          Phone interview mode is on. Put your phone on speaker near your laptop mic, then read the paragraph below.
         </p>
+      )}
+      {isSystem ? (
+        <>
+          <p>
+            Flint will play a short clip through your speakers and capture it via system audio
+            loopback — the same path used in live sessions.
+          </p>
+          <details className="mic-calibration-details">
+            <summary>How does Flint hear the interviewer?</summary>
+            <div className="mic-calibration-details-body">
+              <p>
+                Flint listens to <strong>system audio output</strong> — whatever plays through
+                your speakers or headset — not your microphone. During a phone screen or video
+                call, the interviewer&apos;s voice plays through your headset, and Flint captures
+                that audio to detect questions and generate responses.
+              </p>
+              <p>
+                <strong>On Linux</strong> this uses a PipeWire monitor source (virtual loopback).
+                Common issues:
+              </p>
+              <ul>
+                <li>
+                  <strong>Bluetooth headset:</strong> loopback capture through Bluetooth can fail
+                  or return no audio. Try switching audio output to your laptop speakers for the
+                  test, then back to your headset for the real session.
+                </li>
+                <li>
+                  <strong>TTS not audible:</strong> if you don&apos;t hear the spoken clip,
+                  espeak-ng may not be installed — run{" "}
+                  <code>sudo apt install espeak-ng</code>.
+                </li>
+                <li>
+                  <strong>PULSE_SOURCE:</strong> if the test still times out, run{" "}
+                  <code>export PULSE_SOURCE=&quot;$(pactl get-default-sink).monitor&quot;</code>{" "}
+                  in the terminal before launching Flint.
+                </li>
+              </ul>
+              <p>
+                <strong>Phone interview on mobile?</strong> Flint cannot capture a call taken on
+                your phone. Use a softphone (e.g. Google Meet, Zoom, or a browser-based VoIP) on
+                your computer so the audio routes through system output.
+              </p>
+            </div>
+          </details>
+        </>
       ) : (
         <>
           <p>Read this paragraph aloud at a natural pace:</p>
@@ -216,13 +270,25 @@ export default function MicCalibration({ onComplete, forceRetest = false }: Prop
         </p>
       )}
       {error && <p className="mic-calibration-error">{error}</p>}
-      <button
-        type="button"
-        disabled={running}
-        onClick={() => void (isSystem ? runSystemPhase() : runMicPhase())}
-      >
-        {running ? "Running…" : isSystem ? "Run system audio test" : "Start mic test"}
-      </button>
+      <div className="mic-calibration-actions">
+        <button
+          type="button"
+          disabled={running}
+          onClick={() => void (isSystem ? runSystemPhase() : runMicPhase())}
+        >
+          {running ? "Running…" : isSystem ? "Run system audio test" : "Start mic test"}
+        </button>
+        {isSystem && !running && (
+          <button
+            type="button"
+            className="mic-calibration-skip-btn"
+            data-testid="mic-calibration-skip-system"
+            onClick={() => void finishCalibration(true)}
+          >
+            Skip — my audio route is non-standard
+          </button>
+        )}
+      </div>
     </section>
   );
 }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use cpal::traits::{HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -104,6 +104,12 @@ pub async fn transcribe_mic_calibration(whisper: Arc<WhisperEngine>) -> Result<S
 }
 
 /// Play the system clip via TTS and capture loopback; return transcript.
+///
+/// On Linux, TTS is forced through PipeWire/PulseAudio (`paplay` or
+/// `espeak-ng --stdout | paplay`) so the audio definitely reaches the
+/// default sink monitor source that the loopback capture is listening to.
+/// If `espeak-ng` writes directly to an ALSA hw: device, the monitor source
+/// never sees the audio and the capture times out.
 pub async fn transcribe_system_calibration(
     reference_text: &str,
     whisper: Arc<WhisperEngine>,
@@ -124,7 +130,16 @@ pub async fn transcribe_system_calibration(
         .context("calibration system stream init")?;
 
     let tts_text = reference_text.to_string();
-    let tts_handle = tokio::spawn(async move { tts::speak(&tts_text).await });
+    let tts_handle = tokio::spawn(async move {
+        #[cfg(target_os = "linux")]
+        {
+            // Prefer PipeWire-routed playback so the monitor source captures it.
+            if speak_via_pipewire(&tts_text).await.is_ok() {
+                return Ok(());
+            }
+        }
+        tts::speak(&tts_text).await
+    });
 
     let transcript = transcribe_from_frames(
         whisper,
@@ -138,6 +153,45 @@ pub async fn transcribe_system_calibration(
     let _ = tts_handle.await;
     drop(stop_tx);
     Ok(transcript)
+}
+
+/// Generate speech with espeak-ng, save WAV to a temp file, then play it with
+/// `paplay` which routes through PipeWire to the default sink.
+///
+/// This guarantees the calibration clip reaches the default output device and
+/// is therefore captured by its PipeWire monitor source.
+#[cfg(target_os = "linux")]
+async fn speak_via_pipewire(text: &str) -> Result<()> {
+    use std::process::Stdio;
+    use tokio::process::Command;
+
+    let wav_path = std::env::temp_dir().join("flint_calib_tts.wav");
+
+    // espeak-ng --stdout writes a 16-bit PCM WAV; save to temp file first.
+    let status = Command::new("espeak-ng")
+        .args(["-s", "150", "--stdout", text])
+        .stdout(Stdio::from(
+            std::fs::File::create(&wav_path).context("create TTS wav temp file")?,
+        ))
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("spawn espeak-ng --stdout")?;
+
+    anyhow::ensure!(status.success(), "espeak-ng exited with {:?}", status.code());
+
+    // paplay routes through PipeWire to the default sink.
+    let status = Command::new("paplay")
+        .arg(&wav_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .context("spawn paplay")?;
+
+    anyhow::ensure!(status.success(), "paplay exited with {:?}", status.code());
+
+    Ok(())
 }
 
 fn run_mic_thread(
@@ -164,6 +218,10 @@ fn run_system_thread(
 ) -> Result<()> {
     let host = cpal::default_host();
     let device = find_system_device(&host)?;
+    tracing::info!(
+        device = %device.name().unwrap_or_else(|_| "unknown".into()),
+        "system calibration: loopback capture device selected"
+    );
     let stream = build_resampled_mono_stream(&device, frame_tx)?;
     stream.play()?;
     let _ = ready_tx.send(Ok(()));

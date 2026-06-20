@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 
+import SessionContextBadges from "../components/SessionContextBadges";
 import OverlayLayout from "../components/OverlayLayout";
 import MicQualityBadge from "../components/MicQualityBadge";
 import PanicRestoreShell from "../components/PanicRestoreShell";
@@ -164,21 +165,25 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
           padding: "6px 12px",
           borderBottom: "1px solid #1e2028",
           flexShrink: 0,
-          gap: 8,
+          gap: 12,
         }}
       >
-        <span
-          style={{
-            color: "#22c55e",
-            fontSize: "11px",
-            fontWeight: 700,
-            letterSpacing: "0.08em",
-            textTransform: "uppercase",
-          }}
-        >
-          Live
-        </span>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}>
+          <span
+            style={{
+              color: "#22c55e",
+              fontSize: "11px",
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              textTransform: "uppercase",
+              flexShrink: 0,
+            }}
+          >
+            Live
+          </span>
+          <SessionContextBadges sessionId={sessionId} />
+        </div>
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <button
             type="button"
             data-testid="live-back-to-setup-button"

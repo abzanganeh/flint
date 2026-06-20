@@ -217,6 +217,7 @@ pub fn run() {
             commands::remove_from_question_bank,
             commands::get_session_focus,
             commands::save_session_focus,
+            commands::set_phone_call_mode,
             commands::list_question_bank_tags,
             commands::get_preferred_answer,
             commands::save_preferred_answer,

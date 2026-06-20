@@ -163,6 +163,11 @@ pub struct SessionConfigDto {
     pub session_type: String,
     /// e.g. "software engineering" | "product management"
     pub domain: String,
+    /// When true the interviewer is on a phone call near the laptop.
+    /// Flint captures both channels from the microphone instead of
+    /// system audio loopback, and skips the system audio calibration phase.
+    #[serde(default)]
+    pub phone_call_mode: bool,
 }
 
 /// Company intelligence extracted from a job description by Smart Resume.
@@ -290,6 +295,9 @@ pub struct SessionSnapshotDto {
     /// Present for every session; all fields default to empty string for legacy rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_fields: Option<SessionContextFieldsDto>,
+    /// True when the session was created with phone-call mode enabled.
+    #[serde(default)]
+    pub phone_call_mode: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

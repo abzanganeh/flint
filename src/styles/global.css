@@ -6,3 +6,7 @@ body,
   background: transparent !important;
   background-color: transparent !important;
 }
+
+#root {
+  zoom: var(--flint-ui-zoom, 1);
+}

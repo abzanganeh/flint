@@ -5,16 +5,20 @@ import {
   exportUserData,
   getCostStatus,
   getSessionFocus,
+  getSessionSnapshot,
   liftCostSuspension,
   listQuestionBankTags,
   logout,
   resetCostTracker,
   saveSessionFocus,
   setCostCap,
+  setPhoneCallMode,
   type CostStatusDto,
   type DeleteAccountReport,
   type SessionFocusDto,
 } from "../commands";
+import { useUiZoom } from "../hooks/useUiZoom";
+import { UI_ZOOM_DEFAULT, UI_ZOOM_MAX, UI_ZOOM_MIN } from "../lib/uiZoomPreference";
 import ProviderSettings from "./ProviderSettings";
 
 type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus";
@@ -182,6 +186,8 @@ function AccountTab({
 }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const { zoom, setZoom } = useUiZoom();
+  const zoomPercent = Math.round(zoom * 100);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -208,6 +214,35 @@ function AccountTab({
           {error}
         </p>
       )}
+
+      <section className="settings-tab__section">
+        <h4 className="settings-tab__subheading">Display zoom</h4>
+        <p className="settings-tab__description">
+          Scale Flint&apos;s UI larger or smaller on this device. Applies immediately across
+          all screens.
+        </p>
+        <label className="settings-tab__field settings-tab__field--zoom">
+          <span className="settings-tab__label">UI size — {zoomPercent}%</span>
+          <input
+            type="range"
+            min={Math.round(UI_ZOOM_MIN * 100)}
+            max={Math.round(UI_ZOOM_MAX * 100)}
+            step={5}
+            value={zoomPercent}
+            data-testid="settings-ui-zoom"
+            onChange={(e) => setZoom(Number.parseInt(e.target.value, 10) / 100)}
+          />
+        </label>
+        <div className="settings-tab__zoom-actions">
+          <button
+            type="button"
+            className="settings-tab__btn settings-tab__btn--secondary"
+            onClick={() => setZoom(UI_ZOOM_DEFAULT)}
+          >
+            Reset to 100%
+          </button>
+        </div>
+      </section>
 
       <section className="settings-tab__section">
         <h4 className="settings-tab__subheading">Audio quality</h4>
@@ -383,6 +418,7 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [phoneCallMode, setPhoneCallModeState] = useState(false);
 
   const load = useCallback(async () => {
     if (!sessionId) {
@@ -391,12 +427,14 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     }
     setLoading(true);
     try {
-      const [f, t] = await Promise.all([
+      const [f, t, snapshot] = await Promise.all([
         getSessionFocus(sessionId),
         listQuestionBankTags(sessionId),
+        getSessionSnapshot(),
       ]);
       setFocus(f);
       setTags(t);
+      setPhoneCallModeState(snapshot.phoneCallMode ?? false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -448,6 +486,16 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     }
   };
 
+  const handlePhoneCallModeToggle = async (enabled: boolean) => {
+    setPhoneCallModeState(enabled);
+    try {
+      await setPhoneCallMode(enabled);
+    } catch (e) {
+      setError(String(e));
+      setPhoneCallModeState(!enabled);
+    }
+  };
+
   return (
     <div className="settings-tab">
       {error && <p className="settings-tab__error">{error}</p>}
@@ -473,19 +521,37 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
         />
       </label>
       <div className="settings-tab__field">
-        <span className="settings-tab__label">Focus tags</span>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-          {tags.map((tag) => (
-            <button
-              key={tag}
-              type="button"
-              className={`settings-tab__chip${focus.focusTags.includes(tag) ? " settings-tab__chip--active" : ""}`}
-              onClick={() => toggleTag(tag)}
-            >
-              {tag}
-            </button>
-          ))}
-        </div>
+        <span className="settings-tab__label">Focus tags — click to select</span>
+        {tags.length === 0 ? (
+          <p className="settings-tab__hint" style={{ marginBottom: 0 }}>
+            No tags yet. Confirm digest first or add questions to the bank — tags are inferred
+            automatically (behavioral, technical, motivation, etc.).
+          </p>
+        ) : (
+          <>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+              {tags.map((tag) => {
+                const selected = focus.focusTags.includes(tag);
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    className={`settings-tab__chip${selected ? " settings-tab__chip--active" : ""}`}
+                    aria-pressed={selected}
+                    onClick={() => toggleTag(tag)}
+                  >
+                    {tag}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="settings-tab__chip-meta">
+              {focus.focusTags.length === 0
+                ? "Select at least one tag to filter rehearsal and mock questions."
+                : `${focus.focusTags.length} selected: ${focus.focusTags.join(", ")}`}
+            </p>
+          </>
+        )}
       </div>
       <label className="settings-tab__field">
         <span className="settings-tab__label">Notes</span>
@@ -496,6 +562,24 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
           onChange={(e) => setFocus({ ...focus, focusNotes: e.target.value })}
         />
       </label>
+      <label className="settings-tab__field settings-tab__field--phone-mode">
+        <span className="settings-tab__label">Audio source</span>
+        <label className="settings-tab__phone-toggle">
+          <input
+            type="checkbox"
+            checked={phoneCallMode}
+            onChange={(e) => void handlePhoneCallModeToggle(e.target.checked)}
+            disabled={saving}
+          />
+          <span className="settings-tab__phone-toggle__label">Phone interview mode</span>
+        </label>
+        <span className="settings-tab__hint">
+          {phoneCallMode
+            ? "Flint listens via microphone. Put the caller on speaker near your laptop."
+            : "Flint listens via system audio loopback (Zoom, Meet, or browser calls)."}
+        </span>
+      </label>
+
       <button
         className="settings-tab__btn"
         disabled={saving}

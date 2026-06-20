@@ -274,6 +274,74 @@ impl AudioCapture {
     ///
     /// Returns `Err` if the platform's system audio device cannot be found
     /// (e.g. BlackHole not installed on macOS, no PipeWire monitor on Linux).
+    /// Phone-call mode: route the default microphone as **both** channels.
+    ///
+    /// Used when the interviewer is on a phone call near the laptop. The
+    /// microphone picks up both voices; the system-loopback pipeline is fed
+    /// the same frames so the orchestrator still receives "system" audio and
+    /// triggers responses. System audio calibration is skipped for this mode.
+    pub fn start_phone_mode(
+        system_tx: mpsc::Sender<AudioFrame>,
+        mic_tx: mpsc::Sender<AudioFrame>,
+    ) -> Result<Self> {
+        let host = cpal::default_host();
+
+        let recovering_sys = Arc::new(AtomicBool::new(false));
+        let recovering_mic = Arc::new(AtomicBool::new(false));
+
+        let mic_dev = find_mic_device(&host)?;
+        tracing::info!(
+            device = %mic_dev.name().unwrap_or_else(|_| "unknown".into()),
+            "phone-call mode: using microphone for both system and mic channels"
+        );
+
+        let (mic_cfg, mic_rate) =
+            select_stream_config(&mic_dev).context("Failed to select mic stream config")?;
+
+        // System channel — same device, labelled AudioSource::System so the
+        // orchestrator fires responses on it.
+        let sys_state = Arc::new(Mutex::new(
+            StreamState::new(mic_rate).context("Failed to init system StreamState")?,
+        ));
+        let sys_stream = build_input_stream(
+            &mic_dev,
+            &mic_cfg,
+            AudioSource::System,
+            Arc::clone(&sys_state),
+            system_tx.clone(),
+            Arc::clone(&recovering_sys),
+        )
+        .context("Failed to build phone-mode system stream from mic")?;
+        sys_stream.play().context("Failed to start phone-mode system stream")?;
+
+        // Mic channel — separate stream on the same device so VAD and quality
+        // monitoring still work independently.
+        let mic_state = Arc::new(Mutex::new(
+            StreamState::new(mic_rate).context("Failed to init mic StreamState")?,
+        ));
+        let mic_stream = build_input_stream(
+            &mic_dev,
+            &mic_cfg,
+            AudioSource::Microphone,
+            Arc::clone(&mic_state),
+            mic_tx.clone(),
+            Arc::clone(&recovering_mic),
+        )
+        .context("Failed to build phone-mode mic stream")?;
+        mic_stream.play().context("Failed to start phone-mode mic stream")?;
+
+        Ok(Self {
+            system_stream: Some(sys_stream),
+            mic_stream: Some(mic_stream),
+            system_tx,
+            mic_tx,
+            system_state: sys_state,
+            mic_state,
+            system_recovering: recovering_sys,
+            mic_recovering: recovering_mic,
+        })
+    }
+
     pub fn start(
         system_tx: mpsc::Sender<AudioFrame>,
         mic_tx: mpsc::Sender<AudioFrame>,

@@ -130,6 +130,10 @@ pub struct AppState {
     /// Active rehearsal turn cancellation flag. Replaced on each
     /// `run_rehearsal_turn`; the previous flag is set before replacement.
     pub rehearsal_turn_cancel: Mutex<Option<TurnCancelFlag>>,
+    /// True when the current session was created with phone-call mode enabled.
+    /// Cleared on session reset. Drives AudioCapture::start_phone_mode and
+    /// skips system audio calibration.
+    pub phone_call_mode: Mutex<bool>,
 
     // ── Mock interview (Phase 8) ─────────────────────────────────────────────
     /// Mock session handles. `Some` only while a mock interview is active.
@@ -251,6 +255,7 @@ impl AppState {
             session_memory: Arc::new(Mutex::new(None)),
             rehearsal_turn: Mutex::new(0),
             rehearsal_turn_cancel: Mutex::new(None),
+            phone_call_mode: Mutex::new(false),
             mock_tasks: Mutex::new(None),
             global_kb,
             cost_tracker: Arc::new(CostTracker::new()),

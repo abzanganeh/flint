@@ -447,11 +447,10 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     .context("embed task panicked")?
     .context("embed failed")?;
 
-    // ── 2. Pre-warm cache lookup ──────────────────────────────────────────
-    // Preferred answers take precedence — user explicitly saved a Live script.
+    // ── 2. Preferred answer lookup (exact key, then cosine ≥ 0.85) ────────
     let preferred_answer = cfg
         .persistence
-        .get_preferred_answer(cfg.session_id, &cfg.question_text)
+        .resolve_preferred_answer(cfg.session_id, &cfg.question_text, Some(&embedding))
         .unwrap_or_default();
     let from_preferred = !preferred_answer.trim().is_empty();
 

@@ -543,6 +543,7 @@ pub async fn create_session(
     *state.prewarm_cache.lock().await = PreWarmCache::new();
     *state.rehearsal_turn.lock().await = 0;
     *state.session_memory.lock().await = None;
+    *state.phone_call_mode.lock().await = config.phone_call_mode;
 
     // Persist session row with metadata for the session list.
     state
@@ -560,6 +561,7 @@ pub async fn create_session(
         name = %config.name,
         session_type = %config.session_type,
         domain = %config.domain,
+        phone_call_mode = %config.phone_call_mode,
         "session created",
     );
     emit_state(&app, SessionState::Configuring);
@@ -1518,6 +1520,8 @@ pub async fn get_session_snapshot(
 
     let resume_meta = session_id.and_then(|sid| state.persistence.get_session_metadata(sid).ok());
 
+    let phone_call_mode = *state.phone_call_mode.lock().await;
+
     Ok(SessionSnapshotDto {
         session_id,
         state: current_state,
@@ -1532,6 +1536,7 @@ pub async fn get_session_snapshot(
         context_fields: resume_meta
             .as_ref()
             .map(|m| SessionContextFieldsDto::from(m.context_fields.clone())),
+        phone_call_mode,
     })
 }
 
@@ -2177,6 +2182,20 @@ pub async fn save_session_focus(
         .map_err(|e| e.to_string())
 }
 
+/// Toggle phone-call mode for the active session.
+///
+/// Can be called any time before LIVE. The flag is read by `start_session`
+/// to choose the audio capture path. Safe to call from the Session Focus tab.
+#[tauri::command]
+pub async fn set_phone_call_mode(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    *state.phone_call_mode.lock().await = enabled;
+    info!(phone_call_mode = %enabled, "phone call mode updated");
+    Ok(())
+}
+
 /// Unique focus tags inferred from the session question bank.
 #[tauri::command]
 pub async fn list_question_bank_tags(
@@ -2302,9 +2321,24 @@ pub async fn get_preferred_answer(
     question: String,
 ) -> Result<String, String> {
     let sid = validate_session_id(&state, &session_id).await?;
+    let question = question.trim().to_string();
+    if question.is_empty() {
+        return Ok(String::new());
+    }
+
+    let embedder = state
+        .wait_for_embedder(std::time::Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("Embedding unavailable: {e}"))?;
+    let q = question.clone();
+    let embedding = tokio::task::spawn_blocking(move || embedder.embed_one(&q))
+        .await
+        .map_err(|e| format!("Embedder task panicked: {e}"))?
+        .map_err(|e| format!("Embedding failed: {e}"))?;
+
     state
         .persistence
-        .get_preferred_answer(sid, &question)
+        .resolve_preferred_answer(sid, &question, Some(&embedding))
         .map_err(|e| e.to_string())
 }
 
@@ -2338,17 +2372,24 @@ pub async fn save_preferred_answer(
         return Err("Question and answer must not be empty.".to_string());
     }
 
-    state
-        .persistence
-        .save_preferred_answer(sid, &question, &answer)
-        .map_err(|e| e.to_string())?;
-
-    let qa_text = format!("[PREFERRED ANSWER]\nQ: {question}\nA: {answer}");
     let embedder = state
         .wait_for_embedder(std::time::Duration::from_secs(30))
         .await
         .map_err(|e| format!("Embedding unavailable: {e}"))?;
 
+    let q_for_key = question.clone();
+    let embedder_q = Arc::clone(&embedder);
+    let question_embedding = tokio::task::spawn_blocking(move || embedder_q.embed_one(&q_for_key))
+        .await
+        .map_err(|e| format!("Embedder task panicked: {e}"))?
+        .map_err(|e| format!("Embedding failed: {e}"))?;
+
+    state
+        .persistence
+        .save_preferred_answer(sid, &question, &answer, Some(&question_embedding))
+        .map_err(|e| e.to_string())?;
+
+    let qa_text = format!("[PREFERRED ANSWER]\nQ: {question}\nA: {answer}");
     let text_clone = qa_text.clone();
     let embedding = tokio::task::spawn_blocking(move || embedder.embed_one(&text_clone))
         .await
@@ -2748,8 +2789,16 @@ pub async fn start_session(
     // zeroed_tx fires so stop_session can confirm zeroing before emitting ENDED.
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
 
+    let is_phone_call_mode = *state.phone_call_mode.lock().await;
+
     std::thread::spawn(move || {
-        match AudioCapture::start(system_tx, mic_tx) {
+        let capture_result = if is_phone_call_mode {
+            tracing::info!("phone-call mode: routing mic as interviewer audio source");
+            AudioCapture::start_phone_mode(system_tx, mic_tx)
+        } else {
+            AudioCapture::start(system_tx, mic_tx)
+        };
+        match capture_result {
             Ok(capture) => {
                 let _ = ready_tx.send(Ok(()));
                 // Block here until stop_session fires or AppState is dropped.

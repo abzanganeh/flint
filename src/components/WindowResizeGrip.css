@@ -1,0 +1,29 @@
+.window-resize-grip {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  z-index: 10000;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: #52525b;
+  cursor: nwse-resize;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  opacity: 0.55;
+  transition: opacity 0.12s, color 0.12s;
+}
+
+.window-resize-grip:hover {
+  opacity: 1;
+  color: #a1a1aa;
+}
+
+.window-resize-grip__icon {
+  display: block;
+  pointer-events: none;
+}
