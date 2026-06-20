@@ -1776,6 +1776,7 @@ async fn abort_local_live_handles(handles: LiveTaskHandles) {
 async fn build_failover_stack(
     app: &AppHandle,
     state: &AppState,
+    start_ping_loop: bool,
 ) -> Result<(Arc<FailoverManager>, Arc<dyn LLMProvider>, usize), String> {
     let primary_provider = stack::resolve_primary(&state.persistence).ok_or_else(|| {
         format!(
@@ -1801,7 +1802,9 @@ async fn build_failover_stack(
 
     let mut failover =
         stack::build_failover_manager(primary_provider, cloud_tiers, Arc::clone(&local_provider));
-    failover.start_ping_loop(app.clone());
+    if start_ping_loop {
+        failover.start_ping_loop(app.clone());
+    }
     Ok((Arc::new(failover), local_provider, context_window))
 }
 
@@ -1842,7 +1845,7 @@ pub async fn run_rehearsal_turn(
 
     let digest = resolve_session_digest(state.inner(), sid).await?;
 
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true).await?;
 
     let memory = {
         let mut guard = state.session_memory.lock().await;
@@ -2575,7 +2578,7 @@ pub async fn run_research_chat(
         .await
         .map_err(|e| format!("RAG retrieval failed: {e}"))?;
 
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
     let web = tavily::resolve_tavily();
 
     let outcome = research::run_prep_research_turn(&message, chunks, failover, web, app.clone())
@@ -2827,7 +2830,7 @@ pub async fn start_session(
 
     // ── 5. Build failover manager and conversation memory ─────────────────
 
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state)
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
         .await
         .map_err(|e| start_session_step_err("failover stack", e))?;
 
@@ -3374,7 +3377,7 @@ pub async fn generate_session_summary(
     };
 
     // Route through FailoverManager — Groq 429 must cascade to cloud tiers → Ollama.
-    let (failover, _, _) = match build_failover_stack(&app, &state).await {
+    let (failover, _, _) = match build_failover_stack(&app, &state, false).await {
         Ok(stack) => stack,
         Err(e) => {
             warn!(
@@ -3895,7 +3898,7 @@ pub async fn start_mock(
     }
 
     // Build FailoverManager.
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
 
     let embedder = state.require_embedder()?;
     let suggested_buffer = Arc::new(std::sync::RwLock::new(String::new()));
@@ -4098,7 +4101,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .await
         .session_id()
         .ok_or("no active session")?;
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
     let persistence = Arc::clone(&state.persistence);
     let question = persistence
         .load_mock_turns(session_id)
@@ -4314,7 +4317,7 @@ pub async fn regrade_mock_turn(
         )
         .map_err(|e| e.to_string())?;
 
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
     let rag_chunks = if let Ok(embedder) = state.require_embedder() {
         query_mock_rag(
             session_id,
