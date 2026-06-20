@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import PreferredAnswerPanel from "../components/PreferredAnswerPanel";
+import MicQualityBadge from "../components/MicQualityBadge";
 import FirstRunRehearsalModal, {
   isFirstRunModalDismissed,
 } from "../components/FirstRunRehearsalModal";
@@ -12,6 +13,7 @@ import PrepChecklist from "../components/PrepChecklist";
 import QuestionBank from "../components/QuestionBank";
 import ResearchChat from "../components/ResearchChat";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
+import SessionContextBadges from "../components/SessionContextBadges";
 import UsageWidget from "../components/UsageWidget";
 import {
   completeRehearsal,
@@ -217,6 +219,11 @@ const Rehearsal = ({
     streamingBuffers.directional.length > 0 ||
     streamingBuffers.depth.length > 0;
 
+  const isReaskingSameQuestion =
+    hasResponse &&
+    lastAskedQuestion.trim() !== "" &&
+    question.trim() === lastAskedQuestion.trim();
+
   const handleSubmit = async () => {
     if (!question.trim() || asking) return;
     await fireQuestion(question.trim());
@@ -285,19 +292,27 @@ const Rehearsal = ({
             padding: "8px 16px",
             borderBottom: "1px solid #1e2028",
             flexShrink: 0,
+            flexWrap: "wrap",
           }}
         >
-          <span
-            style={{
-              color: "#a78bfa",
-              fontSize: "11px",
-              fontWeight: 700,
-              letterSpacing: "0.1em",
-              textTransform: "uppercase",
-            }}
-          >
-            Rehearsal Mode
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+            <span
+              style={{
+                color: "#a78bfa",
+                fontSize: "11px",
+                fontWeight: 700,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                flexShrink: 0,
+              }}
+            >
+              Rehearsal Mode
+            </span>
+            <SessionContextBadges
+              sessionId={sessionId}
+              onOpenSettings={onOpenSettings}
+            />
+          </div>
           <span style={{ color: "#6b7280", fontSize: "11px" }}>
             — Ask → tailor your answer → save for Live. Ctrl+Enter to ask.
           </span>
@@ -411,7 +426,7 @@ const Rehearsal = ({
               alignSelf: "flex-end",
             }}
           >
-            {asking ? "Asking…" : hasResponse ? "Ask again" : "Ask"}
+            {asking ? "Asking…" : isReaskingSameQuestion ? "Ask again" : "Ask"}
           </button>
         </div>
 
@@ -666,6 +681,7 @@ const Rehearsal = ({
           </button>
         </div>
       </div>
+      <MicQualityBadge />
       </>
     </PanicRestoreShell>
   );

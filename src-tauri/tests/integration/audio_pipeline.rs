@@ -314,7 +314,8 @@ fn test_whisper_engine_transcribes_pcm_audio() {
         return;
     }
 
-    let engine = WhisperEngine::new(&model_path, 1_u8).expect("WhisperEngine init failed");
+    let engine = WhisperEngine::new(&model_path, 1_u8, "Professional interview conversation.")
+        .expect("WhisperEngine init failed");
 
     // Synthesise 3 seconds of speech-like audio at 16kHz (Whisper input rate).
     let sample_rate = 16_000_u32;
@@ -387,7 +388,8 @@ fn test_whisper_transcribes_real_speech_fixture() {
     // a minimal WAV parser reads the data chunk directly).
     let samples = load_wav_samples(fixture_path).expect("Failed to load WAV fixture");
 
-    let engine = WhisperEngine::new(&model_path, 1_u8).expect("WhisperEngine init failed");
+    let engine = WhisperEngine::new(&model_path, 1_u8, "Professional interview conversation.")
+        .expect("WhisperEngine init failed");
 
     let chunk = VadChunk {
         duration_ms: (samples.len() as u32 * 1000) / 16_000,

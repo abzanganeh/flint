@@ -14,6 +14,8 @@ Real-time AI co-pilot desktop app for live conversations (e.g. job interviews). 
 - **RAG** over session context via sqlite-vec + local embeddings
 - **Stealth overlay** (Tauri): always-on-top, transparent, excluded from screen capture where the OS allows
 - **Groq** cloud inference with **Ollama** fallback; API keys in the OS keychain only
+- **Rehearsal** with question bank, session focus tags, and **preferred answers** (exact + semantic match at 0.85 cosine)
+- **Mock interview** with preferred-answer short-circuit in Study mode
 
 ## Tech stack
 
@@ -64,6 +66,13 @@ npm install
 npm run tauri dev
 ```
 
+On Linux dev, the WebView loads **`http://127.0.0.1:1420`** (not `localhost`) to avoid IPv6 connection issues. If the window shows “Connection refused”, stop stale `flint`/`vite` processes and restart `npm run tauri dev`.
+
+### Window and display
+
+- **Resize:** drag the small triangle grip at the **bottom-right** corner of the window (frameless shell has no OS resize border).
+- **Zoom:** **Settings → Account → Display zoom** (85%–130%). Preference is stored locally and persists across restarts.
+
 Local Supabase (optional):
 
 ```bash
@@ -98,7 +107,16 @@ prompts/         # Versioned LLM prompts (gpt / claude / llama variants)
 supabase/        # Migrations and local Supabase config
 tests/           # Integration and e2e tests
 evals/           # Prompt eval harness
+tests/manual-qa/ # Manual QA checklists (M6–M9)
 ```
+
+### Manual QA
+
+| Doc | Scope |
+|-----|--------|
+| `tests/manual-qa/M6_LLM_PROVIDERS.md` | Provider setup and failover |
+| `tests/manual-qa/M8_INPUT_QUALITY.md` | Mic calibration, Whisper prompt |
+| `tests/manual-qa/M9_REHEARSAL_UX.md` | Session focus, preferred answers, zoom, resize |
 
 ## Git workflow
 

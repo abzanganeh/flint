@@ -163,6 +163,11 @@ pub struct SessionConfigDto {
     pub session_type: String,
     /// e.g. "software engineering" | "product management"
     pub domain: String,
+    /// When true the interviewer is on a phone call near the laptop.
+    /// Flint captures both channels from the microphone instead of
+    /// system audio loopback, and skips the system audio calibration phase.
+    #[serde(default)]
+    pub phone_call_mode: bool,
 }
 
 /// Company intelligence extracted from a job description by Smart Resume.
@@ -290,6 +295,9 @@ pub struct SessionSnapshotDto {
     /// Present for every session; all fields default to empty string for legacy rows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_fields: Option<SessionContextFieldsDto>,
+    /// True when the session was created with phone-call mode enabled.
+    #[serde(default)]
+    pub phone_call_mode: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -415,4 +423,23 @@ pub struct SessionFocusDto {
     pub focus_notes: String,
     pub focus_confirmed_at: Option<i64>,
     pub needs_focus_refresh: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicCalibrationStatusDto {
+    pub passed_on_device: bool,
+    pub device_fingerprint: String,
+    pub wer_system: Option<f32>,
+    pub wer_mic: Option<f32>,
+    pub forced: bool,
+    pub calibrated_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalibrationResultDto {
+    pub wer: f32,
+    pub passed: bool,
+    pub transcript: String,
 }

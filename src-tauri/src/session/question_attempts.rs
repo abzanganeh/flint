@@ -7,14 +7,89 @@ use crate::interfaces::vector::QA_EMBED_CONFIDENCE_THRESHOLD;
 /// Mock coach score (0–100) at or above which a turn counts as practiced well.
 pub const MOCK_COACH_SATISFIED_THRESHOLD: u8 = 70;
 
+/// Cosine similarity threshold for matching rephrased questions to saved preferred answers.
+/// Same threshold as the pre-warm cache (§13 / flint-performance NFR).
+pub const PREFERRED_ANSWER_MATCH_THRESHOLD: f32 = 0.85;
+
+/// Dot product of two same-length unit-norm vectors equals cosine similarity.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return f32::NEG_INFINITY;
+    }
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Pick the preferred answer whose stored question embedding best matches `query`.
+pub fn best_preferred_semantic_match<'a>(
+    query: &[f32],
+    candidates: impl IntoIterator<Item = (&'a [f32], &'a str)>,
+) -> Option<&'a str> {
+    let (best_answer, best_sim) = candidates.into_iter().fold(
+        (None, f32::NEG_INFINITY),
+        |(best_a, best_s), (stored, answer)| {
+            let sim = cosine_similarity(query, stored);
+            if sim > best_s {
+                (Some(answer), sim)
+            } else {
+                (best_a, best_s)
+            }
+        },
+    );
+    if best_sim >= PREFERRED_ANSWER_MATCH_THRESHOLD {
+        best_answer
+    } else {
+        None
+    }
+}
+
+pub fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+pub fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4);
+    for chunk in bytes.chunks_exact(4) {
+        let arr: [u8; 4] = chunk.try_into().ok()?;
+        out.push(f32::from_le_bytes(arr));
+    }
+    Some(out)
+}
+
 /// Normalised key for deduplicating question text within a session.
+///
+/// Collapses case/whitespace, strips trailing punctuation, and removes common
+/// interviewer lead-ins so preferred answers match minor rephrasings.
 pub fn normalize_question_key(question: &str) -> String {
-    strip_rephrase_prefix(question)
-        .trim()
-        .to_lowercase()
-        .split_whitespace()
+    let mut q = strip_rephrase_prefix(question).trim().to_lowercase();
+
+    const LEAD_INS: &[&str] = &[
+        "could you please ",
+        "can you please ",
+        "would you please ",
+        "could you ",
+        "can you ",
+        "would you ",
+        "please ",
+    ];
+    for lead in LEAD_INS {
+        if let Some(rest) = q.strip_prefix(lead) {
+            q = rest.trim().to_string();
+            break;
+        }
+    }
+
+    q.split_whitespace()
+        .map(strip_word_punctuation)
+        .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn strip_word_punctuation(word: &str) -> &str {
+    word.trim_matches(|c: char| c.is_ascii_punctuation())
 }
 
 /// Rehearsal rephrase turns still map to the original bank question.
@@ -114,10 +189,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_strips_trailing_punctuation() {
+        assert_eq!(
+            normalize_question_key("Tell me about yourself?"),
+            "tell me about yourself"
+        );
+        assert_eq!(
+            normalize_question_key("Tell me about yourself."),
+            "tell me about yourself"
+        );
+    }
+
+    #[test]
+    fn normalize_strips_common_lead_ins() {
+        assert_eq!(
+            normalize_question_key("Can you tell me about yourself?"),
+            "tell me about yourself"
+        );
+        assert_eq!(
+            normalize_question_key("Could you please walk me through your background?"),
+            "walk me through your background"
+        );
+    }
+
+    #[test]
+    fn normalize_does_not_merge_distinct_questions() {
+        assert_ne!(
+            normalize_question_key("Why do you want this role?"),
+            normalize_question_key("Why this role?")
+        );
+    }
+
+    #[test]
     fn rephrase_prefix_stripped_for_key() {
         assert_eq!(
             normalize_question_key("Rephrase your previous answer to: Why this role?"),
-            "why this role?"
+            "why this role"
         );
     }
 
@@ -159,5 +266,27 @@ mod tests {
         assert!(!is_behavioral_question(
             "How would you design Okta SSO for 50k users?"
         ));
+    }
+
+    #[test]
+    fn semantic_preferred_match_at_threshold() {
+        let stored = [1.0_f32, 0.0, 0.0];
+        let query = [0.986_f32, 0.164, 0.0]; // cos ≈ 0.986
+        let answer = best_preferred_semantic_match(&query, [(&stored[..], "my script")]);
+        assert_eq!(answer, Some("my script"));
+    }
+
+    #[test]
+    fn semantic_preferred_miss_below_threshold() {
+        let stored = [1.0_f32, 0.0, 0.0];
+        let query = [0.5_f32, 0.866, 0.0]; // cos = 0.5
+        assert!(best_preferred_semantic_match(&query, [(&stored[..], "my script")]).is_none());
+    }
+
+    #[test]
+    fn embedding_blob_round_trip() {
+        let v = vec![0.1_f32, -0.2, 3.0];
+        let blob = encode_embedding_blob(&v);
+        assert_eq!(decode_embedding_blob(&blob), Some(v));
     }
 }

@@ -37,6 +37,7 @@ import MockInterview from "./screens/MockInterview";
 import MockSummary from "./screens/MockSummary";
 import SessionDesign, { type SessionPreFill } from "./screens/SessionDesign";
 import SessionFocusGate from "./screens/SessionFocusGate";
+import MicCalibration from "./screens/MicCalibration";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
 import { SessionSummary } from "./screens/SessionSummary";
@@ -52,6 +53,7 @@ type AppScreen =
   | "settings"
   | "digest-review"
   | "session-focus"
+  | "mic-calibration"
   | "rehearsal"
   | "mock-interview"
   | "mock-summary"
@@ -69,6 +71,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "settings",
   "digest-review",
   "session-focus",
+  "mic-calibration",
   "rehearsal",
   "mock-interview",
   "mock-summary",
@@ -152,6 +155,8 @@ function App() {
   >("account");
   /** When true, Rehearsal clears stale panel state (after re-ingest). */
   const [resetRehearsalPanels, setResetRehearsalPanels] = useState(false);
+  const [forceMicCalibrationRetest, setForceMicCalibrationRetest] = useState(false);
+  const [sessionPhoneCallMode, setSessionPhoneCallMode] = useState(false);
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
   const postSessionSummaryEnabled = useFeatureFlag("post_session_summary", true);
@@ -160,22 +165,70 @@ function App() {
     returnTo: AppScreen = screen,
     initialTab: "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus" = "account",
   ) => {
-    setSettingsReturnScreen(returnTo);
+    if (screen !== "settings") {
+      const safeReturn = returnTo === "settings" ? screen : returnTo;
+      setSettingsReturnScreen(safeReturn);
+    }
     setSettingsInitialTab(initialTab);
     setScreen("settings");
   };
 
+  const handleSettingsBack = useCallback(() => {
+    let target = settingsReturnScreen;
+    if (target === "settings") {
+      void getSessionSnapshot()
+        .then((snapshot) => {
+          if (snapshot.sessionId) {
+            setSessionId(snapshot.sessionId);
+            setScreen(screenForDraftState(snapshot.state));
+          } else {
+            setScreen("session-design");
+          }
+        })
+        .catch(() => setScreen("session-design"));
+      return;
+    }
+    if (target === "rehearsal" && !sessionId) {
+      void getSessionSnapshot()
+        .then((snapshot) => {
+          if (snapshot.sessionId) {
+            setSessionId(snapshot.sessionId);
+            setScreen("rehearsal");
+          } else {
+            setScreen("session-design");
+          }
+        })
+        .catch(() => setScreen("session-design"));
+      return;
+    }
+    setScreen(target);
+  }, [settingsReturnScreen, sessionId]);
+
   const routeAfterDigestOrLive = useCallback(async (sid: string) => {
     try {
-      const focus = await getSessionFocus(sid);
+      const [focus, snapshot] = await Promise.all([
+        getSessionFocus(sid),
+        getSessionSnapshot(),
+      ]);
+      setSessionPhoneCallMode(snapshot.phoneCallMode ?? false);
       if (!focus.focusConfirmedAt || focus.needsFocusRefresh) {
         setScreen("session-focus");
       } else {
-        setScreen("rehearsal");
+        setScreen("mic-calibration");
       }
     } catch {
       setScreen("session-focus");
     }
+  }, []);
+
+  const routeAfterSessionFocus = useCallback(() => {
+    setForceMicCalibrationRetest(false);
+    setScreen("mic-calibration");
+  }, []);
+
+  const openMicCalibrationRetest = useCallback(() => {
+    setForceMicCalibrationRetest(true);
+    setScreen("mic-calibration");
   }, []);
 
   const queueImportToken = (token: string | null) => {
@@ -342,20 +395,18 @@ function App() {
     };
   }, []);
 
-  // If Rust still has a DIGEST_REVIEW draft but the UI landed on session-design
-  // (e.g. Settings → Back used the wrong screen), route back to Digest Review.
+  // If Rust still has an in-progress draft but the UI landed on session-design
+  // (e.g. Settings → Back used the wrong screen), route to the matching screen.
   useEffect(() => {
     if (screen !== "session-design") return;
     let cancelled = false;
     void getSessionSnapshot()
       .then((snapshot) => {
-        if (cancelled) return;
-        if (
-          snapshot.sessionId &&
-          snapshot.state === SessionState.DIGEST_REVIEW
-        ) {
+        if (cancelled || !snapshot.sessionId) return;
+        const draftScreen = screenForDraftState(snapshot.state);
+        if (draftScreen !== "session-design") {
           setSessionId(snapshot.sessionId);
-          setScreen("digest-review");
+          setScreen(draftScreen);
         }
       })
       .catch(() => undefined);
@@ -425,7 +476,11 @@ function App() {
     },
     {
       label: "Settings",
-      onClick: () => openSettings(screen),
+      onClick: () => {
+        if (screen !== "settings") {
+          openSettings(screen);
+        }
+      },
       active: screen === "settings",
     },
   ];
@@ -547,7 +602,8 @@ function App() {
         <Settings
           sessionId={sessionId}
           initialTab={settingsInitialTab}
-          onBack={() => setScreen(settingsReturnScreen)}
+          onBack={handleSettingsBack}
+          onRetestMic={openMicCalibrationRetest}
           onLoggedOut={() => {
             setOnboardingStep("auth");
             setScreen("onboarding");
@@ -617,7 +673,22 @@ function App() {
       <Shell nav={nav}>
         <SessionFocusGate
           sessionId={sessionId}
-          onComplete={() => setScreen("rehearsal")}
+          onComplete={routeAfterSessionFocus}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "mic-calibration") {
+    return (
+      <Shell nav={nav}>
+        <MicCalibration
+          forceRetest={forceMicCalibrationRetest}
+          phoneCallMode={sessionPhoneCallMode}
+          onComplete={() => {
+            setForceMicCalibrationRetest(false);
+            setScreen("rehearsal");
+          }}
         />
       </Shell>
     );

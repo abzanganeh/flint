@@ -24,7 +24,9 @@ export default defineConfig(async () => ({
   server: {
     port: 1420,
     strictPort: true,
-    host: host || false,
+    // Bind IPv4 explicitly — WebKit on Linux often resolves "localhost" to ::1,
+    // which refuses when Vite only listens on 127.0.0.1.
+    host: host || "127.0.0.1",
     hmr: host
       ? {
           protocol: "ws",

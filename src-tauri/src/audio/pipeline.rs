@@ -30,6 +30,7 @@
 
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -42,7 +43,8 @@ use crate::audio::capture::{AudioFrame, AudioSource};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::VadChunker;
 use crate::events::{
-    emit_thread_status, emit_transcription_chunk, ThreadStatusPayload, TranscriptionChunkPayload,
+    emit_audio_quality_status, emit_thread_status, emit_transcription_chunk,
+    AudioQualityStatusPayload, ThreadStatusPayload, TranscriptionChunkPayload,
 };
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::detector::QuestionDetector;
@@ -98,6 +100,38 @@ const ECHO_MIN_WORDS: usize = 3;
 /// Minimum words that must agree in the ordered prefix check.
 const ECHO_PREFIX_MATCH_WORDS: usize = 3;
 const ECHO_JACCARD_THRESHOLD: f32 = 0.5;
+
+const MIC_QUALITY_WINDOW: usize = 8;
+const MIC_QUALITY_LOGPROB_THRESHOLD: f32 = -0.5;
+
+#[derive(Default)]
+pub struct MicQualityMonitor {
+    samples: VecDeque<f32>,
+    last_level: Option<&'static str>,
+}
+
+impl MicQualityMonitor {
+    fn observe(&mut self, logprob: f32) -> Option<&'static str> {
+        self.samples.push_back(logprob);
+        while self.samples.len() > MIC_QUALITY_WINDOW {
+            self.samples.pop_front();
+        }
+        if self.samples.len() < 3 {
+            return None;
+        }
+        let mean = self.samples.iter().sum::<f32>() / self.samples.len() as f32;
+        let level = if mean < MIC_QUALITY_LOGPROB_THRESHOLD {
+            "low"
+        } else {
+            "ok"
+        };
+        if self.last_level == Some(level) {
+            return None;
+        }
+        self.last_level = Some(level);
+        Some(level)
+    }
+}
 
 #[derive(Clone)]
 struct DedupEntry {
@@ -255,6 +289,7 @@ pub async fn run_audio_pipeline(
     mut system_rx: mpsc::Receiver<AudioFrame>,
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
+    mic_quality: Arc<Mutex<MicQualityMonitor>>,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
@@ -289,6 +324,7 @@ pub async fn run_audio_pipeline(
             &question_tx,
             &persistence,
             &dedup,
+            &mic_quality,
         )
         .await
         {
@@ -315,6 +351,7 @@ async fn process_frame(
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
     dedup: &Mutex<CrossChannelDedup>,
+    mic_quality: &Arc<Mutex<MicQualityMonitor>>,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -391,6 +428,20 @@ async fn process_frame(
 
     // ── Steps 4c/4d: question detection on System audio only ──────────────
     if source == AudioSource::Microphone {
+        if let Some(logprob) = result.avg_logprob {
+            let level = {
+                let mut guard = mic_quality.lock().expect("mic quality mutex poisoned");
+                guard.observe(logprob)
+            };
+            if let Some(level) = level {
+                emit_audio_quality_status(
+                    app_handle,
+                    AudioQualityStatusPayload {
+                        level: level.to_string(),
+                    },
+                );
+            }
+        }
         return Ok(());
     }
 
@@ -615,5 +666,13 @@ mod tests {
         let b = tokenize_for_echo("so the biggest challenge was aligning stakeholders");
         // Only "so" matches at position 0 — well below ECHO_PREFIX_MATCH_WORDS.
         assert!(!prefix_matches(&a, &b));
+    }
+
+    #[test]
+    fn mic_quality_monitor_emits_low_on_poor_logprob_sequence() {
+        let mut monitor = MicQualityMonitor::default();
+        assert!(monitor.observe(-0.55).is_none());
+        assert!(monitor.observe(-0.6).is_none());
+        assert_eq!(monitor.observe(-0.65), Some("low"));
     }
 }
