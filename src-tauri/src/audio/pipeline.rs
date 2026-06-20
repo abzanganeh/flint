@@ -31,24 +31,27 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use tauri::AppHandle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use crate::audio::capture::{AudioFrame, AudioSource};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
-use crate::audio::vad::VadChunker;
+use crate::audio::vad::{VadChunker, WHISPER_MIN_SEGMENT_MS};
 use crate::events::{
     emit_audio_quality_status, emit_thread_status, emit_transcription_chunk,
     AudioQualityStatusPayload, ThreadStatusPayload, TranscriptionChunkPayload,
 };
+
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
-use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
+use crate::transcription::hybrid::{
+    finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -238,17 +241,19 @@ pub async fn run_audio_pipeline(
     app_handle: AppHandle,
     session_id: Uuid,
     whisper: Arc<WhisperEngine>,
-    detector: Arc<QuestionDetector>,
+    hybrid: Arc<AsyncMutex<HybridQuestionDetector>>,
+    system_buffer: Arc<SyncMutex<SystemTranscriptBuffer>>,
     question_tx: mpsc::Sender<DetectedQuestion>,
     mut system_rx: mpsc::Receiver<AudioFrame>,
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
-    mic_quality: Arc<Mutex<MicQualityMonitor>>,
+    mic_quality: Arc<SyncMutex<MicQualityMonitor>>,
     echo_suppression_enabled: bool,
+    phone_mode_manual_only: bool,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
-    let dedup = Mutex::new(CrossChannelDedup::default());
+    let dedup = SyncMutex::new(CrossChannelDedup::default());
 
     loop {
         // No `biased` — fair scheduling prevents MIC starvation under heavy
@@ -275,12 +280,14 @@ pub async fn run_audio_pipeline(
             &app_handle,
             session_id,
             &whisper,
-            &detector,
+            &hybrid,
+            &system_buffer,
             &question_tx,
             &persistence,
             &dedup,
             &mic_quality,
             echo_suppression_enabled,
+            phone_mode_manual_only,
         )
         .await
         {
@@ -303,12 +310,14 @@ async fn process_frame(
     app_handle: &AppHandle,
     session_id: Uuid,
     whisper: &Arc<WhisperEngine>,
-    detector: &Arc<QuestionDetector>,
+    hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
+    system_buffer: &Arc<SyncMutex<SystemTranscriptBuffer>>,
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
-    dedup: &Mutex<CrossChannelDedup>,
-    mic_quality: &Arc<Mutex<MicQualityMonitor>>,
+    dedup: &SyncMutex<CrossChannelDedup>,
+    mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
     echo_suppression_enabled: bool,
+    phone_mode_manual_only: bool,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -326,9 +335,26 @@ async fn process_frame(
     let downsampled = proc.downsampler.process(&frame.samples)?;
 
     // ── Step 3: VAD ───────────────────────────────────────────────────────
-    let Some(chunk) = proc.vad.process_frame(&downsampled, source) else {
-        return Ok(()); // speech still accumulating or silence — nothing to do
+    let silence_ms = if source == AudioSource::System {
+        proc.vad.ms_since_last_speech()
+    } else {
+        0
     };
+
+    let Some(chunk) = proc.vad.process_frame(&downsampled, source) else {
+        if source == AudioSource::System && !phone_mode_manual_only {
+            let plan = {
+                let mut guard = hybrid.lock().await;
+                guard.check_silence(silence_ms)
+            };
+            dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
+        }
+        return Ok(());
+    };
+
+    if chunk.duration_ms < WHISPER_MIN_SEGMENT_MS {
+        return Ok(());
+    }
 
     // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
     let whisper = Arc::clone(whisper);
@@ -383,7 +409,7 @@ async fn process_frame(
         tracing::warn!(error = %e, "transcript chunk persist failed — continuing");
     }
 
-    // ── Steps 4c/4d: question detection on System audio only ──────────────
+    // ── Steps 4c/4d: hybrid question detection on System audio only ───────
     if source == AudioSource::Microphone {
         if let Some(logprob) = result.avg_logprob {
             let level = {
@@ -402,30 +428,69 @@ async fn process_frame(
         return Ok(());
     }
 
-    let text = result.text.clone();
-    let detector = Arc::clone(detector);
-    let is_question = tokio::task::spawn_blocking(move || {
-        tokio::runtime::Handle::current().block_on(detector.detect(&text))
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("detector task panicked: {e}"))??;
-
-    // ── Step 4e: send to orchestrator if question detected ─────────────────
-    if is_question {
-        let q = DetectedQuestion {
-            text: result.text,
-            session_id,
-            detected_at: Instant::now(),
-        };
-        if question_tx.try_send(q).is_err() {
-            tracing::warn!(
-                session_id = %session_id,
-                "question_tx full — detected question dropped"
-            );
-        }
+    {
+        let mut buf = system_buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("system transcript buffer mutex poisoned"))?;
+        buf.append(&result.text);
     }
 
+    if phone_mode_manual_only {
+        return Ok(());
+    }
+
+    let accumulated = {
+        let buf = system_buffer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("system transcript buffer mutex poisoned"))?;
+        buf.accumulated_text()
+    };
+
+    let post_silence_ms = proc.vad.ms_since_last_speech();
+    let plan = {
+        let mut guard = hybrid.lock().await;
+        guard.ingest_transcript(&accumulated, post_silence_ms)
+    };
+    dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
+
     Ok(())
+}
+
+async fn dispatch_confirm_plan(
+    plan: Option<ConfirmPlan>,
+    hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
+    app_handle: &AppHandle,
+    question_tx: &mpsc::Sender<DetectedQuestion>,
+    session_id: Uuid,
+) -> Result<()> {
+    match plan {
+        None => {}
+        Some(ConfirmPlan::Immediate(text)) => send_detected_question(question_tx, session_id, text),
+        Some(ConfirmPlan::WithLlm(text)) => {
+            if let Some(q) = finalize_confirmation(hybrid, text, app_handle).await? {
+                send_detected_question(question_tx, session_id, q);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn send_detected_question(
+    question_tx: &mpsc::Sender<DetectedQuestion>,
+    session_id: Uuid,
+    text: String,
+) {
+    let q = DetectedQuestion {
+        text,
+        session_id,
+        detected_at: Instant::now(),
+    };
+    if question_tx.try_send(q).is_err() {
+        tracing::warn!(
+            session_id = %session_id,
+            "question_tx full — detected question dropped"
+        );
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
