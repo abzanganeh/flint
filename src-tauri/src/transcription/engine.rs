@@ -121,12 +121,33 @@ impl WhisperEngine {
             return Ok(None);
         }
 
+        let beam = self.decode_chunk(chunk, false)?;
+        if beam.is_some() {
+            return Ok(beam);
+        }
+
+        tracing::debug!(
+            source = ?chunk.source,
+            "beam search produced no valid segments — retrying with greedy decode"
+        );
+        self.decode_chunk(chunk, true)
+    }
+
+    fn decode_chunk(
+        &self,
+        chunk: &VadChunk,
+        greedy: bool,
+    ) -> Result<Option<TranscriptionResult>> {
         let mut state = self
             .model
             .create_state()
             .context("Failed to create Whisper state")?;
 
-        let mut params = build_full_params(&self.initial_prompt);
+        let mut params = if greedy {
+            build_greedy_params(&self.initial_prompt)
+        } else {
+            build_full_params(&self.initial_prompt)
+        };
         params.set_n_threads(thread_count_for_tier(self.tier));
 
         state
@@ -135,130 +156,19 @@ impl WhisperEngine {
 
         let n_segments = state.full_n_segments();
         if n_segments <= 0 {
-            tracing::debug!(source = ?chunk.source, "Whisper produced no segments");
+            tracing::debug!(source = ?chunk.source, greedy, "Whisper produced no segments");
             return Ok(None);
         }
 
-        let mut text_parts: Vec<String> = Vec::new();
-        let mut word_timestamps: Vec<WordTimestamp> = Vec::new();
-        let mut discarded: u32 = 0;
-        let mut logprob_sum: f32 = 0.0;
-        let mut logprob_count: u32 = 0;
-
-        for segment in state.as_iter() {
-            let no_speech_prob = segment.no_speech_probability();
-            if no_speech_prob > NO_SPEECH_THRESHOLD {
-                tracing::debug!(
-                    source = ?chunk.source,
-                    no_speech_prob = no_speech_prob,
-                    "Whisper segment discarded — no speech"
-                );
-                discarded += 1;
-                continue;
-            }
-
-            let segment_text = segment
-                .to_str()
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default();
-
-            if segment_text.is_empty() {
-                discarded += 1;
-                continue;
-            }
-
-            let ratio = compression_ratio(&segment_text);
-            if ratio > COMPRESSION_RATIO_THRESHOLD {
-                tracing::debug!(
-                    source = ?chunk.source,
-                    compression_ratio = ratio,
-                    "Whisper segment discarded — repetition hallucination"
-                );
-                discarded += 1;
-                continue;
-            }
-
-            // Collect non-special word tokens for avg_logprob and word timestamps.
-            let mut seg_logprob_sum: f32 = 0.0;
-            let mut seg_logprob_count: u32 = 0;
-            let mut seg_words: Vec<WordTimestamp> = Vec::new();
-
-            let n_tokens = segment.n_tokens();
-            for token_idx in 0..n_tokens {
-                let Some(token) = segment.get_token(token_idx) else {
-                    continue;
-                };
-
-                let word = token.to_str_lossy().unwrap_or_default().into_owned();
-                let word = word.trim().to_string();
-                if word.is_empty() || is_special_token(&word) {
-                    continue;
-                }
-
-                let data = token.token_data();
-                seg_logprob_sum += data.plog;
-                seg_logprob_count += 1;
-
-                let start_ms = centiseconds_to_ms(data.t0);
-                let end_ms = centiseconds_to_ms(data.t1).max(start_ms);
-                seg_words.push(WordTimestamp {
-                    word,
-                    start_ms,
-                    end_ms,
-                });
-            }
-
-            if seg_logprob_count > 0 {
-                let avg_logprob = seg_logprob_sum / seg_logprob_count as f32;
-                if avg_logprob < LOGPROB_THRESHOLD {
-                    tracing::debug!(
-                        source = ?chunk.source,
-                        avg_logprob = avg_logprob,
-                        "Whisper segment discarded — low confidence"
-                    );
-                    discarded += 1;
-                    continue;
-                }
-                logprob_sum += avg_logprob;
-                logprob_count += 1;
-            }
-
-            text_parts.push(segment_text);
-            word_timestamps.extend(seg_words);
-        }
-
-        let total = n_segments as u32;
-        if text_parts.is_empty() {
+        if !greedy && is_single_timestamp_ending(&state) {
             tracing::debug!(
                 source = ?chunk.source,
-                discarded = discarded,
-                total = total,
-                "All Whisper segments discarded"
+                "beam search single timestamp ending — will retry greedy"
             );
             return Ok(None);
         }
 
-        if discarded > 0 {
-            tracing::debug!(
-                source = ?chunk.source,
-                discarded = discarded,
-                total = total,
-                "Some Whisper segments discarded — partial transcript kept"
-            );
-        }
-
-        let text = text_parts.join(" ").trim().to_string();
-        let avg_logprob = if logprob_count > 0 {
-            Some(logprob_sum / logprob_count as f32)
-        } else {
-            None
-        };
-        Ok(Some(TranscriptionResult {
-            text,
-            source: chunk.source,
-            word_timestamps,
-            avg_logprob,
-        }))
+        collect_segments(&state, chunk.source, n_segments)
     }
 
     /// Hardware tier this engine was configured for.
@@ -271,13 +181,25 @@ impl WhisperEngine {
 // Parameter builder
 // ────────────────────────────────────────────────────────────────────────────
 
-/// Build `FullParams` with exact §26 Whisper.cpp configuration.
+/// Build `FullParams` with exact §26 Whisper.cpp configuration (beam search).
 fn build_full_params(initial_prompt: &str) -> FullParams<'static, 'static> {
     let mut params = FullParams::new(SamplingStrategy::BeamSearch {
         beam_size: BEAM_SIZE,
         patience: -1.0,
     });
 
+    apply_common_params(&mut params, initial_prompt);
+    params
+}
+
+/// Greedy decode fallback when beam search fails (M10 Slice 5).
+fn build_greedy_params(initial_prompt: &str) -> FullParams<'static, 'static> {
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    apply_common_params(&mut params, initial_prompt);
+    params
+}
+
+fn apply_common_params(params: &mut FullParams<'_, '_>, initial_prompt: &str) {
     params.set_language(Some(LANGUAGE));
     params.set_temperature(TEMPERATURE);
     params.set_no_speech_thold(NO_SPEECH_THRESHOLD);
@@ -292,8 +214,160 @@ fn build_full_params(initial_prompt: &str) -> FullParams<'static, 'static> {
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+}
 
-    params
+fn collect_segments(
+    state: &whisper_rs::WhisperState,
+    source: AudioSource,
+    n_segments: i32,
+) -> Result<Option<TranscriptionResult>> {
+    let mut text_parts: Vec<String> = Vec::new();
+    let mut word_timestamps: Vec<WordTimestamp> = Vec::new();
+    let mut discarded: u32 = 0;
+    let mut logprob_sum: f32 = 0.0;
+    let mut logprob_count: u32 = 0;
+
+    for segment in state.as_iter() {
+        let no_speech_prob = segment.no_speech_probability();
+        if no_speech_prob > NO_SPEECH_THRESHOLD {
+            tracing::debug!(
+                source = ?source,
+                no_speech_prob = no_speech_prob,
+                "Whisper segment discarded — no speech"
+            );
+            discarded += 1;
+            continue;
+        }
+
+        let segment_text = segment
+            .to_str()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+
+        if segment_text.is_empty() {
+            discarded += 1;
+            continue;
+        }
+
+        let ratio = compression_ratio(&segment_text);
+        if ratio > COMPRESSION_RATIO_THRESHOLD {
+            tracing::debug!(
+                source = ?source,
+                compression_ratio = ratio,
+                "Whisper segment discarded — repetition hallucination"
+            );
+            discarded += 1;
+            continue;
+        }
+
+        let mut seg_logprob_sum: f32 = 0.0;
+        let mut seg_logprob_count: u32 = 0;
+        let mut seg_words: Vec<WordTimestamp> = Vec::new();
+
+        let n_tokens = segment.n_tokens();
+        for token_idx in 0..n_tokens {
+            let Some(token) = segment.get_token(token_idx) else {
+                continue;
+            };
+
+            let word = token.to_str_lossy().unwrap_or_default().into_owned();
+            let word = word.trim().to_string();
+            if word.is_empty() || is_special_token(&word) {
+                continue;
+            }
+
+            let data = token.token_data();
+            seg_logprob_sum += data.plog;
+            seg_logprob_count += 1;
+
+            let start_ms = centiseconds_to_ms(data.t0);
+            let end_ms = centiseconds_to_ms(data.t1).max(start_ms);
+            seg_words.push(WordTimestamp {
+                word,
+                start_ms,
+                end_ms,
+            });
+        }
+
+        if seg_logprob_count > 0 {
+            let avg_logprob = seg_logprob_sum / seg_logprob_count as f32;
+            if avg_logprob < LOGPROB_THRESHOLD {
+                tracing::debug!(
+                    source = ?source,
+                    avg_logprob = avg_logprob,
+                    "Whisper segment discarded — low confidence"
+                );
+                discarded += 1;
+                continue;
+            }
+            logprob_sum += avg_logprob;
+            logprob_count += 1;
+        }
+
+        text_parts.push(segment_text);
+        word_timestamps.extend(seg_words);
+    }
+
+    let total = n_segments as u32;
+    if text_parts.is_empty() {
+        tracing::debug!(
+            source = ?source,
+            discarded = discarded,
+            total = total,
+            "All Whisper segments discarded"
+        );
+        return Ok(None);
+    }
+
+    if discarded > 0 {
+        tracing::debug!(
+            source = ?source,
+            discarded = discarded,
+            total = total,
+            "Some Whisper segments discarded — partial transcript kept"
+        );
+    }
+
+    let text = text_parts.join(" ").trim().to_string();
+    let avg_logprob = if logprob_count > 0 {
+        Some(logprob_sum / logprob_count as f32)
+    } else {
+        None
+    };
+    Ok(Some(TranscriptionResult {
+        text,
+        source,
+        word_timestamps,
+        avg_logprob,
+    }))
+}
+
+/// True when every token in every segment shares the same end timestamp.
+fn is_single_timestamp_ending(state: &whisper_rs::WhisperState) -> bool {
+    let mut saw_word = false;
+    let mut single_end: Option<i64> = None;
+
+    for segment in state.as_iter() {
+        for token_idx in 0..segment.n_tokens() {
+            let Some(token) = segment.get_token(token_idx) else {
+                continue;
+            };
+            let word = token.to_str_lossy().unwrap_or_default();
+            let word = word.trim();
+            if word.is_empty() || is_special_token(word) {
+                continue;
+            }
+            saw_word = true;
+            let end = token.token_data().t1;
+            match single_end {
+                None => single_end = Some(end),
+                Some(prev) if prev == end => {}
+                _ => return false,
+            }
+        }
+    }
+
+    saw_word && single_end.is_some()
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -409,6 +483,30 @@ mod tests {
     fn build_full_params_does_not_panic() {
         let params = build_full_params(DEFAULT_INITIAL_PROMPT);
         drop(params);
+    }
+
+    #[test]
+    fn build_greedy_params_does_not_panic() {
+        let params = build_greedy_params(DEFAULT_INITIAL_PROMPT);
+        drop(params);
+    }
+
+    #[test]
+    fn single_timestamp_ending_detects_collapsed_timestamps() {
+        assert!(is_single_timestamp_ending_mock(&[(100, 100), (100, 100)]));
+        assert!(!is_single_timestamp_ending_mock(&[(100, 150), (100, 200)]));
+    }
+
+    fn is_single_timestamp_ending_mock(ends: &[(i64, i64)]) -> bool {
+        let mut single_end: Option<i64> = None;
+        for &(_start, end) in ends {
+            match single_end {
+                None => single_end = Some(end),
+                Some(prev) if prev == end => {}
+                _ => return false,
+            }
+        }
+        single_end.is_some()
     }
 
     // ── Utility functions ─────────────────────────────────────────────────
