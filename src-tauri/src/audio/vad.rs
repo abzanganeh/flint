@@ -19,14 +19,13 @@
 
 #![allow(dead_code)]
 
-use anyhow::Result;
-use webrtc_vad::{SampleRate, Vad, VadMode};
+use std::collections::VecDeque;
+use std::time::Instant;
 
 use super::capture::AudioSource;
 
-// ────────────────────────────────────────────────────────────────────────────
-// Constants — §26 / Task 3.4.  DO NOT change without updating the spec.
-// ────────────────────────────────────────────────────────────────────────────
+use anyhow::Result;
+use webrtc_vad::{SampleRate, Vad, VadMode};
 
 /// WebRTC VAD aggressiveness mode (0 = Quality … 3 = VeryAggressive).
 /// Mode 3 filters most background noise — required by §26.
@@ -40,6 +39,17 @@ pub const VAD_FRAME_SAMPLES: usize = 320;
 
 /// Duration of one VAD frame in milliseconds.
 const FRAME_MS: u32 = 20;
+
+/// Minimum speech segment sent to Whisper (M10 Slice 5).
+pub const WHISPER_MIN_SEGMENT_MS: u32 = 500;
+
+/// Pre/post padding applied to VAD boundaries (M10 Slice 5).
+const PRE_POST_PADDING_MS: u32 = 200;
+const PRE_POST_PADDING_FRAMES: u32 = PRE_POST_PADDING_MS / FRAME_MS;
+
+// ────────────────────────────────────────────────────────────────────────────
+// Constants — §26 / Task 3.4.  DO NOT change without updating the spec.
+// ────────────────────────────────────────────────────────────────────────────
 
 /// Segments shorter than this are noise artefacts and are discarded.
 const MIN_SPEECH_MS: u32 = 200;
@@ -130,6 +140,10 @@ pub struct VadChunker {
     speech_frames: u32,
     /// Source of the first speech frame of the active segment.
     current_source: AudioSource,
+    /// Rolling pre-speech buffer for 200ms pre-padding.
+    pre_roll: VecDeque<Vec<f32>>,
+    /// Timestamp of the most recent speech-classified frame.
+    last_speech_at: Option<Instant>,
 }
 
 // `webrtc_vad::Vad` wraps a C pointer from bindgen, so it is not `Send` by
@@ -154,7 +168,38 @@ impl VadChunker {
             silence_frames: 0,
             speech_frames: 0,
             current_source: AudioSource::System,
+            pre_roll: VecDeque::new(),
+            last_speech_at: None,
         }
+    }
+
+    /// Milliseconds since the last speech-classified frame on this channel.
+    pub fn ms_since_last_speech(&self) -> u64 {
+        self.last_speech_at
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(u64::MAX)
+    }
+
+    fn push_pre_roll(&mut self, frame: &[f32]) {
+        if self.pre_roll.len() >= PRE_POST_PADDING_FRAMES as usize {
+            self.pre_roll.pop_front();
+        }
+        self.pre_roll.push_back(frame.to_vec());
+    }
+
+    fn prepend_pre_roll(&mut self) {
+        let mut padded = Vec::new();
+        for frame in &self.pre_roll {
+            padded.extend_from_slice(frame);
+        }
+        padded.append(&mut self.speech_buf);
+        self.speech_buf = padded;
+    }
+
+    fn append_post_padding(&mut self) {
+        let pad_samples = (PRE_POST_PADDING_MS as usize * VAD_SAMPLE_RATE as usize) / 1000;
+        self.speech_buf
+            .extend(std::iter::repeat_n(0.0f32, pad_samples));
     }
 
     /// Process one frame of 16kHz PCM mono audio.
@@ -181,12 +226,19 @@ impl VadChunker {
     fn step(&mut self, frame: &[f32], source: AudioSource) -> Option<VadChunk> {
         let is_speech = self.classify(frame);
 
+        if is_speech {
+            self.last_speech_at = Some(Instant::now());
+        } else if self.state == State::Idle {
+            self.push_pre_roll(frame);
+        }
+
         match self.state {
             State::Idle => {
                 if is_speech {
                     self.state = State::Collecting;
                     self.current_source = source;
                     self.speech_frames = 1;
+                    self.prepend_pre_roll();
                     self.speech_buf.extend_from_slice(frame);
                 }
                 None
@@ -257,6 +309,7 @@ impl VadChunker {
             return None; // below minimum speech duration — noise artefact
         }
 
+        self.append_post_padding();
         let duration_ms = (speech_buf.len() as u32 * 1000) / VAD_SAMPLE_RATE;
         Some(VadChunk {
             samples: speech_buf,
@@ -283,6 +336,7 @@ impl VadChunker {
             return None;
         }
 
+        self.append_post_padding();
         let duration_ms = (speech_buf.len() as u32 * 1000) / VAD_SAMPLE_RATE;
         tracing::debug!(
             duration_ms,

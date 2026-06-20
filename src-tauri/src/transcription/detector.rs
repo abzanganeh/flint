@@ -324,7 +324,8 @@ impl QuestionDetector {
 /// This pass never returns `NotAQuestion` — the rule set covers known-question
 /// patterns but cannot rule out statement-form questions, so unknown cases are
 /// escalated to Pass 2 rather than rejected.
-fn pass1(normalized: &str) -> DetectionResult {
+/// Rule-based Pass 1 classifier (exported for hybrid detection — M10 Slice 2).
+pub fn pass1(normalized: &str) -> DetectionResult {
     if normalized.ends_with('?') {
         return DetectionResult::Question;
     }

@@ -541,6 +541,7 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
             question: format!("Question {i} with several words to fill up the budget"),
             directional_response: "Directional answer ".repeat(20),
             depth_response: "Depth answer ".repeat(20),
+            created_at_ms: i as i64,
         });
     }
 

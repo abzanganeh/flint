@@ -300,6 +300,15 @@ pub struct SessionSnapshotDto {
     pub phone_call_mode: bool,
 }
 
+/// Provider row for Settings → LLM Providers reorder UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfiguredProviderDto {
+    pub name: String,
+    pub has_key: bool,
+    pub is_reachable: bool,
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Prep research DTOs (Phase 5.6)
 // ──────────────────────────────────────────────────────────────────────────────

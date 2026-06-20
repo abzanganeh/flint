@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::audio::capture::AudioCapture;
+use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
 use crate::calibration::{
     device_fingerprint_or_fallback, load_mic_paragraph_text, load_system_clip_text,
@@ -18,9 +19,10 @@ use crate::calibration::{
 };
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, CalibrationResultDto, DigestDto, HardwareProfileDto,
-    HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto, SessionConfigDto,
-    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
+    AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto,
+    HardwareProfileDto, HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto,
+    SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto,
+    WebSourceDto,
 };
 use crate::events::{
     emit_calibration_mic_complete, emit_calibration_system_complete, emit_mock_coach_feedback,
@@ -59,8 +61,8 @@ use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
 use crate::state::{AppState, LiveTaskHandles, MockTaskHandles};
-use crate::transcription::detector::QuestionDetector;
 use crate::transcription::engine::WhisperEngine;
+use crate::transcription::hybrid::{HybridQuestionDetector, SystemTranscriptBuffer};
 use crate::transcription::prompt::{build_whisper_initial_prompt, FALLBACK_WHISPER_INITIAL_PROMPT};
 
 const GENERIC_AUTH_ERROR: &str = "Authentication failed. Please try again.";
@@ -1776,6 +1778,7 @@ async fn abort_local_live_handles(handles: LiveTaskHandles) {
 async fn build_failover_stack(
     app: &AppHandle,
     state: &AppState,
+    start_ping_loop: bool,
 ) -> Result<(Arc<FailoverManager>, Arc<dyn LLMProvider>, usize), String> {
     let primary_provider = stack::resolve_primary(&state.persistence).ok_or_else(|| {
         format!(
@@ -1791,7 +1794,7 @@ async fn build_failover_stack(
         OllamaProvider::new().map_err(|e| format!("Failed to build Ollama provider: {e}"))?,
     );
 
-    let cloud_tiers = stack::resolve_cloud_tiers(&primary_name);
+    let cloud_tiers = stack::resolve_cloud_tiers(&primary_name, &state.persistence);
     if cloud_tiers.is_empty() {
         info!("failover stack: no cloud fallback tiers configured — primary → Ollama only");
     } else {
@@ -1801,7 +1804,9 @@ async fn build_failover_stack(
 
     let mut failover =
         stack::build_failover_manager(primary_provider, cloud_tiers, Arc::clone(&local_provider));
-    failover.start_ping_loop(app.clone());
+    if start_ping_loop {
+        failover.start_ping_loop(app.clone());
+    }
     Ok((Arc::new(failover), local_provider, context_window))
 }
 
@@ -1842,7 +1847,8 @@ pub async fn run_rehearsal_turn(
 
     let digest = resolve_session_digest(state.inner(), sid).await?;
 
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state).await?;
+    let (failover, local_provider, context_window) =
+        build_failover_stack(&app, &state, true).await?;
 
     let memory = {
         let mut guard = state.session_memory.lock().await;
@@ -2575,7 +2581,7 @@ pub async fn run_research_chat(
         .await
         .map_err(|e| format!("RAG retrieval failed: {e}"))?;
 
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
     let web = tavily::resolve_tavily();
 
     let outcome = research::run_prep_research_turn(&message, chunks, failover, web, app.clone())
@@ -2757,15 +2763,17 @@ pub async fn start_session(
     let whisper = init_whisper_engine(&profile, initial_prompt)
         .map_err(|e| start_session_step_err("whisper init", e))?;
 
-    // ── 2. Question detector ──────────────────────────────────────────────
-    let detector = Arc::new(
-        QuestionDetector::new(
-            profile.tier,
-            Some(Arc::clone(&state.llm)),
-            &prompts_base_dir(),
-        )
-        .map_err(|e| start_session_step_err("question detector init", e))?,
-    );
+    // ── 2. Failover stack (needed by hybrid detector) ─────────────────────
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
+        .await
+        .map_err(|e| start_session_step_err("failover stack", e))?;
+
+    let hybrid = Arc::new(tokio::sync::Mutex::new(
+        HybridQuestionDetector::new(Arc::clone(&failover), &prompts_base_dir())
+            .map_err(|e| start_session_step_err("hybrid question detector init", e))?,
+    ));
+    let system_transcript_buffer =
+        Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
 
     // ── 3. Audio channels ─────────────────────────────────────────────────
     //
@@ -2787,6 +2795,7 @@ pub async fn start_session(
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
+    *state.phone_mode_manual_only.lock().await = is_phone_call_mode;
 
     std::thread::spawn(move || {
         let capture_result = if is_phone_call_mode {
@@ -2825,11 +2834,7 @@ pub async fn start_session(
         })?
         .map_err(|e| start_session_step_err("audio capture", e))?;
 
-    // ── 5. Build failover manager and conversation memory ─────────────────
-
-    let (failover, local_provider, context_window) = build_failover_stack(&app, &state)
-        .await
-        .map_err(|e| start_session_step_err("failover stack", e))?;
+    // ── 5. Build conversation memory ──────────────────────────────────────
 
     let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
         context_window,
@@ -2874,13 +2879,18 @@ pub async fn start_session(
         app.clone(),
         sid,
         whisper,
-        detector,
+        hybrid,
+        Arc::clone(&system_transcript_buffer),
         question_tx.clone(),
         system_rx,
         mic_rx,
         Arc::clone(&state.persistence),
         Arc::new(std::sync::Mutex::new(MicQualityMonitor::default())),
+        !is_phone_call_mode,
+        is_phone_call_mode,
     ));
+
+    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
 
     let handles = LiveTaskHandles {
         stop_tx,
@@ -2889,6 +2899,8 @@ pub async fn start_session(
         orchestrator,
         question_tx,
         turn_cancel: turn_cancel_slot,
+        system_transcript_buffer,
+        diarizer: Arc::clone(&diarizer),
     };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
@@ -2976,6 +2988,7 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
 
     // Clear per-session memory.
     *state.session_memory.lock().await = None;
+    *state.phone_mode_manual_only.lock().await = false;
 
     // Phase 7.4 — zero the cost tracker so the next session starts fresh.
     state.cost_tracker.reset();
@@ -3107,6 +3120,93 @@ pub async fn trigger_response(
     Ok(())
 }
 
+/// Manual question boundary — Ctrl+Q (M10 Slice 2 Layer 4).
+///
+/// Grabs the System transcript buffer since the last signal and sends it
+/// directly to the orchestrator, bypassing hybrid detection layers.
+#[tauri::command]
+pub async fn signal_question_ended(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "signal_question_ended is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
+    }
+
+    let guard = state.live_tasks.lock().await;
+    let Some(handles) = guard.as_ref() else {
+        return Err("No active live session handles.".to_string());
+    };
+
+    let question_text = {
+        let mut buf = handles
+            .system_transcript_buffer
+            .lock()
+            .map_err(|_| "System transcript buffer lock poisoned.".to_string())?;
+        buf.drain_since_last_signal()
+    };
+
+    if question_text.trim().is_empty() {
+        return Err(
+            "No interviewer transcript captured since the last question signal.".to_string(),
+        );
+    }
+
+    let detected = DetectedQuestion {
+        text: question_text.clone(),
+        session_id: sid,
+        detected_at: std::time::Instant::now(),
+    };
+    handles
+        .question_tx
+        .try_send(detected)
+        .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
+
+    info!(
+        session_id = %sid,
+        question_len = question_text.len(),
+        "signal_question_ended — manual question boundary",
+    );
+
+    Ok(())
+}
+
+/// Assign which diarized speaker is the interviewer (M10 Slice 8).
+#[tauri::command]
+pub async fn assign_speaker(
+    state: State<'_, AppState>,
+    session_id: String,
+    speaker_id: u8,
+) -> Result<(), String> {
+    let _sid = validate_session_id(&state, &session_id).await?;
+
+    let guard = state.live_tasks.lock().await;
+    let Some(handles) = guard.as_ref() else {
+        return Err("No active live session.".to_string());
+    };
+
+    let mut diarizer = handles
+        .diarizer
+        .lock()
+        .map_err(|_| "Diarizer lock poisoned.".to_string())?;
+    diarizer.assign_interviewer(speaker_id)
+}
+
 /// Cancel any running inference — valid from LIVE or REHEARSING.
 ///
 /// Sets the active turn's cancellation flag so in-flight token streams stop.
@@ -3209,6 +3309,83 @@ pub async fn get_preferred_primary_provider(
         .map_err(|e| e.to_string())
 }
 
+/// Return the user's ordered cloud LLM provider priority (Ollama excluded).
+#[tauri::command]
+pub async fn get_provider_priority(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    state
+        .persistence
+        .get_provider_priority()
+        .map_err(|e| e.to_string())
+}
+
+/// Save a new cloud provider priority order. Ollama cannot be included.
+#[tauri::command]
+pub async fn set_provider_priority(
+    order: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() == SessionState::Live {
+            return Err(
+                "Provider priority cannot be changed during a live session. \
+                 Configure providers before starting."
+                    .to_string(),
+            );
+        }
+    }
+
+    for name in &order {
+        if name == "ollama" {
+            return Err("Ollama is always the local fallback and cannot be reordered.".to_string());
+        }
+        if !stack::REORDERABLE_CLOUD_PROVIDERS.contains(&name.as_str()) {
+            return Err(format!(
+                "Unknown provider '{name}'. Choose from {:?}.",
+                stack::REORDERABLE_CLOUD_PROVIDERS
+            ));
+        }
+    }
+
+    state
+        .persistence
+        .set_provider_priority(&order)
+        .map_err(|e| e.to_string())
+}
+
+/// List cloud providers with key presence and reachability for the Settings UI.
+#[tauri::command]
+pub async fn get_configured_providers(
+    state: State<'_, AppState>,
+) -> Result<Vec<ConfiguredProviderDto>, String> {
+    let _ = state;
+    let mut providers = Vec::new();
+
+    for name in stack::REORDERABLE_CLOUD_PROVIDERS {
+        let has_key = crate::keychain::get_api_key(name).is_ok();
+        let is_reachable = stack::resolve_cloud_provider_by_name(name)
+            .map(|p| p.is_available())
+            .unwrap_or(false);
+        providers.push(ConfiguredProviderDto {
+            name: (*name).to_string(),
+            has_key,
+            is_reachable,
+        });
+    }
+
+    let ollama_reachable = OllamaProvider::new()
+        .ok()
+        .map(|p| p.is_available())
+        .unwrap_or(false);
+    providers.push(ConfiguredProviderDto {
+        name: "ollama".to_string(),
+        has_key: true,
+        is_reachable: ollama_reachable,
+    });
+
+    Ok(providers)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // 6.2 — Crash recovery
 // ──────────────────────────────────────────────────────────────────────────────
@@ -3284,13 +3461,34 @@ pub async fn discard_all_crashed_sessions(
 // 6.4 — Post-session summary
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// JSON returned when every provider in the failover chain rejects the summary call.
+/// Returns `Ok` (not `Err`) so session end is never blocked on summary failure.
+fn summary_unavailable_json() -> String {
+    serde_json::json!({
+        "date": "",
+        "domain": "",
+        "role": "",
+        "company": "",
+        "questions_count": 0,
+        "topics_covered": [],
+        "confidence_distribution": {"high": 0, "medium": 0, "low": 0},
+        "key_moments": [],
+        "follow_up_actions": [],
+        "one_line_summary": "Summary unavailable — rate limited or offline. Retry from Past Sessions."
+    })
+    .to_string()
+}
+
 /// Generate a structured post-session summary using the `session_essence` prompt.
 ///
 /// Loads the full transcript from SQLite, passes it through the LLM prompt
 /// defined in `/prompts/session_essence/`, and returns a JSON summary blob.
 /// Only callable after the session has reached `ENDED`.
 #[tauri::command]
-pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn generate_session_summary(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let sid = {
         let machine = state.state_machine.lock().await;
         machine.session_id().ok_or("No session to summarise.")?
@@ -3346,23 +3544,42 @@ pub async fn generate_session_summary(state: State<'_, AppState>) -> Result<Stri
         }
     }
 
-    // Build a one-shot provider for the summary call.
-    let provider: Arc<dyn LLMProvider> =
-        stack::resolve_primary(&state.persistence).unwrap_or_else(|| Arc::clone(&state.llm));
+    let config = CompletionConfig {
+        max_tokens: Some(600),
+        temperature: 0.0,
+        stream: false,
+    };
 
-    let summary = provider
-        .complete(
-            prompt,
-            CompletionConfig {
-                max_tokens: Some(600),
-                temperature: 0.0,
-                stream: false,
-            },
-        )
-        .await
-        .map_err(|e| format!("LLM summary call failed: {e}"))?;
+    // Route through FailoverManager — Groq 429 must cascade to cloud tiers → Ollama.
+    let (failover, _, _) = match build_failover_stack(&app, &state, false).await {
+        Ok(stack) => stack,
+        Err(e) => {
+            warn!(
+                session_id = %sid,
+                error = %e,
+                "post-session summary skipped — no failover stack"
+            );
+            return Ok(summary_unavailable_json());
+        }
+    };
 
-    info!(session_id = %sid, "post-session summary generated");
+    let summary = match failover.complete(prompt, config, &app, 800).await {
+        Ok(text) => text,
+        Err(e) => {
+            warn!(
+                session_id = %sid,
+                error = %e,
+                "post-session summary failed after failover cascade"
+            );
+            return Ok(summary_unavailable_json());
+        }
+    };
+
+    info!(
+        session_id = %sid,
+        provider = %failover.active_provider_name(),
+        "post-session summary generated"
+    );
     Ok(summary)
 }
 
@@ -3855,7 +4072,7 @@ pub async fn start_mock(
     }
 
     // Build FailoverManager.
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
 
     let embedder = state.require_embedder()?;
     let suggested_buffer = Arc::new(std::sync::RwLock::new(String::new()));
@@ -4058,7 +4275,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .await
         .session_id()
         .ok_or("no active session")?;
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
     let persistence = Arc::clone(&state.persistence);
     let question = persistence
         .load_mock_turns(session_id)
@@ -4274,7 +4491,7 @@ pub async fn regrade_mock_turn(
         )
         .map_err(|e| e.to_string())?;
 
-    let (failover, _, _) = build_failover_stack(&app, &state).await?;
+    let (failover, _, _) = build_failover_stack(&app, &state, true).await?;
     let rag_chunks = if let Ok(embedder) = state.require_embedder() {
         query_mock_rag(
             session_id,
@@ -4682,4 +4899,20 @@ pub struct MockTurnDto {
     pub coach_json: String,
     pub suggested: String,
     pub score: u8,
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::summary_unavailable_json;
+
+    #[test]
+    fn summary_unavailable_json_is_valid_and_non_blocking() {
+        let raw = summary_unavailable_json();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).expect("valid JSON");
+        assert!(parsed.get("one_line_summary").is_some());
+        assert!(parsed["one_line_summary"]
+            .as_str()
+            .unwrap()
+            .contains("Retry from Past Sessions"));
+    }
 }

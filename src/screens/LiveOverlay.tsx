@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 
 import SessionContextBadges from "../components/SessionContextBadges";
+import LiveSessionStatusBar from "../components/LiveSessionStatusBar";
 import OverlayLayout from "../components/OverlayLayout";
 import MicQualityBadge from "../components/MicQualityBadge";
 import PanicRestoreShell from "../components/PanicRestoreShell";
@@ -229,6 +230,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       </div>
 
       <TokenBudgetIndicator />
+      <LiveSessionStatusBar sessionId={sessionId} />
       <MicQualityBadge />
     </div>
     </PanicRestoreShell>

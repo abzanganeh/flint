@@ -14,7 +14,9 @@ use crate::knowledge::{knowledge_base_dir, GlobalKnowledgeBase, PackId};
 use crate::mock::conductor::{Conductor, MockMode};
 use crate::mock::mic_capture::MicCapture;
 
+use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::DetectedQuestion;
+use crate::transcription::hybrid::SystemTranscriptBuffer;
 
 use crate::auth_session::restore_auth_from_keychain;
 use crate::cost::CostTracker;
@@ -82,6 +84,10 @@ pub struct LiveTaskHandles {
     pub question_tx: mpsc::Sender<DetectedQuestion>,
     /// Active turn's cancellation flag. Replaced on each orchestrator dispatch.
     pub turn_cancel: Arc<Mutex<Option<TurnCancelFlag>>>,
+    /// Rolling System-channel transcript since last Ctrl+Q (M10 Slice 2).
+    pub system_transcript_buffer: Arc<std::sync::Mutex<SystemTranscriptBuffer>>,
+    /// Phone-mode diarization state (M10 Slice 8).
+    pub diarizer: Arc<std::sync::Mutex<DiarizerManager>>,
 }
 
 /// Shared application state for Tauri commands.
@@ -134,6 +140,8 @@ pub struct AppState {
     /// Cleared on session reset. Drives AudioCapture::start_phone_mode and
     /// skips system audio calibration.
     pub phone_call_mode: Mutex<bool>,
+    /// When true, automatic question detection is disabled (phone mode — M10 Slice 7).
+    pub phone_mode_manual_only: Mutex<bool>,
 
     // ── Mock interview (Phase 8) ─────────────────────────────────────────────
     /// Mock session handles. `Some` only while a mock interview is active.
@@ -256,6 +264,7 @@ impl AppState {
             rehearsal_turn: Mutex::new(0),
             rehearsal_turn_cancel: Mutex::new(None),
             phone_call_mode: Mutex::new(false),
+            phone_mode_manual_only: Mutex::new(false),
             mock_tasks: Mutex::new(None),
             global_kb,
             cost_tracker: Arc::new(CostTracker::new()),

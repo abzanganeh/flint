@@ -923,6 +923,139 @@ mod tests {
         assert_eq!(active_tier.load(Ordering::Acquire), local_tier_index(0));
     }
 
+    /// Post-session summary path: Groq long 429 must cascade to the next cloud tier.
+    #[tokio::test]
+    async fn complete_falls_back_to_cloud_tier_on_long_groq_rate_limit() {
+        struct AlwaysRateLimited {
+            provider_name: String,
+        }
+
+        #[async_trait::async_trait]
+        impl LLMProvider for AlwaysRateLimited {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+                Err(anyhow::anyhow!("rate_limit:4901"))
+            }
+            fn name(&self) -> &str {
+                &self.provider_name
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> crate::llm::provider::RateLimit {
+                crate::llm::provider::RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 6_000,
+                }
+            }
+        }
+
+        let primary: Arc<dyn LLMProvider> = Arc::new(AlwaysRateLimited {
+            provider_name: "groq".to_string(),
+        });
+        let cloud: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "deepseek summary".to_string(),
+            provider_name: "deepseek".to_string(),
+        });
+        let local: Arc<dyn LLMProvider> = Arc::new(FailingMockLLMProvider {
+            provider_name: "ollama".to_string(),
+            error_message: "should not be called".to_string(),
+        });
+        let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
+        let manager = FailoverManager::new(primary, vec![cloud], local, rl);
+        let app = mock_app_handle();
+
+        let summary = manager
+            .complete(
+                "session summary prompt".to_string(),
+                CompletionConfig {
+                    max_tokens: Some(600),
+                    temperature: 0.0,
+                    stream: false,
+                },
+                &app,
+                800,
+            )
+            .await
+            .expect("Groq 429 must fail over to DeepSeek for summary");
+
+        assert_eq!(summary, "deepseek summary");
+        assert_eq!(manager.active_provider_name(), "deepseek");
+    }
+
+    /// Post-session summary path: all cloud tiers exhausted → Ollama fallback.
+    #[tokio::test]
+    async fn complete_falls_back_to_ollama_when_all_cloud_tiers_rate_limited() {
+        struct AlwaysRateLimited {
+            provider_name: String,
+        }
+
+        #[async_trait::async_trait]
+        impl LLMProvider for AlwaysRateLimited {
+            async fn complete_stream(
+                &self,
+                _prompt: String,
+                _config: CompletionConfig,
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+                Err(anyhow::anyhow!("rate_limit:4901"))
+            }
+            fn name(&self) -> &str {
+                &self.provider_name
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            fn context_window(&self) -> usize {
+                128_000
+            }
+            fn rate_limit(&self) -> crate::llm::provider::RateLimit {
+                crate::llm::provider::RateLimit {
+                    requests_per_minute: 60,
+                    tokens_per_minute: 6_000,
+                }
+            }
+        }
+
+        let primary: Arc<dyn LLMProvider> = Arc::new(AlwaysRateLimited {
+            provider_name: "groq".to_string(),
+        });
+        let local: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+            response: "ollama summary".to_string(),
+            provider_name: "ollama".to_string(),
+        });
+        let manager = make_failover(primary, local);
+        let app = mock_app_handle();
+
+        let summary = manager
+            .complete(
+                "session summary prompt".to_string(),
+                CompletionConfig {
+                    max_tokens: Some(600),
+                    temperature: 0.0,
+                    stream: false,
+                },
+                &app,
+                800,
+            )
+            .await
+            .expect("summary must reach Ollama when Groq is rate-limited");
+
+        assert_eq!(summary, "ollama summary");
+        assert!(manager.is_using_local());
+    }
+
     #[test]
     fn log_primary_call_failed_does_not_panic() {
         log_primary_call_failed("groq", &anyhow::anyhow!("boom"));

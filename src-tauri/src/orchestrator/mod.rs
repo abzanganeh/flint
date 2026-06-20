@@ -776,6 +776,10 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
             question: cfg.question_text.clone(),
             directional_response: directional_text.clone(),
             depth_response: depth_text.clone(),
+            created_at_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(0),
         });
     }
 

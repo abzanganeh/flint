@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useRef } from "react";
 
-import { cancelInference, panicHideOverlay, triggerResponse } from "../commands";
+import { cancelInference, panicHideOverlay, signalQuestionEnded, triggerResponse } from "../commands";
 import { onHotkeyTrigger, onOverlayVisibility } from "../events";
 import { useUIStore } from "../store/ui";
 
 const DOUBLE_TAP_MS = 400;
 const HOLD_MS = 2000;
+
+function isQuestionEndedChord(e: KeyboardEvent): boolean {
+  return e.ctrlKey && e.code === "KeyQ" && !e.altKey && !e.metaKey && !e.shiftKey;
+}
 
 function isTriggerChord(e: KeyboardEvent): boolean {
   return (
@@ -99,10 +103,26 @@ export function useHotkeys(
     fireTap();
   }, [fireTap, registerPress]);
 
+  const handleQuestionEnded = useCallback(
+    (e: KeyboardEvent) => {
+      if (!enabled || !sessionId || !isQuestionEndedChord(e) || e.repeat) return;
+      e.preventDefault();
+      void signalQuestionEnded(sessionId);
+    },
+    [enabled, sessionId],
+  );
+
   /** Window-focused chord — supports hold-to-Answer-Now via keyup timing. */
   const handleChordKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      if (!enabled || !sessionId || !isTriggerChord(e) || e.repeat) return;
+      if (!enabled || !sessionId) return;
+
+      if (isQuestionEndedChord(e)) {
+        handleQuestionEnded(e);
+        return;
+      }
+
+      if (!isTriggerChord(e) || e.repeat) return;
       e.preventDefault();
 
       if (e.shiftKey) {
@@ -122,7 +142,7 @@ export function useHotkeys(
         }
       }, HOLD_MS);
     },
-    [clearHoldTimer, enabled, fireHold, registerPress, sessionId],
+    [clearHoldTimer, enabled, fireHold, handleQuestionEnded, registerPress, sessionId],
   );
 
   const handleChordKeyUp = useCallback(

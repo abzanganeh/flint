@@ -109,6 +109,13 @@ export const startSession = (sessionId: string): Promise<void> => {
 
 export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 
+/** Manual question boundary — Ctrl+Q during live sessions. */
+export const signalQuestionEnded = (sessionId: string): Promise<void> =>
+  invoke<void>("signal_question_ended", { sessionId });
+
+export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
+  invoke<void>("assign_speaker", { sessionId, speakerId });
+
 /** Manual turn: rehearsal uses `run_rehearsal_turn`; live uses `trigger_response`. */
 export const triggerResponse = async (
   question: string,
@@ -168,6 +175,21 @@ export const switchProvider = (name: PrimaryLlmProvider): Promise<void> =>
 
 export const getPreferredPrimaryProvider = (): Promise<string | null> =>
   invoke<string | null>("get_preferred_primary_provider");
+
+export interface ConfiguredProviderDto {
+  name: string;
+  hasKey: boolean;
+  isReachable: boolean;
+}
+
+export const getProviderPriority = (): Promise<string[]> =>
+  invoke<string[]>("get_provider_priority");
+
+export const setProviderPriority = (order: string[]): Promise<void> =>
+  invoke<void>("set_provider_priority", { order });
+
+export const getConfiguredProviders = (): Promise<ConfiguredProviderDto[]> =>
+  invoke<ConfiguredProviderDto[]>("get_configured_providers");
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Session design commands (Phase 2)
