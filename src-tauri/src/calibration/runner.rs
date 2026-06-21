@@ -57,7 +57,11 @@ async fn transcribe_from_frames(
                 let n = window.len();
                 let samples = std::mem::take(&mut window);
                 let duration_ms = (n as u32) / 16; // 16 samples = 1 ms at 16 kHz
-                let chunk = VadChunk { samples, source, duration_ms };
+                let chunk = VadChunk {
+                    samples,
+                    source,
+                    duration_ms,
+                };
                 if let Ok(Some(r)) = whisper.transcribe_greedy(&chunk) {
                     let t = r.text.trim().to_owned();
                     if !t.is_empty() {
@@ -226,7 +230,7 @@ async fn transcribe_system_calibration_linux(
             "--channels=1",
             "--rate=16000",
             "--format=s16le",
-            "--raw",  // write raw PCM to stdout, not a WAV container
+            "--raw", // write raw PCM to stdout, not a WAV container
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -270,7 +274,10 @@ async fn transcribe_system_calibration_linux(
         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
         .collect();
 
-    tracing::info!(samples = samples.len(), "system calibration: transcribing loopback PCM");
+    tracing::info!(
+        samples = samples.len(),
+        "system calibration: transcribing loopback PCM"
+    );
 
     // Feed into Whisper in 8-second greedy windows (same ceiling as mic calibration).
     const WINDOW: usize = 16_000 * 8;
@@ -394,7 +401,11 @@ async fn try_speak_piper_via_pipewire(text: &str) -> Option<()> {
         .await
         .ok()?;
 
-    if status.success() { Some(()) } else { None }
+    if status.success() {
+        Some(())
+    } else {
+        None
+    }
 }
 
 fn run_mic_thread(

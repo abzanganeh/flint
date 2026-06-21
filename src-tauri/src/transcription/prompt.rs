@@ -15,30 +15,50 @@ const MAX_PROMPT_CHARS: usize = 220;
 const DOMAIN_VOCAB: &[(&str, &[&str])] = &[
     (
         "iam",
-        &["RBAC", "ABAC", "SCIM", "SAML", "OAuth", "OIDC", "MFA", "LDAP", "SSO"],
+        &[
+            "RBAC", "ABAC", "SCIM", "SAML", "OAuth", "OIDC", "MFA", "LDAP", "SSO",
+        ],
     ),
     (
         "identity",
         &[
-            "RBAC", "ABAC", "zero-trust", "agentic", "entitlement", "provisioning",
+            "RBAC",
+            "ABAC",
+            "zero-trust",
+            "agentic",
+            "entitlement",
+            "provisioning",
         ],
     ),
     (
         "security",
         &[
-            "RBAC", "ABAC", "zero-trust", "posture", "misconfiguration", "SIEM",
+            "RBAC",
+            "ABAC",
+            "zero-trust",
+            "posture",
+            "misconfiguration",
+            "SIEM",
         ],
     ),
     (
         "finance",
         &[
-            "fiduciary", "suitability", "entitlement", "compliance", "AUM",
+            "fiduciary",
+            "suitability",
+            "entitlement",
+            "compliance",
+            "AUM",
         ],
     ),
     (
         "financial",
         &[
-            "fiduciary", "suitability", "entitlement", "compliance", "AUM",
+            "fiduciary",
+            "suitability",
+            "entitlement",
+            "compliance",
+            "AUM",
         ],
     ),
     (
@@ -47,20 +67,46 @@ const DOMAIN_VOCAB: &[(&str, &[&str])] = &[
     ),
     (
         "machine learning",
-        &["RAG", "LLM", "embedding", "inference", "fine-tuning", "RLHF"],
+        &[
+            "RAG",
+            "LLM",
+            "embedding",
+            "inference",
+            "fine-tuning",
+            "RLHF",
+        ],
     ),
     (
         "ai",
-        &["LLM", "RAG", "agentic", "embedding", "inference", "fine-tuning"],
+        &[
+            "LLM",
+            "RAG",
+            "agentic",
+            "embedding",
+            "inference",
+            "fine-tuning",
+        ],
     ),
     (
         "cloud",
-        &["Kubernetes", "Terraform", "IAM", "VPC", "microservices", "SLA"],
+        &[
+            "Kubernetes",
+            "Terraform",
+            "IAM",
+            "VPC",
+            "microservices",
+            "SLA",
+        ],
     ),
     (
         "backend",
         &[
-            "idempotent", "microservices", "gRPC", "Kafka", "Postgres", "Redis",
+            "idempotent",
+            "microservices",
+            "gRPC",
+            "Kafka",
+            "Postgres",
+            "Redis",
         ],
     ),
 ];
@@ -224,7 +270,10 @@ mod tests {
         let mut d = sample_digest();
         d.domain = "Financial services and fiduciary compliance".to_string();
         let prompt = build_whisper_initial_prompt(&d, "");
-        assert!(prompt.contains("fiduciary"), "expected fiduciary in prompt: {prompt}");
+        assert!(
+            prompt.contains("fiduciary"),
+            "expected fiduciary in prompt: {prompt}"
+        );
         assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
     }
 
@@ -234,7 +283,10 @@ mod tests {
         d.role = "Identity security architect".to_string();
         d.domain = "Zero-trust IAM".to_string();
         let prompt = build_whisper_initial_prompt(&d, "");
-        assert!(prompt.contains("zero-trust") || prompt.contains("RBAC"), "prompt: {prompt}");
+        assert!(
+            prompt.contains("zero-trust") || prompt.contains("RBAC"),
+            "prompt: {prompt}"
+        );
         assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
     }
 

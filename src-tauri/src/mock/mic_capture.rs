@@ -52,12 +52,8 @@ pub enum MicCommand {
 /// Commands sent from the capture loop into the cpal OS thread.
 #[derive(Debug)]
 enum CpalControl {
-    Open {
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Close {
-        reply: oneshot::Sender<()>,
-    },
+    Open { reply: oneshot::Sender<Result<()>> },
+    Close { reply: oneshot::Sender<()> },
     Shutdown,
 }
 
@@ -120,9 +116,7 @@ impl MicCapture {
             })
             .await
             .context("send StartTurn")?;
-        reply_rx
-            .await
-            .context("StartTurn reply channel closed")?
+        reply_rx.await.context("StartTurn reply channel closed")?
     }
 
     /// Stop recording and await the transcript + audio path for the turn.
@@ -231,9 +225,7 @@ async fn open_cpal_stream(cpal_tx: &std::sync::mpsc::Sender<CpalControl>) -> Res
     cpal_tx
         .send(CpalControl::Open { reply: reply_tx })
         .map_err(|_| anyhow::anyhow!("cpal control thread exited"))?;
-    reply_rx
-        .await
-        .context("cpal open reply channel closed")?
+    reply_rx.await.context("cpal open reply channel closed")?
 }
 
 async fn close_cpal_stream(cpal_tx: &std::sync::mpsc::Sender<CpalControl>) {

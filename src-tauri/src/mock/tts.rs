@@ -166,7 +166,7 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())  // capture — not null — so we can log failures
+        .stderr(Stdio::piped()) // capture — not null — so we can log failures
         .spawn()
         .context("failed to spawn piper")?;
 
