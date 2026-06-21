@@ -148,7 +148,11 @@ async fn run_tts_command(text: &str) -> Result<()> {
     run_espeak(text).await
 }
 
-/// Pipe `text` into the piper binary, write a WAV to a temp file, play with aplay.
+/// Pipe `text` into piper, write WAV to a temp file, play with aplay.
+///
+/// stderr is captured and logged at WARN so piper failures are visible
+/// in `tauri dev` output — previously they were silenced and the robotic
+/// espeak-ng fallback gave no indication of why.
 #[cfg(target_os = "linux")]
 async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
     let wav_path = std::env::temp_dir().join("flint_tts.wav");
@@ -162,7 +166,7 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())  // capture — not null — so we can log failures
         .spawn()
         .context("failed to spawn piper")?;
 
@@ -171,15 +175,15 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
             .write_all(text.as_bytes())
             .await
             .context("write text to piper stdin")?;
-        // Dropping stdin closes the pipe and signals EOF to piper.
+        // Dropping stdin closes the pipe, signals EOF to piper.
     }
 
-    let status = run_tracked(child).await.context("piper wait")?;
-    if !status.success() {
-        bail!("piper exited with {:?}", status.code());
+    let out = child.wait_with_output().await.context("piper wait")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("piper failed (stderr: {})", stderr.trim());
     }
 
-    // Play the generated WAV — aplay reads the WAV header for sample rate automatically.
     let play = Command::new("aplay")
         .arg(&wav_path)
         .stdin(Stdio::null())

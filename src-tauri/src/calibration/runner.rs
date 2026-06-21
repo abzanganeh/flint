@@ -12,13 +12,26 @@ use crate::audio::capture::{
     build_resampled_mono_stream, find_system_device, AudioSource, FRAME_SAMPLES,
 };
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
-use crate::audio::vad::VadChunker;
+use crate::audio::vad::{VadChunker, VadChunk};
 use crate::mock::tts;
 use crate::transcription::engine::WhisperEngine;
 
 const MIC_CALIBRATION_TIMEOUT: Duration = Duration::from_secs(45);
 const SYSTEM_CALIBRATION_TIMEOUT: Duration = Duration::from_secs(35);
 
+/// Samples of 16 kHz mono audio per calibration window fed to Whisper.
+///
+/// 8 seconds × 16 000 samples/s = 128 000 samples.  Keeps chunks well under
+/// the 30-second Whisper limit while being long enough to capture a complete
+/// calibration sentence.
+const CALIB_WINDOW_SAMPLES: usize = 16_000 * 8;
+
+/// Collect audio frames, transcribe in fixed 8-second windows using VAD
+/// to determine speech boundaries, and return the joined transcript.
+///
+/// Uses VAD for speech detection but enforces a maximum window size so
+/// Whisper.cpp never receives a 30-second monolithic chunk (which its
+/// internal "single timestamp ending" heuristic discards).
 async fn transcribe_from_frames(
     whisper: Arc<WhisperEngine>,
     mut frame_rx: mpsc::Receiver<Vec<f32>>,
@@ -33,15 +46,36 @@ async fn transcribe_from_frames(
     };
     let mut downsampler = Downsampler::new()?;
     let mut chunker = VadChunker::new()?;
+    // Accumulate VAD-emitted speech samples into a window; flush to Whisper
+    // every CALIB_WINDOW_SAMPLES (8 s) so Whisper never sees a 30-second block.
+    let mut window: Vec<f32> = Vec::with_capacity(CALIB_WINDOW_SAMPLES);
     let mut parts: Vec<String> = Vec::new();
+
+    macro_rules! flush_window {
+        () => {
+            if window.len() >= 1_600 {
+                // 100 ms minimum — skip shorter noise bursts.
+                let n = window.len();
+                let samples = std::mem::take(&mut window);
+                let duration_ms = (n as u32) / 16; // 16 samples = 1 ms at 16 kHz
+                let chunk = VadChunk { samples, source, duration_ms };
+                if let Ok(Some(r)) = whisper.transcribe_greedy(&chunk) {
+                    let t = r.text.trim().to_owned();
+                    if !t.is_empty() {
+                        parts.push(t);
+                    }
+                }
+            } else {
+                window.clear();
+            }
+        };
+    }
 
     while Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Some(frame) = timeout(remaining, frame_rx.recv())
-            .await
-            .context("calibration timed out waiting for audio")?
-        else {
-            break;
+        let frame = match timeout(remaining, frame_rx.recv()).await {
+            Ok(Some(f)) => f,
+            _ => break,
         };
 
         if frame.len() != FRAME_SAMPLES {
@@ -50,25 +84,24 @@ async fn transcribe_from_frames(
 
         let mut proc = frame;
         if let Some(rnn) = rnnoise.as_mut() {
-            rnn.process_frame(&mut proc)?;
+            let _ = rnn.process_frame(&mut proc);
         }
-        let downsampled = downsampler.process(&proc)?;
+        let Ok(downsampled) = downsampler.process(&proc) else {
+            continue;
+        };
+
         for chunk_frame in downsampled.chunks(160) {
-            if let Some(chunk) = chunker.process_frame(chunk_frame, source) {
-                if let Some(result) = tokio::task::spawn_blocking({
-                    let whisper = Arc::clone(&whisper);
-                    move || whisper.transcribe(&chunk)
-                })
-                .await
-                .context("join calibration whisper task")??
-                {
-                    if !result.text.is_empty() {
-                        parts.push(result.text);
-                    }
+            if let Some(vad_chunk) = chunker.process_frame(chunk_frame, source) {
+                window.extend_from_slice(&vad_chunk.samples);
+                if window.len() >= CALIB_WINDOW_SAMPLES {
+                    flush_window!();
                 }
             }
         }
     }
+
+    // Flush any remaining VAD-buffered audio after timeout.
+    flush_window!();
 
     Ok(parts.join(" "))
 }
