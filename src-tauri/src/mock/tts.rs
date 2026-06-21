@@ -294,14 +294,52 @@ async fn run_espeak(text: &str) -> Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Find `name` in the current `PATH` without spawning a subprocess.
+/// Find a binary by name — checks PATH first, then common Python/conda locations
+/// where `piper` is typically installed via `pip install piper-tts`.
+///
+/// Tauri subprocesses may not inherit a full conda-activated PATH, so we
+/// fall back to well-known locations before giving up.
 #[cfg(target_os = "linux")]
 fn find_in_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path_var| {
+    // 1. Standard PATH search.
+    if let Some(p) = std::env::var_os("PATH").and_then(|path_var| {
         std::env::split_paths(&path_var)
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
-    })
+    }) {
+        return Some(p);
+    }
+
+    // 2. Fallback: common locations where piper-tts installs its script.
+    //    Ordered by likelihood on a typical dev machine.
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let candidates = [
+        // conda base / named env
+        home.join("anaconda3/bin").join(name),
+        home.join("miniconda3/bin").join(name),
+        home.join("miniforge3/bin").join(name),
+        home.join(".conda/envs/base/bin").join(name),
+        // pip --user install
+        home.join(".local/bin").join(name),
+        // system Python pip install
+        PathBuf::from("/usr/local/bin").join(name),
+        PathBuf::from("/usr/bin").join(name),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Find `piper` binary — checks PATH then common conda/pip install locations.
+/// Exposed for use by the calibration module.
+#[cfg(target_os = "linux")]
+pub fn find_piper_bin() -> Option<PathBuf> {
+    find_in_path("piper")
+}
+
+/// Look for any `.onnx` model file in standard Piper model directories.
+/// Exposed for use by the calibration module.
+#[cfg(target_os = "linux")]
+pub fn find_piper_model_path() -> Option<PathBuf> {
+    find_piper_model()
 }
 
 /// Look for any `.onnx` model file in standard Piper model directories.

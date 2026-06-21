@@ -188,19 +188,31 @@ pub async fn transcribe_system_calibration(
     Ok(transcript)
 }
 
-/// Generate speech with espeak-ng, save WAV to a temp file, then play it with
-/// `paplay` which routes through PipeWire to the default sink.
+/// Generate speech for the system audio calibration clip and route it through
+/// PipeWire to the default sink so the monitor source captures it.
 ///
-/// This guarantees the calibration clip reaches the default output device and
-/// is therefore captured by its PipeWire monitor source.
+/// Priority:
+///   1. Piper (neural TTS) — produces natural speech that Whisper transcribes
+///      accurately.  If Piper is available, use it so the WER test reflects
+///      the audio pipeline quality, not TTS quality.
+///   2. espeak-ng → paplay — always available fallback.  WER will be elevated
+///      when using espeak because Whisper mis-recognises robotic phonemes even
+///      on a perfect audio path; a WER warning in this case is expected.
 #[cfg(target_os = "linux")]
 async fn speak_via_pipewire(text: &str) -> Result<()> {
+    // --- Piper path ----------------------------------------------------------
+    // Use the same discovery logic as mock interview TTS so the calibration
+    // voice matches what the user hears during interviews.
+    if let Some(()) = try_speak_piper_via_pipewire(text).await {
+        return Ok(());
+    }
+
+    // --- espeak-ng + paplay fallback -----------------------------------------
     use std::process::Stdio;
     use tokio::process::Command;
 
     let wav_path = std::env::temp_dir().join("flint_calib_tts.wav");
 
-    // espeak-ng --stdout writes a 16-bit PCM WAV; save to temp file first.
     let status = Command::new("espeak-ng")
         .args(["-s", "150", "--stdout", text])
         .stdout(Stdio::from(
@@ -217,7 +229,6 @@ async fn speak_via_pipewire(text: &str) -> Result<()> {
         status.code()
     );
 
-    // paplay routes through PipeWire to the default sink.
     let status = Command::new("paplay")
         .arg(&wav_path)
         .stdout(Stdio::null())
@@ -229,6 +240,53 @@ async fn speak_via_pipewire(text: &str) -> Result<()> {
     anyhow::ensure!(status.success(), "paplay exited with {:?}", status.code());
 
     Ok(())
+}
+
+/// Try to generate speech with Piper and play it via paplay.
+/// Returns `Some(())` on success, `None` if Piper is not installed or fails.
+#[cfg(target_os = "linux")]
+async fn try_speak_piper_via_pipewire(text: &str) -> Option<()> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
+
+    let piper_bin = crate::mock::tts::find_piper_bin()?;
+    let model = crate::mock::tts::find_piper_model_path()?;
+    let wav_path = std::env::temp_dir().join("flint_calib_tts.wav");
+
+    let mut child = Command::new(&piper_bin)
+        .args([
+            "--model",
+            model.to_str()?,
+            "--output_file",
+            wav_path.to_str()?,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes()).await.ok()?;
+    }
+
+    let out = child.wait_with_output().await.ok()?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        tracing::warn!(piper_stderr = %stderr.trim(), "piper failed in calibration TTS");
+        return None;
+    }
+
+    let status = Command::new("paplay")
+        .arg(&wav_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .ok()?;
+
+    if status.success() { Some(()) } else { None }
 }
 
 fn run_mic_thread(
