@@ -12,8 +12,7 @@ use crate::audio::capture::{
     build_resampled_mono_stream, find_system_device, AudioSource, FRAME_SAMPLES,
 };
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
-use crate::audio::vad::{VadChunker, VadChunk};
-use crate::mock::tts;
+use crate::audio::vad::{VadChunk, VadChunker};
 use crate::transcription::engine::WhisperEngine;
 
 const MIC_CALIBRATION_TIMEOUT: Duration = Duration::from_secs(45);
@@ -415,6 +414,8 @@ fn run_mic_thread(
     Ok(())
 }
 
+// Used by the non-Linux cpal-based system loopback path in transcribe_system_calibration.
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn run_system_thread(
     frame_tx: mpsc::Sender<Vec<f32>>,
     ready_tx: tokio::sync::oneshot::Sender<Result<()>>,
