@@ -4,13 +4,13 @@
 use std::collections::HashSet;
 
 const STOP_WORDS: &[&str] = &[
-    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was",
-    "one", "our", "out", "day", "get", "has", "him", "his", "how", "its", "may", "new",
-    "now", "old", "see", "two", "way", "who", "boy", "did", "let", "put", "say", "she",
-    "too", "use", "that", "this", "with", "have", "from", "they", "been", "were", "said",
-    "each", "which", "their", "will", "other", "about", "many", "then", "them", "these",
-    "some", "would", "make", "like", "into", "time", "very", "when", "come", "could",
-    "more", "also", "what", "your", "work", "team", "role", "just", "well", "than",
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had", "her", "was", "one",
+    "our", "out", "day", "get", "has", "him", "his", "how", "its", "may", "new", "now", "old",
+    "see", "two", "way", "who", "boy", "did", "let", "put", "say", "she", "too", "use", "that",
+    "this", "with", "have", "from", "they", "been", "were", "said", "each", "which", "their",
+    "will", "other", "about", "many", "then", "them", "these", "some", "would", "make", "like",
+    "into", "time", "very", "when", "come", "could", "more", "also", "what", "your", "work",
+    "team", "role", "just", "well", "than",
 ];
 
 /// Minimum filtered word Jaccard to flag scripted reading (after stop-word removal).
@@ -24,8 +24,13 @@ const SHORT_ANSWER_MAX_WORDS: usize = 25;
 
 /// Domain tokens present in both company context and the suggested script —
 /// shared vocabulary should not inflate echo overlap scores.
-pub fn collect_shared_vocab_terms(company_context: &str, suggested_answer: &str) -> HashSet<String> {
-    let context_set: HashSet<String> = tokenize_content_words(company_context).into_iter().collect();
+pub fn collect_shared_vocab_terms(
+    company_context: &str,
+    suggested_answer: &str,
+) -> HashSet<String> {
+    let context_set: HashSet<String> = tokenize_content_words(company_context)
+        .into_iter()
+        .collect();
     tokenize_content_words(suggested_answer)
         .into_iter()
         .filter(|t| context_set.contains(t))
@@ -142,7 +147,8 @@ mod tests {
 
     #[test]
     fn shared_iam_vocab_does_not_trigger_echo_cap() {
-        let suggested = "I designed RBAC and ABAC policies for OAuth OIDC federation across enterprise IAM.";
+        let suggested =
+            "I designed RBAC and ABAC policies for OAuth OIDC federation across enterprise IAM.";
         let user = "At my last role I implemented RBAC with OAuth and OIDC for our IAM platform using ABAC rules.";
         let exclude = collect_shared_vocab_terms(
             "Leadership: Client-first. Role: IAM architect, OAuth OIDC MFA.",

@@ -10,8 +10,8 @@
 
 pub mod audio_writer;
 pub mod coach;
-pub mod context;
 pub mod conductor;
+pub mod context;
 pub mod echo;
 pub mod mic_capture;
 pub mod rag;
