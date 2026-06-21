@@ -15,6 +15,8 @@ const EMPTY_FIELD_LABELS: Record<keyof SessionContextFields, string> = {
   roleExpectations: "Role Expectations",
   technicalPrep: "Technical Prep",
   strategyNotes: "Strategy Notes",
+  speakingStyle: "Speaking Style",
+  sessionVocabulary: "Session Vocabulary",
 };
 
 const STORAGE_KEY = "flint_first_run_modal_dismissed";

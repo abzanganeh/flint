@@ -35,8 +35,9 @@ use crate::rag::embedder::Embedder;
 use crate::session::persistence::SessionPersistence;
 use crate::session::shuffle::{session_shuffle_seed, shuffle_strings};
 
-use super::rag::{format_digest_context, query_mock_rag};
 use super::context::format_company_context_for_prompt;
+use super::context::format_speaking_style_for_prompt;
+use super::rag::{format_digest_context, query_mock_rag};
 use super::tts;
 
 // ── Pace & mode ───────────────────────────────────────────────────────────────
@@ -317,6 +318,10 @@ async fn conductor_loop<R: Runtime>(
                 .load_context_fields(session_id)
                 .map(|f| format_company_context_for_prompt(&f))
                 .unwrap_or_default();
+            let speaking_style = persistence
+                .load_context_fields(session_id)
+                .map(|f| format_speaking_style_for_prompt(&f.speaking_style).to_string())
+                .unwrap_or_else(|_| format_speaking_style_for_prompt("polished").to_string());
 
             let suggested_handle = if preferred_hit {
                 let app_clone = app.clone();
@@ -335,6 +340,7 @@ async fn conductor_loop<R: Runtime>(
                 let buffer_clone = Arc::clone(&suggested_buffer);
                 let q = question.clone();
                 let company_context_clone = company_context.clone();
+                let speaking_style_clone = speaking_style.clone();
                 tokio::spawn(async move {
                     run_suggested_answer(
                         app_clone,
@@ -343,6 +349,7 @@ async fn conductor_loop<R: Runtime>(
                         &rag_clone,
                         &digest_clone,
                         &company_context_clone,
+                        &speaking_style_clone,
                         &failover_clone,
                         &prompts_dir_clone,
                         mode,
@@ -560,6 +567,7 @@ async fn run_suggested_answer<R: Runtime>(
     rag_chunks: &[crate::interfaces::vector::ScoredChunk],
     digest: &Digest,
     company_context: &str,
+    speaking_style: &str,
     failover: &Arc<FailoverManager>,
     prompts_dir: &Path,
     mode: MockMode,
@@ -570,6 +578,7 @@ async fn run_suggested_answer<R: Runtime>(
         rag_chunks,
         digest,
         company_context,
+        speaking_style,
         failover.active_provider_name(),
         prompts_dir,
     )?;
@@ -639,6 +648,7 @@ fn build_suggested_prompt(
     rag_chunks: &[crate::interfaces::vector::ScoredChunk],
     digest: &Digest,
     company_context: &str,
+    speaking_style: &str,
     provider: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
@@ -656,6 +666,7 @@ fn build_suggested_prompt(
         .replace("{company}", &digest.company)
         .replace("{digest_context}", &format_digest_context(digest))
         .replace("{company_context}", company_context)
+        .replace("{speaking_style}", speaking_style)
         .replace("{rag_chunks}", &rag_text)
         .replace("{last_n_turns}", "")
         .replace("{question}", question);

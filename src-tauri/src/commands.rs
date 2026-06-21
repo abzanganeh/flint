@@ -41,6 +41,7 @@ use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::stack::{self, PRIMARY_PROVIDERS};
 use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::context::format_company_context_for_prompt;
+use crate::mock::context::format_speaking_style_for_prompt;
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::mock::rag::query_mock_rag;
@@ -1079,7 +1080,13 @@ pub async fn confirm_digest(
     // O(lines).
     let context_blob_opt = state.persistence.get_session_context(sid).ok();
     let context_for_prompt = context_blob_opt.clone().unwrap_or_default();
-    let whisper_prompt = build_whisper_initial_prompt(&digest_rust, &context_for_prompt);
+    let session_vocabulary = state
+        .persistence
+        .load_context_fields(sid)
+        .map(|f| f.session_vocabulary)
+        .unwrap_or_default();
+    let whisper_prompt =
+        build_whisper_initial_prompt(&digest_rust, &context_for_prompt, &session_vocabulary);
     if let Err(e) = state
         .persistence
         .save_whisper_initial_prompt(sid, &whisper_prompt)
@@ -1708,7 +1715,12 @@ async fn resolve_whisper_initial_prompt(state: &AppState, session_id: Uuid) -> A
             .persistence
             .get_session_context(session_id)
             .unwrap_or_default();
-        return build_whisper_initial_prompt(&digest, &context).into();
+        let session_vocabulary = state
+            .persistence
+            .load_context_fields(session_id)
+            .map(|f| f.session_vocabulary)
+            .unwrap_or_default();
+        return build_whisper_initial_prompt(&digest, &context, &session_vocabulary).into();
     }
     FALLBACK_WHISPER_INITIAL_PROMPT.into()
 }
@@ -4316,6 +4328,10 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .load_context_fields(session_id)
         .map(|f| format_company_context_for_prompt(&f))
         .unwrap_or_default();
+    let speaking_style = persistence
+        .load_context_fields(session_id)
+        .map(|f| format_speaking_style_for_prompt(&f.speaking_style).to_string())
+        .unwrap_or_else(|_| format_speaking_style_for_prompt("polished").to_string());
     let prompts = prompts_base_dir();
 
     let (coach_json, score) = match run_coach(
@@ -4327,6 +4343,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         suggested_answer.clone(),
         rag_chunks,
         &company_context,
+        &speaking_style,
         mock_mode,
         failover,
         &prompts,
@@ -4526,6 +4543,11 @@ pub async fn regrade_mock_turn(
         .load_context_fields(session_id)
         .map(|f| format_company_context_for_prompt(&f))
         .unwrap_or_default();
+    let speaking_style = state
+        .persistence
+        .load_context_fields(session_id)
+        .map(|f| format_speaking_style_for_prompt(&f.speaking_style).to_string())
+        .unwrap_or_else(|_| format_speaking_style_for_prompt("polished").to_string());
 
     let (coach_json, score) = match run_coach(
         app.clone(),
@@ -4536,6 +4558,7 @@ pub async fn regrade_mock_turn(
         suggested_answer,
         rag_chunks,
         &company_context,
+        &speaking_style,
         mock_mode,
         failover,
         &prompts_base_dir(),

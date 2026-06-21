@@ -50,6 +50,18 @@ const FIELD_SPECS: FieldSpec[] = [
     searchGuide: "Add your personal talking points, stories, or preparation notes",
     required: false,
   },
+  {
+    key: "speakingStyle",
+    label: "Speaking Style",
+    searchGuide: "Choose natural vs polished voice for mock coach feedback",
+    required: false,
+  },
+  {
+    key: "sessionVocabulary",
+    label: "Session Vocabulary",
+    searchGuide: "Add domain acronyms (RBAC, OIDC) to improve speech recognition",
+    required: false,
+  },
 ];
 
 interface PrepChecklistProps {

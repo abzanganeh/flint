@@ -21,10 +21,9 @@ use crate::interfaces::vector::ScoredChunk;
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 use crate::mock::conductor::MockMode;
+use crate::mock::echo::{collect_shared_vocab_terms, should_cap_echo_score};
 use crate::orchestrator::load_prompt;
 
-/// Minimum word overlap (Jaccard) with the suggested script to flag echo reading.
-const SUGGESTED_ECHO_THRESHOLD: f32 = 0.55;
 /// Score cap when the user reads the suggested answer in practice mode.
 const ECHO_SCORE_CAP: u8 = 45;
 /// Minimum spoken words for a scored answer in practice mode.
@@ -45,6 +44,14 @@ pub struct ToneAssessment {
     pub suggestion: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CoachAxes {
+    pub content: u8,
+    pub specificity: u8,
+    pub company_alignment: u8,
+    pub delivery: u8,
+}
+
 /// Structured coaching output that the frontend renders in the Coach panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoachFeedback {
@@ -53,6 +60,9 @@ pub struct CoachFeedback {
     pub context_gaps: Vec<String>,
     pub corrected_answer: String,
     pub score: u8,
+    /// Multi-axis rubric — optional for backward compat with persisted turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axes: Option<CoachAxes>,
 }
 
 impl Default for CoachFeedback {
@@ -66,6 +76,7 @@ impl Default for CoachFeedback {
             context_gaps: vec![],
             corrected_answer: String::new(),
             score: 0,
+            axes: None,
         }
     }
 }
@@ -84,6 +95,7 @@ pub async fn run_coach<R: Runtime>(
     suggested_answer: String,
     rag_chunks: Vec<ScoredChunk>,
     company_context: &str,
+    speaking_style: &str,
     mode: MockMode,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
@@ -94,6 +106,7 @@ pub async fn run_coach<R: Runtime>(
         &suggested_answer,
         &rag_chunks,
         company_context,
+        speaking_style,
         mode,
         failover.active_provider_name(),
         prompts_dir,
@@ -126,7 +139,14 @@ pub async fn run_coach<R: Runtime>(
     }
 
     let (mut feedback, mut json) = parse_coach_json(&raw);
-    apply_coach_guardrails(&mut feedback, &user_answer, &suggested_answer, mode);
+    normalize_feedback(&mut feedback);
+    apply_coach_guardrails(
+        &mut feedback,
+        &user_answer,
+        &suggested_answer,
+        company_context,
+        mode,
+    );
     let score = feedback.score;
     json = serde_json::to_string(&feedback).unwrap_or(json);
 
@@ -158,6 +178,7 @@ fn build_coach_prompt(
     suggested_answer: &str,
     rag_chunks: &[ScoredChunk],
     company_context: &str,
+    speaking_style: &str,
     mode: MockMode,
     provider: &str,
     prompts_dir: &Path,
@@ -179,8 +200,28 @@ fn build_coach_prompt(
         .replace("{user_answer}", user_answer)
         .replace("{suggested_answer}", suggested_answer)
         .replace("{rag_chunks}", &rag_text)
-        .replace("{company_context}", company_context);
+        .replace("{company_context}", company_context)
+        .replace("{speaking_style}", speaking_style);
     Ok(prompt)
+}
+
+/// Backfill rubric axes for legacy coach JSON and clamp values.
+fn normalize_feedback(feedback: &mut CoachFeedback) {
+    if feedback.axes.is_none() {
+        feedback.axes = Some(CoachAxes {
+            content: feedback.score,
+            specificity: feedback.score,
+            company_alignment: feedback.score,
+            delivery: feedback.score,
+        });
+    }
+    if let Some(axes) = &mut feedback.axes {
+        axes.content = axes.content.min(100);
+        axes.specificity = axes.specificity.min(100);
+        axes.company_alignment = axes.company_alignment.min(100);
+        axes.delivery = axes.delivery.min(100);
+    }
+    feedback.score = feedback.score.min(100);
 }
 
 /// Enforce deterministic scoring rules the LLM may ignore.
@@ -188,12 +229,16 @@ fn apply_coach_guardrails(
     feedback: &mut CoachFeedback,
     user_answer: &str,
     suggested_answer: &str,
+    company_context: &str,
     mode: MockMode,
 ) {
     let word_count = count_words(user_answer);
 
     if word_count < MIN_ANSWER_WORDS {
         feedback.score = 0;
+        if let Some(axes) = &mut feedback.axes {
+            *axes = CoachAxes::default();
+        }
         if !feedback
             .context_gaps
             .iter()
@@ -206,10 +251,13 @@ fn apply_coach_guardrails(
         return;
     }
 
-    if mode == MockMode::Practice {
-        let overlap = word_jaccard(user_answer, suggested_answer);
-        if overlap >= SUGGESTED_ECHO_THRESHOLD {
+    if mode == MockMode::Practice && !suggested_answer.trim().is_empty() {
+        let exclude = collect_shared_vocab_terms(company_context, suggested_answer);
+        if should_cap_echo_score(user_answer, suggested_answer, &exclude) {
             feedback.score = feedback.score.min(ECHO_SCORE_CAP);
+            if let Some(axes) = &mut feedback.axes {
+                axes.delivery = axes.delivery.min(ECHO_SCORE_CAP);
+            }
             let msg = "You read the suggested answer — practice in your own words.";
             if !feedback.context_gaps.iter().any(|g| g == msg) {
                 feedback.context_gaps.insert(0, msg.to_string());
@@ -220,31 +268,6 @@ fn apply_coach_guardrails(
 
 fn count_words(text: &str) -> usize {
     text.split_whitespace().filter(|w| !w.is_empty()).count()
-}
-
-fn tokenize_words(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 2)
-        .map(str::to_string)
-        .collect()
-}
-
-fn word_jaccard(a: &str, b: &str) -> f32 {
-    let ta = tokenize_words(a);
-    let tb = tokenize_words(b);
-    if ta.is_empty() || tb.is_empty() {
-        return 0.0;
-    }
-    let set_a: std::collections::HashSet<_> = ta.iter().collect();
-    let set_b: std::collections::HashSet<_> = tb.iter().collect();
-    let inter = set_a.intersection(&set_b).count() as f32;
-    let union = set_a.union(&set_b).count() as f32;
-    if union <= f32::EPSILON {
-        0.0
-    } else {
-        inter / union
-    }
 }
 
 // ── JSON parser ───────────────────────────────────────────────────────────────
@@ -465,6 +488,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_valid_coach_json_with_axes() {
+        let raw = r#"{
+          "grammar_issues": [],
+          "tone": { "assessment": "good", "suggestion": "" },
+          "context_gaps": [],
+          "corrected_answer": "I led the migration.",
+          "score": 82,
+          "axes": { "content": 85, "specificity": 80, "company_alignment": 75, "delivery": 78 }
+        }"#;
+        let (fb, _) = parse_coach_json(raw);
+        assert_eq!(fb.score, 82);
+        let axes = fb.axes.expect("axes");
+        assert_eq!(axes.content, 85);
+        assert_eq!(axes.company_alignment, 75);
+    }
+
+    #[test]
     fn parse_valid_coach_json() {
         let raw = r#"
         Some preamble the model forgot to omit.
@@ -516,6 +556,7 @@ mod tests {
             &mut fb,
             "um",
             "full suggested script here",
+            "",
             MockMode::Practice,
         );
         assert_eq!(fb.score, 0);
@@ -528,7 +569,7 @@ mod tests {
             score: 85,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, script, script, MockMode::Practice);
+        apply_coach_guardrails(&mut fb, script, script, "", MockMode::Practice);
         assert_eq!(fb.score, ECHO_SCORE_CAP);
         assert!(fb
             .context_gaps
@@ -543,7 +584,7 @@ mod tests {
             score: 85,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, script, script, MockMode::Study);
+        apply_coach_guardrails(&mut fb, script, script, "", MockMode::Study);
         assert_eq!(fb.score, 85);
     }
 }

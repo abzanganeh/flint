@@ -21,6 +21,20 @@ pub fn format_company_context_for_prompt(fields: &SessionContextFields) -> Strin
     }
 }
 
+/// Human-readable coaching instruction from the user's speaking-style preference.
+pub fn format_speaking_style_for_prompt(style: &str) -> &'static str {
+    match style.trim().to_ascii_lowercase().as_str() {
+        "natural" => {
+            "Natural voice — conversational and authentic. Coach for clarity and structure, \
+             not corporate polish. Minor filler is OK if the substance is strong."
+        }
+        _ => {
+            "Polished professional voice — confident, structured, concise. \
+             Flag vague hedging and reward crisp specificity."
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,5 +58,12 @@ mod tests {
     fn format_company_context_fallback_when_empty() {
         let text = format_company_context_for_prompt(&SessionContextFields::default());
         assert!(text.contains("No company-specific context"));
+    }
+
+    #[test]
+    fn speaking_style_natural_vs_polished() {
+        assert!(format_speaking_style_for_prompt("natural").contains("Natural"));
+        assert!(format_speaking_style_for_prompt("polished").contains("Polished"));
+        assert!(format_speaking_style_for_prompt("").contains("Polished"));
     }
 }

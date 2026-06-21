@@ -258,6 +258,10 @@ export interface SessionContextFields {
   roleExpectations: string;
   technicalPrep: string;
   strategyNotes: string;
+  /** `natural` | `polished` — how mock coach judges delivery. */
+  speakingStyle: string;
+  /** Comma-separated domain terms for Whisper (e.g. RBAC, OIDC). */
+  sessionVocabulary: string;
 }
 
 export interface SessionSnapshotDto {
@@ -740,12 +744,20 @@ export interface GrammarIssue {
   why: string;
 }
 
+export interface CoachAxes {
+  content: number;
+  specificity: number;
+  company_alignment: number;
+  delivery: number;
+}
+
 export interface CoachFeedback {
   grammar_issues: GrammarIssue[];
   tone: { assessment: string; suggestion: string };
   context_gaps: string[];
   corrected_answer: string;
   score: number;
+  axes?: CoachAxes;
 }
 
 export type { MockStudyMode } from "../events";

@@ -124,6 +124,15 @@ pub struct SessionContextFieldsDto {
     pub technical_prep: String,
     #[serde(default)]
     pub strategy_notes: String,
+    /// `natural` | `polished`
+    #[serde(default = "default_speaking_style")]
+    pub speaking_style: String,
+    #[serde(default)]
+    pub session_vocabulary: String,
+}
+
+fn default_speaking_style() -> String {
+    "polished".to_string()
 }
 
 impl From<SessionContextFields> for SessionContextFieldsDto {
@@ -136,6 +145,8 @@ impl From<SessionContextFields> for SessionContextFieldsDto {
             role_expectations: f.role_expectations,
             technical_prep: f.technical_prep,
             strategy_notes: f.strategy_notes,
+            speaking_style: f.speaking_style,
+            session_vocabulary: f.session_vocabulary,
         }
     }
 }
@@ -150,6 +161,12 @@ impl From<SessionContextFieldsDto> for SessionContextFields {
             role_expectations: d.role_expectations,
             technical_prep: d.technical_prep,
             strategy_notes: d.strategy_notes,
+            speaking_style: if d.speaking_style.trim().is_empty() {
+                "polished".to_string()
+            } else {
+                d.speaking_style
+            },
+            session_vocabulary: d.session_vocabulary,
         }
     }
 }

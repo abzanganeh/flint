@@ -56,6 +56,8 @@ const emptyFields: SessionContextFields = {
   roleExpectations: "",
   technicalPrep: "",
   strategyNotes: "",
+  speakingStyle: "polished",
+  sessionVocabulary: "",
 };
 
 const Rehearsal = ({
