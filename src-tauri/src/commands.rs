@@ -40,6 +40,7 @@ use crate::llm::ollama::OllamaProvider;
 use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::stack::{self, PRIMARY_PROVIDERS};
 use crate::mock::coach::{coach_failure_payload, run_coach};
+use crate::mock::context::format_company_context_for_prompt;
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
 use crate::mock::mic_capture::MicCapture;
 use crate::mock::rag::query_mock_rag;
@@ -4311,6 +4312,10 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
     } else {
         vec![]
     };
+    let company_context = persistence
+        .load_context_fields(session_id)
+        .map(|f| format_company_context_for_prompt(&f))
+        .unwrap_or_default();
     let prompts = prompts_base_dir();
 
     let (coach_json, score) = match run_coach(
@@ -4321,6 +4326,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         transcript.clone(),
         suggested_answer.clone(),
         rag_chunks,
+        &company_context,
         mock_mode,
         failover,
         &prompts,
@@ -4515,6 +4521,12 @@ pub async fn regrade_mock_turn(
         vec![]
     };
 
+    let company_context = state
+        .persistence
+        .load_context_fields(session_id)
+        .map(|f| format_company_context_for_prompt(&f))
+        .unwrap_or_default();
+
     let (coach_json, score) = match run_coach(
         app.clone(),
         session_id,
@@ -4523,6 +4535,7 @@ pub async fn regrade_mock_turn(
         trimmed.clone(),
         suggested_answer,
         rag_chunks,
+        &company_context,
         mock_mode,
         failover,
         &prompts_base_dir(),

@@ -11,6 +11,9 @@ and return structured coaching feedback. Be specific, not generic.
 [Role context: skills, domain, seniority]
 {rag_chunks}
 
+[Target employer — mission, values, leadership principles, role expectations]
+{company_context}
+
 [Task]
 Return ONLY valid JSON — no preamble, no markdown fence, no explanation.
 Use exactly this shape:
@@ -35,6 +38,7 @@ Use exactly this shape:
 Rules:
 - grammar_issues: at most 3. Only flag real errors, not stylistic choices.
 - context_gaps: at most 3. Only flag gaps that matter for this specific question.
+- When company context is provided, check alignment with leadership principles and role expectations; name the principle or expectation when flagging a gap.
 - corrected_answer: must stay in first person and reuse the candidate's actual examples.
-- score: 0–100 reflecting how well the answer addressed the question with specifics.
+- score: 0–100 reflecting how well the answer addressed the question with specifics and employer fit.
 - If the user_answer is empty or very short (under 5 words), return score 0 and note "No answer recorded" in context_gaps.

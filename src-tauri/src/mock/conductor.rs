@@ -36,6 +36,7 @@ use crate::session::persistence::SessionPersistence;
 use crate::session::shuffle::{session_shuffle_seed, shuffle_strings};
 
 use super::rag::{format_digest_context, query_mock_rag};
+use super::context::format_company_context_for_prompt;
 use super::tts;
 
 // ── Pace & mode ───────────────────────────────────────────────────────────────
@@ -312,6 +313,11 @@ async fn conductor_loop<R: Runtime>(
                 "mock question started"
             );
 
+            let company_context = persistence
+                .load_context_fields(session_id)
+                .map(|f| format_company_context_for_prompt(&f))
+                .unwrap_or_default();
+
             let suggested_handle = if preferred_hit {
                 let app_clone = app.clone();
                 let buffer_clone = Arc::clone(&suggested_buffer);
@@ -328,6 +334,7 @@ async fn conductor_loop<R: Runtime>(
                 let digest_clone = Arc::clone(&digest);
                 let buffer_clone = Arc::clone(&suggested_buffer);
                 let q = question.clone();
+                let company_context_clone = company_context.clone();
                 tokio::spawn(async move {
                     run_suggested_answer(
                         app_clone,
@@ -335,6 +342,7 @@ async fn conductor_loop<R: Runtime>(
                         &q,
                         &rag_clone,
                         &digest_clone,
+                        &company_context_clone,
                         &failover_clone,
                         &prompts_dir_clone,
                         mode,
@@ -551,6 +559,7 @@ async fn run_suggested_answer<R: Runtime>(
     question: &str,
     rag_chunks: &[crate::interfaces::vector::ScoredChunk],
     digest: &Digest,
+    company_context: &str,
     failover: &Arc<FailoverManager>,
     prompts_dir: &Path,
     mode: MockMode,
@@ -560,6 +569,7 @@ async fn run_suggested_answer<R: Runtime>(
         question,
         rag_chunks,
         digest,
+        company_context,
         failover.active_provider_name(),
         prompts_dir,
     )?;
@@ -628,6 +638,7 @@ fn build_suggested_prompt(
     question: &str,
     rag_chunks: &[crate::interfaces::vector::ScoredChunk],
     digest: &Digest,
+    company_context: &str,
     provider: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
@@ -644,6 +655,7 @@ fn build_suggested_prompt(
         .replace("{seniority}", &digest.seniority)
         .replace("{company}", &digest.company)
         .replace("{digest_context}", &format_digest_context(digest))
+        .replace("{company_context}", company_context)
         .replace("{rag_chunks}", &rag_text)
         .replace("{last_n_turns}", "")
         .replace("{question}", question);

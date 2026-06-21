@@ -83,6 +83,7 @@ pub async fn run_coach<R: Runtime>(
     user_answer: String,
     suggested_answer: String,
     rag_chunks: Vec<ScoredChunk>,
+    company_context: &str,
     mode: MockMode,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
@@ -92,6 +93,7 @@ pub async fn run_coach<R: Runtime>(
         &user_answer,
         &suggested_answer,
         &rag_chunks,
+        company_context,
         mode,
         failover.active_provider_name(),
         prompts_dir,
@@ -149,11 +151,13 @@ pub async fn run_coach<R: Runtime>(
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn build_coach_prompt(
     question: &str,
     user_answer: &str,
     suggested_answer: &str,
     rag_chunks: &[ScoredChunk],
+    company_context: &str,
     mode: MockMode,
     provider: &str,
     prompts_dir: &Path,
@@ -174,7 +178,8 @@ fn build_coach_prompt(
         .replace("{question}", question)
         .replace("{user_answer}", user_answer)
         .replace("{suggested_answer}", suggested_answer)
-        .replace("{rag_chunks}", &rag_text);
+        .replace("{rag_chunks}", &rag_text)
+        .replace("{company_context}", company_context);
     Ok(prompt)
 }
 
