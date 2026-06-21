@@ -33,6 +33,8 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
   const [error, setError] = useState<string | null>(null);
   const [systemResult, setSystemResult] = useState<CalibrationResultDto | null>(null);
   const [micResult, setMicResult] = useState<CalibrationResultDto | null>(null);
+  // Show paragraph text before user starts mic test so they can read it first.
+  const [micReady, setMicReady] = useState(false);
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -81,11 +83,9 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
     try {
       const result = await runSystemAudioCalibration();
       setSystemResult(result);
-      if (result.passed) {
-        setPhase("mic");
-      } else {
-        setPhase("failed");
-      }
+      // Always move to mic phase — system audio failure is informational only.
+      // The user can still calibrate their mic even if loopback doesn't work.
+      setPhase("mic");
     } catch (e) {
       setError(String(e));
     } finally {
@@ -144,6 +144,8 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
   }
 
   if (phase === "failed") {
+    const systemFailed = systemResult && !systemResult.passed;
+    const micFailed = micResult && !micResult.passed;
     return (
       <section className="mic-calibration mic-calibration-failed" data-testid="mic-calibration-failed">
         <div className="mic-calibration-warning" role="alert">
@@ -152,12 +154,12 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
             Flint cannot guarantee accurate coaching or matching during your interview.
           </p>
         </div>
-        {systemResult && !systemResult.passed && (
+        {systemFailed && (
           <p className="mic-calibration-wer">
             System audio WER: {(systemResult.wer * 100).toFixed(0)}% (threshold 20%)
           </p>
         )}
-        {micResult && !micResult.passed && (
+        {micFailed && (
           <p className="mic-calibration-wer">
             Microphone WER: {(micResult.wer * 100).toFixed(0)}% (threshold 25%)
           </p>
@@ -168,9 +170,17 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
           ))}
         </ul>
         <div className="mic-calibration-actions">
-          <button type="button" onClick={() => setPhase("system")}>
+          <button type="button" onClick={() => { setPhase("system"); setSystemResult(null); setMicResult(null); }}>
             Re-test
           </button>
+          {systemFailed && !micFailed && (
+            <button
+              type="button"
+              onClick={() => { setPhase("mic"); setMicReady(false); }}
+            >
+              Continue to mic test anyway
+            </button>
+          )}
           <button
             type="button"
             data-testid="mic-calibration-continue-anyway"
@@ -210,7 +220,8 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
         <>
           <p>
             Flint will play a short clip through your speakers and capture it via system audio
-            loopback — the same path used in live sessions.
+            loopback — the same path used in live sessions.{" "}
+            <strong>You do not need to speak during this step.</strong>
           </p>
           <details className="mic-calibration-details">
             <summary>How does Flint hear the interviewer?</summary>
@@ -252,15 +263,34 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
         </>
       ) : (
         <>
-          <p>Read this paragraph aloud at a natural pace:</p>
-          <blockquote className="mic-calibration-paragraph">
-            At SecureAuth, I led the design of an adaptive authentication system using ML-based
-            risk scoring. The platform supported OAuth 2.0 and OIDC federation across multi-tenant
-            SaaS customers. I integrated step-up MFA triggers with identity-aware policy
-            enforcement — including Kerberos and LDAP for enterprise directories. My most recent
-            work at IdMe24 focused on agentic AI identity: autonomous agents requiring just-in-time
-            credential provisioning with zero-standing privilege.
-          </blockquote>
+          {!micReady ? (
+            <>
+              <p>Read the following paragraph aloud when you click <strong>Start mic test</strong>. Read it at a normal pace — you have 45 seconds.</p>
+              <blockquote className="mic-calibration-paragraph">
+                At SecureAuth, I led the design of an adaptive authentication system using ML-based
+                risk scoring. The platform supported OAuth 2.0 and OIDC federation across multi-tenant
+                SaaS customers. I integrated step-up MFA triggers with identity-aware policy
+                enforcement — including Kerberos and LDAP for enterprise directories. My most recent
+                work at IdMe24 focused on agentic AI identity: autonomous agents requiring just-in-time
+                credential provisioning with zero-standing privilege.
+              </blockquote>
+              <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
+                Read it once through — Flint will start listening as soon as you click the button below.
+              </p>
+            </>
+          ) : (
+            <>
+              <p style={{ fontWeight: 600 }}>Recording — read the paragraph below now:</p>
+              <blockquote className="mic-calibration-paragraph">
+                At SecureAuth, I led the design of an adaptive authentication system using ML-based
+                risk scoring. The platform supported OAuth 2.0 and OIDC federation across multi-tenant
+                SaaS customers. I integrated step-up MFA triggers with identity-aware policy
+                enforcement — including Kerberos and LDAP for enterprise directories. My most recent
+                work at IdMe24 focused on agentic AI identity: autonomous agents requiring just-in-time
+                credential provisioning with zero-standing privilege.
+              </blockquote>
+            </>
+          )}
         </>
       )}
       {systemResult && (
@@ -274,9 +304,20 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
         <button
           type="button"
           disabled={running}
-          onClick={() => void (isSystem ? runSystemPhase() : runMicPhase())}
+          onClick={() => {
+            if (isSystem) {
+              void runSystemPhase();
+            } else if (!micReady) {
+              setMicReady(true);
+              void runMicPhase();
+            }
+          }}
         >
-          {running ? "Running…" : isSystem ? "Run system audio test" : "Start mic test"}
+          {running
+            ? "Running…"
+            : isSystem
+              ? "Run system audio test"
+              : "Start mic test — I'm ready to read"}
         </button>
         {isSystem && !running && (
           <button

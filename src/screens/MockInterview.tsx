@@ -7,6 +7,7 @@ import {
   endMockTurn,
   regradeMockTurn,
   retryMockTurn,
+  savePreferredAnswer,
   skipMockTurn,
   startMock,
   startMockTurn,
@@ -75,6 +76,11 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const [error, setError] = useState<string | null>(null);
   const [turn, setTurn] = useState<TurnState>(emptyTurn());
   const [recording, setRecording] = useState(false);
+  const [retrying, setRetrying] = useState(false);
+  const [savePreferredState, setSavePreferredState] = useState<
+    "idle" | "saving" | "saved" | "error"
+  >("idle");
+  const [savePreferredError, setSavePreferredError] = useState<string | null>(null);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
   const studyModeRef = useRef<MockStudyMode>(studyMode);
@@ -138,6 +144,8 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             suggestedStreaming: p.mode === "study" || Boolean(p.preferred_hit),
           }));
           setRecording(false);
+          setSavePreferredState("idle");
+          setSavePreferredError(null);
           setPhase("speaking");
         }),
         onMockQuestionSpoken((p) => {
@@ -221,6 +229,17 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     };
   }, [phase, pace, turn.coachLoading, turn.coachFeedback]);
 
+  useEffect(() => {
+    if (phase !== "speaking") return;
+    const timer = setTimeout(() => {
+      setError(
+        "Question speech timed out — click Start Answering if you heard the prompt, or Skip to move on.",
+      );
+      setPhase("question");
+    }, 45_000);
+    return () => clearTimeout(timer);
+  }, [phase, turn.turnN]);
+
   const handleStartSession = async () => {
     setError(null);
     setStarting(true);
@@ -262,21 +281,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
 
   const handleRetry = async () => {
     setError(null);
+    setRetrying(true);
     try {
       await retryMockTurn();
-      setTurn((t) => ({
-        ...t,
-        userTranscript: "",
-        editTranscript: "",
-        coachFeedback: null,
-        coachLoading: false,
-        suggestedText: "",
-        suggestedStreaming: studyMode === "study" || t.preferredHit,
-      }));
-      setRecording(false);
-      setPhase("speaking");
     } catch (e) {
       setError(String(e));
+    } finally {
+      setRetrying(false);
     }
   };
 
@@ -288,6 +299,21 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     } catch (e) {
       setError(String(e));
       setTurn((t) => ({ ...t, coachLoading: false }));
+    }
+  };
+
+  const handleSavePreferred = async () => {
+    const text = turn.editTranscript.trim();
+    if (!text || !turn.question.trim()) return;
+    setSavePreferredState("saving");
+    setSavePreferredError(null);
+    try {
+      await savePreferredAnswer(_sessionId, turn.question, text);
+      setSavePreferredState("saved");
+      setTimeout(() => setSavePreferredState("idle"), 3000);
+    } catch (e) {
+      setSavePreferredState("error");
+      setSavePreferredError(String(e));
     }
   };
 
@@ -823,6 +849,63 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             score={turn.score}
           />
         )}
+
+        {phase === "reviewing" && turn.editTranscript.trim() && (
+          <div
+            style={{
+              background: "#0d1117",
+              border: `1px solid ${savePreferredState === "saved" ? "#22c55e" : "#1e2028"}`,
+              borderRadius: 8,
+              padding: "12px 14px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 8,
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 600, letterSpacing: "0.06em" }}>
+                SAVE FOR LIVE
+              </span>
+              {savePreferredState === "saved" && (
+                <span style={{ color: "#22c55e", fontSize: "11px", fontWeight: 600 }}>
+                  Saved — Flint will serve this in Live
+                </span>
+              )}
+            </div>
+            <p style={{ margin: 0, fontSize: "12px", color: "#64748b", lineHeight: 1.5 }}>
+              Your answer above will be used as your Live script for this question. Edit it first if needed.
+            </p>
+            {savePreferredError && (
+              <p style={{ margin: 0, fontSize: "12px", color: "#fca5a5" }}>{savePreferredError}</p>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                disabled={savePreferredState === "saving" || savePreferredState === "saved"}
+                onClick={() => void handleSavePreferred()}
+                style={{
+                  ...primaryBtn,
+                  background: savePreferredState === "saved" ? "#16a34a" : "#7c3aed",
+                  opacity: savePreferredState === "saving" ? 0.6 : 1,
+                  fontSize: "12px",
+                  padding: "6px 14px",
+                }}
+              >
+                {savePreferredState === "saving"
+                  ? "Saving…"
+                  : savePreferredState === "saved"
+                    ? "Saved for Live"
+                    : "Save as preferred answer"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Footer controls */}
@@ -904,9 +987,10 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
               type="button"
               data-testid="mock-retry-button"
               onClick={() => void handleRetry()}
+              disabled={turn.coachLoading || retrying}
               style={ghostBtn}
             >
-              Try again
+              {retrying ? "Retrying…" : "Try again"}
             </button>
             <button
               type="button"

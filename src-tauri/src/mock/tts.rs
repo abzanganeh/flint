@@ -148,7 +148,11 @@ async fn run_tts_command(text: &str) -> Result<()> {
     run_espeak(text).await
 }
 
-/// Pipe `text` into the piper binary, write a WAV to a temp file, play with aplay.
+/// Pipe `text` into piper, write WAV to a temp file, play with aplay.
+///
+/// stderr is captured and logged at WARN so piper failures are visible
+/// in `tauri dev` output — previously they were silenced and the robotic
+/// espeak-ng fallback gave no indication of why.
 #[cfg(target_os = "linux")]
 async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
     let wav_path = std::env::temp_dir().join("flint_tts.wav");
@@ -162,7 +166,7 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped()) // capture — not null — so we can log failures
         .spawn()
         .context("failed to spawn piper")?;
 
@@ -171,15 +175,15 @@ async fn run_piper(text: &str, piper_bin: &Path, model: &Path) -> Result<()> {
             .write_all(text.as_bytes())
             .await
             .context("write text to piper stdin")?;
-        // Dropping stdin closes the pipe and signals EOF to piper.
+        // Dropping stdin closes the pipe, signals EOF to piper.
     }
 
-    let status = run_tracked(child).await.context("piper wait")?;
-    if !status.success() {
-        bail!("piper exited with {:?}", status.code());
+    let out = child.wait_with_output().await.context("piper wait")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        bail!("piper failed (stderr: {})", stderr.trim());
     }
 
-    // Play the generated WAV — aplay reads the WAV header for sample rate automatically.
     let play = Command::new("aplay")
         .arg(&wav_path)
         .stdin(Stdio::null())
@@ -290,14 +294,52 @@ async fn run_espeak(text: &str) -> Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Find `name` in the current `PATH` without spawning a subprocess.
+/// Find a binary by name — checks PATH first, then common Python/conda locations
+/// where `piper` is typically installed via `pip install piper-tts`.
+///
+/// Tauri subprocesses may not inherit a full conda-activated PATH, so we
+/// fall back to well-known locations before giving up.
 #[cfg(target_os = "linux")]
 fn find_in_path(name: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|path_var| {
+    // 1. Standard PATH search.
+    if let Some(p) = std::env::var_os("PATH").and_then(|path_var| {
         std::env::split_paths(&path_var)
             .map(|dir| dir.join(name))
             .find(|p| p.is_file())
-    })
+    }) {
+        return Some(p);
+    }
+
+    // 2. Fallback: common locations where piper-tts installs its script.
+    //    Ordered by likelihood on a typical dev machine.
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let candidates = [
+        // conda base / named env
+        home.join("anaconda3/bin").join(name),
+        home.join("miniconda3/bin").join(name),
+        home.join("miniforge3/bin").join(name),
+        home.join(".conda/envs/base/bin").join(name),
+        // pip --user install
+        home.join(".local/bin").join(name),
+        // system Python pip install
+        PathBuf::from("/usr/local/bin").join(name),
+        PathBuf::from("/usr/bin").join(name),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+/// Find `piper` binary — checks PATH then common conda/pip install locations.
+/// Exposed for use by the calibration module.
+#[cfg(target_os = "linux")]
+pub fn find_piper_bin() -> Option<PathBuf> {
+    find_in_path("piper")
+}
+
+/// Look for any `.onnx` model file in standard Piper model directories.
+/// Exposed for use by the calibration module.
+#[cfg(target_os = "linux")]
+pub fn find_piper_model_path() -> Option<PathBuf> {
+    find_piper_model()
 }
 
 /// Look for any `.onnx` model file in standard Piper model directories.

@@ -57,6 +57,8 @@ pub struct MockTaskHandles {
     pub suggested_text: Arc<std::sync::RwLock<String>>,
     /// Knowledge packs relevant for this session's role/domain.
     pub role_packs: Vec<PackId>,
+    /// True after the question is spoken until the user advances or retries.
+    pub turn_awaiting_review: Arc<AtomicBool>,
 }
 
 /// Handles for the running audio capture thread and background tasks.

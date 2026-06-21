@@ -133,6 +133,16 @@ impl WhisperEngine {
         self.decode_chunk(chunk, true)
     }
 
+    /// Greedy-only transcription — skips beam search and the single-timestamp
+    /// guard.  Used for calibration where audio windows are pre-sized and
+    /// beam search's timestamp heuristics are unreliable.
+    pub fn transcribe_greedy(&self, chunk: &VadChunk) -> Result<Option<TranscriptionResult>> {
+        if chunk.samples.is_empty() {
+            return Ok(None);
+        }
+        self.decode_chunk(chunk, true)
+    }
+
     fn decode_chunk(&self, chunk: &VadChunk, greedy: bool) -> Result<Option<TranscriptionResult>> {
         let mut state = self
             .model
