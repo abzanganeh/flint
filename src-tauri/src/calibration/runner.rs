@@ -157,6 +157,8 @@ pub async fn transcribe_system_calibration(
     // Non-Linux: existing cpal path.
     #[cfg(not(target_os = "linux"))]
     {
+        use crate::mock::tts;
+
         let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>(512);
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();

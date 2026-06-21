@@ -21,7 +21,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use rubato::{FftFixedOut, Resampler};
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -627,7 +627,7 @@ fn find_shareable_alsa_input(host: &cpal::Host) -> Option<Device> {
         for dev in &devs {
             let name = dev.name().unwrap_or_default().to_lowercase();
             if name == target {
-                info!(
+                tracing::info!(
                     device = %dev.name().unwrap_or_default(),
                     "mock mic: using shareable PipeWire ALSA device"
                 );
@@ -654,7 +654,7 @@ fn find_echo_cancel_device(host: &cpal::Host) -> Option<Device> {
     for dev in devs {
         let name = dev.name().unwrap_or_default().to_lowercase();
         if name.contains("echo") || name.contains("cancel") || name.contains("aec") {
-            info!(device = %dev.name().unwrap_or_default(), "auto-selected PipeWire echo-cancel mic source");
+            tracing::info!(device = %dev.name().unwrap_or_default(), "auto-selected PipeWire echo-cancel mic source");
             return Some(dev);
         }
     }
