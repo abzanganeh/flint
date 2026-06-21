@@ -571,6 +571,78 @@ fn find_mic_device(host: &cpal::Host) -> Result<Device> {
         .ok_or_else(|| anyhow!("No default microphone input device found"))
 }
 
+/// Mic device for mock interview capture on Linux.
+///
+/// Routes ALSA through the PipeWire/Pulse plugin (`pipewire` / `pulse` /
+/// `default`) so the physical USB mic stays available to browser clients
+/// (xdg-desktop-portal) while Flint records between `start_mock_turn` and
+/// `end_mock_turn`. Falls back to [`find_mic_device`] on other platforms or
+/// when no shareable ALSA plugin is listed.
+pub(crate) fn find_mock_mic_device(host: &cpal::Host) -> Result<Device> {
+    #[cfg(target_os = "linux")]
+    {
+        configure_pipewire_default_mic_source();
+        if std::env::var("FLINT_MIC_SOURCE").is_err() {
+            if let Some(dev) = find_shareable_alsa_input(host) {
+                return Ok(dev);
+            }
+        }
+    }
+    find_mic_device(host)
+}
+
+/// Set `PULSE_SOURCE` to PipeWire's default input so ALSA `pulse`/`default`
+/// opens the same source the desktop portal exposes to browsers.
+#[cfg(target_os = "linux")]
+fn configure_pipewire_default_mic_source() {
+    if std::env::var_os("PULSE_SOURCE").is_some() {
+        return;
+    }
+    let Ok(output) = std::process::Command::new("pactl")
+        .args(["get-default-source"])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let source = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if source.is_empty() {
+        return;
+    }
+    std::env::set_var("PULSE_SOURCE", &source);
+    debug!(
+        pulse_source = %source,
+        "configured PipeWire default mic source for shareable ALSA capture"
+    );
+}
+
+/// Prefer ALSA plugin devices that multiplex through PipeWire instead of raw
+/// `hw:` nodes that can block xdg-desktop-portal enumeration.
+#[cfg(target_os = "linux")]
+fn find_shareable_alsa_input(host: &cpal::Host) -> Option<Device> {
+    let devs: Vec<Device> = host.input_devices().ok()?.collect();
+    for target in ["pipewire", "pulse", "default"] {
+        for dev in &devs {
+            let name = dev.name().unwrap_or_default().to_lowercase();
+            if name == target {
+                info!(
+                    device = %dev.name().unwrap_or_default(),
+                    "mock mic: using shareable PipeWire ALSA device"
+                );
+                return Some(dev.clone());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn find_shareable_alsa_input(_host: &cpal::Host) -> Option<Device> {
+    None
+}
+
 /// Scan input devices for a PipeWire echo-cancel virtual source.
 ///
 /// When `setup-pipewire-aec.sh` has run, PipeWire exposes a source named

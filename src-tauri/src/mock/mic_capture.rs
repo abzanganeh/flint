@@ -17,14 +17,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use cpal::traits::{HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use tauri::{AppHandle, Runtime};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::audio::capture::{build_resampled_mono_stream, AudioSource, FRAME_SAMPLES};
+use crate::audio::capture::{
+    build_resampled_mono_stream, find_mock_mic_device, AudioSource, FRAME_SAMPLES,
+};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunk, VadChunker};
 use crate::events::{emit_mock_user_transcribed, MockUserTranscribedPayload};
@@ -191,9 +193,11 @@ fn open_mic_stream(
     reply: oneshot::Sender<Result<()>>,
 ) -> Result<()> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .context("no default input device for mock mic")?;
+    let device = find_mock_mic_device(&host).context("no mock mic input device")?;
+    info!(
+        device = %device.name().unwrap_or_else(|_| "unknown".into()),
+        "mock mic stream opening"
+    );
 
     let stream =
         build_resampled_mono_stream(&device, frame_tx.clone()).context("build mock mic stream")?;
