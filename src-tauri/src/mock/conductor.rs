@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -117,6 +117,7 @@ impl Conductor {
         mode: MockMode,
         shuffle: bool,
         active_turn_n: Arc<AtomicU32>,
+        turn_awaiting_review: Arc<AtomicBool>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConductorCommand>(8);
         tokio::spawn(conductor_loop(
@@ -135,6 +136,7 @@ impl Conductor {
             mode,
             shuffle,
             active_turn_n,
+            turn_awaiting_review,
             cmd_rx,
         ));
         Self { cmd_tx }
@@ -163,6 +165,7 @@ async fn conductor_loop<R: Runtime>(
     mode: MockMode,
     shuffle: bool,
     active_turn_n: Arc<AtomicU32>,
+    turn_awaiting_review: Arc<AtomicBool>,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
     let mut base_questions: Vec<String> = persistence
@@ -242,6 +245,7 @@ async fn conductor_loop<R: Runtime>(
             attempt += 1;
 
             if pace == MockPace::Guided && attempt == 1 {
+                turn_awaiting_review.store(false, Ordering::SeqCst);
                 match wait_for_ask_question(&mut cmd_rx, session_id).await {
                     WaitOutcome::Ask => {}
                     WaitOutcome::FinishEarly => break,
@@ -353,6 +357,7 @@ async fn conductor_loop<R: Runtime>(
                         &app,
                         MockQuestionSpokenPayload { turn_n },
                     );
+                    turn_awaiting_review.store(true, Ordering::SeqCst);
                 } => {}
             }
             if cmd.is_none() {
@@ -365,6 +370,7 @@ async fn conductor_loop<R: Runtime>(
                     user_text,
                     audio_path,
                 }) => {
+                    turn_awaiting_review.store(false, Ordering::SeqCst);
                     turn_complete_user_text = user_text;
                     turn_complete_audio = audio_path;
                     turn_complete_suggested = suggested_text;
@@ -659,5 +665,17 @@ mod tests {
         assert!(!generate_follow_up_validate(""));
         assert!(!generate_follow_up_validate("not a question"));
         assert!(!generate_follow_up_validate(&"x".repeat(201)));
+    }
+
+    #[tokio::test]
+    async fn wait_for_ask_question_accepts_only_ask_question() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let session_id = Uuid::new_v4();
+
+        tx.send(ConductorCommand::RetryTurn).await.unwrap();
+        tx.send(ConductorCommand::AskQuestion).await.unwrap();
+
+        let outcome = wait_for_ask_question(&mut rx, session_id).await;
+        assert!(matches!(outcome, WaitOutcome::Ask));
     }
 }

@@ -2360,10 +2360,10 @@ pub async fn save_preferred_answer(
     {
         let machine = state.state_machine.lock().await;
         match *machine.current() {
-            SessionState::Rehearsing | SessionState::Ready => {}
+            SessionState::Rehearsing | SessionState::Ready | SessionState::MockInterview => {}
             other => {
                 return Err(format!(
-                    "save_preferred_answer is only valid from REHEARSING or READY (current: {other})"
+                    "save_preferred_answer requires REHEARSING, READY, or MOCK_INTERVIEW (current: {other})"
                 ));
             }
         }
@@ -4099,6 +4099,7 @@ pub async fn start_mock(
 
     let active_turn_n = Arc::new(AtomicU32::new(0));
     let mic_recording = Arc::new(AtomicBool::new(false));
+    let turn_awaiting_review = Arc::new(AtomicBool::new(false));
 
     let conductor = Conductor::start(
         app.clone(),
@@ -4116,6 +4117,7 @@ pub async fn start_mock(
         mock_mode,
         shuffle,
         Arc::clone(&active_turn_n),
+        Arc::clone(&turn_awaiting_review),
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -4136,6 +4138,7 @@ pub async fn start_mock(
         mode: mock_mode,
         suggested_text: suggested_buffer,
         role_packs,
+        turn_awaiting_review,
     });
 
     info!(
@@ -4416,6 +4419,12 @@ pub async fn retry_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
     let handles = guard.as_ref().ok_or("no active mock session")?;
     if handles.active_turn_n.load(Ordering::SeqCst) == 0 {
         return Err("No mock question is active.".to_string());
+    }
+    if !handles.turn_awaiting_review.load(Ordering::SeqCst) {
+        return Err(
+            "Cannot retry right now — wait until the question finishes speaking, or click Next question if you already moved on."
+                .to_string(),
+        );
     }
     handles
         .conductor

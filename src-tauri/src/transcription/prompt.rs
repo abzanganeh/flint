@@ -8,6 +8,79 @@ pub const FALLBACK_WHISPER_INITIAL_PROMPT: &str =
 
 const MAX_PROMPT_CHARS: usize = 220;
 
+/// Domain-specific vocabulary injected when the digest domain/role matches a known area.
+///
+/// These short lists give Whisper the right prior for technical speech that phonetically
+/// sounds like common words — e.g. "RBAC" → "our back", "fiduciary" → "feudings".
+const DOMAIN_VOCAB: &[(&str, &[&str])] = &[
+    (
+        "iam",
+        &["RBAC", "ABAC", "SCIM", "SAML", "OAuth", "OIDC", "MFA", "LDAP", "SSO"],
+    ),
+    (
+        "identity",
+        &[
+            "RBAC", "ABAC", "zero-trust", "agentic", "entitlement", "provisioning",
+        ],
+    ),
+    (
+        "security",
+        &[
+            "RBAC", "ABAC", "zero-trust", "posture", "misconfiguration", "SIEM",
+        ],
+    ),
+    (
+        "finance",
+        &[
+            "fiduciary", "suitability", "entitlement", "compliance", "AUM",
+        ],
+    ),
+    (
+        "financial",
+        &[
+            "fiduciary", "suitability", "entitlement", "compliance", "AUM",
+        ],
+    ),
+    (
+        "asset management",
+        &["fiduciary", "suitability", "AUM", "portfolio", "compliance"],
+    ),
+    (
+        "machine learning",
+        &["RAG", "LLM", "embedding", "inference", "fine-tuning", "RLHF"],
+    ),
+    (
+        "ai",
+        &["LLM", "RAG", "agentic", "embedding", "inference", "fine-tuning"],
+    ),
+    (
+        "cloud",
+        &["Kubernetes", "Terraform", "IAM", "VPC", "microservices", "SLA"],
+    ),
+    (
+        "backend",
+        &[
+            "idempotent", "microservices", "gRPC", "Kafka", "Postgres", "Redis",
+        ],
+    ),
+];
+
+/// Return domain vocabulary tokens that match any word in `domain_or_role`.
+fn domain_vocab_tokens(domain_or_role: &str) -> Vec<&'static str> {
+    let haystack = domain_or_role.to_lowercase();
+    let mut out: Vec<&'static str> = Vec::new();
+    for (keyword, tokens) in DOMAIN_VOCAB {
+        if haystack.contains(keyword) {
+            for t in *tokens {
+                if !out.contains(t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Build a session-specific Whisper initial prompt from digest + raw context text.
 pub fn build_whisper_initial_prompt(digest: &Digest, context_text: &str) -> String {
     let role = digest.role.trim();
@@ -32,7 +105,14 @@ pub fn build_whisper_initial_prompt(digest: &Digest, context_text: &str) -> Stri
         }
     }
 
-    let mut tokens: Vec<String> = Vec::new();
+    // Domain vocabulary first — highest-value bias for Whisper.
+    let combined = format!("{domain} {role}");
+    let domain_tokens: Vec<String> = domain_vocab_tokens(&combined)
+        .into_iter()
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut tokens: Vec<String> = domain_tokens;
     for skill in &digest.key_skills {
         let t = skill.trim();
         if !t.is_empty() {
@@ -49,7 +129,7 @@ pub fn build_whisper_initial_prompt(digest: &Digest, context_text: &str) -> Stri
             continue;
         }
         seen.insert(key);
-        if seen.len() > 10 {
+        if seen.len() > 15 {
             break;
         }
         if prompt.len() + 1 + token.len() > MAX_PROMPT_CHARS {
@@ -127,6 +207,35 @@ mod tests {
         assert!(prompt.starts_with("IAM architect interview at Fisher Investments."));
         assert!(prompt.contains("Identity security"));
         assert!(prompt.contains("OAuth"));
+    }
+
+    #[test]
+    fn iam_domain_injects_rbac_abac() {
+        let mut d = sample_digest();
+        d.domain = "IAM and identity security".to_string();
+        let prompt = build_whisper_initial_prompt(&d, "");
+        assert!(prompt.contains("RBAC"), "expected RBAC in prompt: {prompt}");
+        assert!(prompt.contains("ABAC"), "expected ABAC in prompt: {prompt}");
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn finance_domain_injects_fiduciary() {
+        let mut d = sample_digest();
+        d.domain = "Financial services and fiduciary compliance".to_string();
+        let prompt = build_whisper_initial_prompt(&d, "");
+        assert!(prompt.contains("fiduciary"), "expected fiduciary in prompt: {prompt}");
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn identity_security_role_injects_zero_trust_agentic() {
+        let mut d = sample_digest();
+        d.role = "Identity security architect".to_string();
+        d.domain = "Zero-trust IAM".to_string();
+        let prompt = build_whisper_initial_prompt(&d, "");
+        assert!(prompt.contains("zero-trust") || prompt.contains("RBAC"), "prompt: {prompt}");
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
     }
 
     #[test]
