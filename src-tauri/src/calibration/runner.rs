@@ -138,54 +138,163 @@ pub async fn transcribe_mic_calibration(whisper: Arc<WhisperEngine>) -> Result<S
 
 /// Play the system clip via TTS and capture loopback; return transcript.
 ///
-/// On Linux, TTS is forced through PipeWire/PulseAudio (`paplay` or
-/// `espeak-ng --stdout | paplay`) so the audio definitely reaches the
-/// default sink monitor source that the loopback capture is listening to.
-/// If `espeak-ng` writes directly to an ALSA hw: device, the monitor source
-/// never sees the audio and the capture times out.
+/// On Linux, both capture and playback go through PipeWire via subprocess
+/// tools (parecord/paplay) rather than cpal, which cannot reliably open the
+/// monitor source on all PipeWire configurations.  The monitor source name
+/// is derived from the current default sink at call time.
 pub async fn transcribe_system_calibration(
     reference_text: &str,
     whisper: Arc<WhisperEngine>,
 ) -> Result<String> {
-    let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>(512);
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
-    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    #[cfg(target_os = "linux")]
+    {
+        return transcribe_system_calibration_linux(reference_text, whisper).await;
+    }
 
-    std::thread::spawn(move || {
-        if let Err(e) = run_system_thread(frame_tx, ready_tx, stop_rx) {
-            tracing::warn!(error = %e, "calibration system thread failed");
-        }
-    });
+    // Non-Linux: existing cpal path.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>(512);
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
 
-    ready_rx
-        .await
-        .map_err(|_| anyhow::anyhow!("calibration system thread died before ready"))?
-        .context("calibration system stream init")?;
+        std::thread::spawn(move || {
+            if let Err(e) = run_system_thread(frame_tx, ready_tx, stop_rx) {
+                tracing::warn!(error = %e, "calibration system thread failed");
+            }
+        });
 
+        ready_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("calibration system thread died before ready"))?
+            .context("calibration system stream init")?;
+
+        let tts_text = reference_text.to_string();
+        let tts_handle = tokio::spawn(async move { tts::speak(&tts_text).await });
+
+        let transcript = transcribe_from_frames(
+            whisper,
+            frame_rx,
+            AudioSource::System,
+            false,
+            Instant::now() + SYSTEM_CALIBRATION_TIMEOUT,
+        )
+        .await?;
+
+        let _ = tts_handle.await;
+        drop(stop_tx);
+        Ok(transcript)
+    }
+}
+
+/// Linux-only: capture loopback via `parecord` targeting the default sink
+/// monitor, while playing TTS via `paplay`.  Both tools use the PipeWire
+/// PulseAudio compatibility layer and reliably find the monitor source without
+/// requiring any ALSA/PULSE_SOURCE configuration.
+#[cfg(target_os = "linux")]
+async fn transcribe_system_calibration_linux(
+    reference_text: &str,
+    whisper: Arc<WhisperEngine>,
+) -> Result<String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+    use tokio::process::Command;
+
+    // Derive the monitor source name from the current default sink.
+    let default_sink = {
+        let out = Command::new("pactl")
+            .args(["get-default-sink"])
+            .output()
+            .await
+            .context("pactl get-default-sink")?;
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let monitor_source = if default_sink.is_empty() {
+        // PipeWire always has a working echo_cancel_sink monitor if the module is loaded.
+        "echo_cancel_sink.monitor".to_string()
+    } else {
+        format!("{default_sink}.monitor")
+    };
+    tracing::info!(monitor_source, "system calibration: loopback via parecord");
+
+    // Start parecord: raw 16-bit mono 16 kHz from the monitor source.
+    // --fix-format / --fix-rate / --fix-channels are ignored by recent parecord;
+    // set them explicitly via --format/--rate/--channels.
+    let mut recorder = Command::new("parecord")
+        .args([
+            "--device",
+            &monitor_source,
+            "--channels=1",
+            "--rate=16000",
+            "--format=s16le",
+            "--raw",  // write raw PCM to stdout, not a WAV container
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to spawn parecord")?;
+
+    let mut pcm_stream = recorder.stdout.take().context("no parecord stdout")?;
+
+    // Start TTS in parallel — a short delay lets the recorder settle first.
     let tts_text = reference_text.to_string();
     let tts_handle = tokio::spawn(async move {
-        #[cfg(target_os = "linux")]
-        {
-            // Prefer PipeWire-routed playback so the monitor source captures it.
-            if speak_via_pipewire(&tts_text).await.is_ok() {
-                return Ok(());
-            }
-        }
-        tts::speak(&tts_text).await
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        speak_via_pipewire(&tts_text).await
     });
 
-    let transcript = transcribe_from_frames(
-        whisper,
-        frame_rx,
-        AudioSource::System,
-        false,
-        Instant::now() + SYSTEM_CALIBRATION_TIMEOUT,
-    )
-    .await?;
+    // Collect PCM for at most SYSTEM_CALIBRATION_TIMEOUT, then stop.
+    let mut pcm_bytes: Vec<u8> = Vec::with_capacity(16_000 * 2 * 40); // ~40 s headroom
+    let deadline = Instant::now() + SYSTEM_CALIBRATION_TIMEOUT;
 
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match tokio::time::timeout(remaining, pcm_stream.read(&mut buf)).await {
+            Ok(Ok(0)) | Err(_) => break, // EOF or timeout
+            Ok(Ok(n)) => pcm_bytes.extend_from_slice(&buf[..n]),
+            Ok(Err(_)) => break,
+        }
+    }
+
+    // Wait for TTS to finish, then stop the recorder.
     let _ = tts_handle.await;
-    drop(stop_tx);
-    Ok(transcript)
+    let _ = recorder.kill().await;
+
+    if pcm_bytes.is_empty() {
+        anyhow::bail!("loopback capture returned no audio — ensure PipeWire is running and the sink monitor is accessible");
+    }
+
+    // Convert raw S16LE → f32 samples.
+    let samples: Vec<f32> = pcm_bytes
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+        .collect();
+
+    tracing::info!(samples = samples.len(), "system calibration: transcribing loopback PCM");
+
+    // Feed into Whisper in 8-second greedy windows (same ceiling as mic calibration).
+    const WINDOW: usize = 16_000 * 8;
+    let mut parts: Vec<String> = Vec::new();
+    for chunk_samples in samples.chunks(WINDOW) {
+        if chunk_samples.len() < 1_600 {
+            continue;
+        }
+        let duration_ms = (chunk_samples.len() as u32) / 16;
+        let chunk = VadChunk {
+            samples: chunk_samples.to_vec(),
+            source: AudioSource::System,
+            duration_ms,
+        };
+        if let Ok(Some(r)) = whisper.transcribe_greedy(&chunk) {
+            let t = r.text.trim().to_owned();
+            if !t.is_empty() {
+                parts.push(t);
+            }
+        }
+    }
+
+    Ok(parts.join(" "))
 }
 
 /// Generate speech for the system audio calibration clip and route it through
