@@ -10,7 +10,6 @@ import {
   savePreferredAnswer,
   skipMockTurn,
   startMock,
-  startMockTurn,
   stopMock,
   type CoachFeedback,
   type MockStudyMode,
@@ -20,6 +19,7 @@ import {
   onMockEnded,
   onMockQuestionStarted,
   onMockQuestionSpoken,
+  onMockTurnPhase,
   onMockSuggestedToken,
   onMockUserTranscribed,
 } from "../events";
@@ -37,7 +37,15 @@ export interface MockInterviewProps {
 type MockPace = "guided" | "continuous";
 
 /** idle = pick mode; ready = guided, waiting for Ask question; waiting = expecting question event */
-type TurnPhase = "idle" | "ready" | "waiting" | "speaking" | "question" | "answering" | "reviewing";
+type TurnPhase =
+  | "idle"
+  | "ready"
+  | "waiting"
+  | "speaking"
+  | "listening"
+  | "answering"
+  | "paused"
+  | "reviewing";
 
 interface TurnState {
   turnN: number;
@@ -84,7 +92,6 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
   const studyModeRef = useRef<MockStudyMode>(studyMode);
-  const beginAnsweringRef = useRef<(() => Promise<void>) | null>(null);
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryPendingRef = useRef(false);
 
@@ -100,27 +107,6 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     unlisteners.current.forEach((fn) => fn());
     unlisteners.current = [];
   }, []);
-
-  const beginAnswering = useCallback(async () => {
-    setRecording(true);
-    setTurn((t) => ({
-      ...t,
-      userTranscript: "",
-      editTranscript: "",
-      coachFeedback: null,
-      coachLoading: false,
-    }));
-    setPhase("answering");
-    try {
-      await startMockTurn();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    beginAnsweringRef.current = beginAnswering;
-  }, [beginAnswering]);
 
   useEffect(() => {
     // Track whether the cleanup ran before the async setup resolved.
@@ -153,15 +139,25 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           setTurn((t) => (p.turn_n === t.turnN ? t : t));
           if (retryPendingRef.current) {
             retryPendingRef.current = false;
-            setPhase("answering");
-            void beginAnsweringRef.current?.();
+            setPhase("listening");
             return;
           }
-          if (paceRef.current === "continuous") {
+          setPhase("listening");
+        }),
+        onMockTurnPhase((p) => {
+          setTurn((t) => {
+            if (p.turn_n !== t.turnN) return t;
+            return t;
+          });
+          if (p.phase === "answering") {
+            setRecording(true);
             setPhase("answering");
-            void beginAnsweringRef.current?.();
-          } else {
-            setPhase("question");
+          } else if (p.phase === "listening") {
+            setRecording(false);
+            setPhase("listening");
+          } else if (p.phase === "paused") {
+            setRecording(false);
+            setPhase("paused");
           }
         }),
         onMockUserTranscribed((p) => {
@@ -240,9 +236,9 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     if (phase !== "speaking") return;
     const timer = setTimeout(() => {
       setError(
-        "Question speech timed out — click Start Answering if you heard the prompt, or Skip to move on.",
+        "Question speech timed out — speak when ready or Skip to move on.",
       );
-      setPhase("question");
+      setPhase("listening");
     }, 45_000);
     return () => clearTimeout(timer);
   }, [phase, turn.turnN]);
@@ -366,10 +362,18 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     try {
       if (phase === "reviewing") {
         await advanceMockTurn();
-      } else if (phase === "answering" && recording) {
-        setRecording(false);
-        setTurn((t) => ({ ...t, coachLoading: true }));
-        await endMockTurn();
+      } else if (
+        phase === "answering" ||
+        phase === "paused" ||
+        phase === "listening"
+      ) {
+        if (phase === "answering" || phase === "paused") {
+          setRecording(false);
+          setTurn((t) => ({ ...t, coachLoading: true }));
+          await endMockTurn();
+        } else {
+          await skipMockTurn();
+        }
         return;
       }
       await stopMock(true);
@@ -765,7 +769,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
               fontSize: "12px",
             }}
           >
-            {phase === "answering" || phase === "question"
+            {phase === "answering" || phase === "listening" || phase === "paused"
               ? "Answer in your own words — suggested answer unlocks after you finish."
               : turn.coachLoading
                 ? "Analyzing your answer…"
@@ -773,7 +777,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </div>
         )}
 
-        {(phase === "answering" || phase === "reviewing") && (
+        {(phase === "answering" || phase === "paused" || phase === "reviewing") && (
           <div
             style={{
               background: "#111827",
@@ -852,7 +856,14 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   color: turn.userTranscript ? "#e2e8f0" : "#475569",
                 }}
               >
-                {turn.userTranscript || (recording ? "Listening…" : "No answer recorded.")}
+                {turn.userTranscript ||
+                  (phase === "listening"
+                    ? "Waiting for you to speak…"
+                    : phase === "paused"
+                      ? "Paused — speak to continue or tap Done."
+                      : recording
+                        ? "Listening…"
+                        : "No answer recorded.")}
               </p>
             )}
           </div>
@@ -963,28 +974,26 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </>
         )}
 
-        {phase === "question" && (
+        {(phase === "listening" || phase === "answering" || phase === "paused") && (
           <>
+            <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center", flex: 1 }}>
+              {phase === "listening"
+                ? "Listening for your answer…"
+                : phase === "paused"
+                  ? "Paused — speak to continue"
+                  : "Recording your answer…"}
+            </span>
             <button onClick={() => void handleSkip()} style={ghostBtn}>
               Skip
             </button>
-            <button onClick={() => void beginAnswering()} style={primaryBtn}>
-              Start Answering
-            </button>
-          </>
-        )}
-
-        {phase === "answering" && (
-          <>
-            <button onClick={() => void handleSkip()} style={ghostBtn}>
-              Skip
-            </button>
-            <button
-              onClick={() => void handleStopAnswering()}
-              style={{ ...primaryBtn, background: "#ef4444" }}
-            >
-              Done Answering
-            </button>
+            {(phase === "answering" || phase === "paused") && (
+              <button
+                onClick={() => void handleStopAnswering()}
+                style={{ ...primaryBtn, background: "#ef4444" }}
+              >
+                Done
+              </button>
+            )}
           </>
         )}
 
