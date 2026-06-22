@@ -1085,8 +1085,13 @@ pub async fn confirm_digest(
         .load_context_fields(sid)
         .map(|f| f.session_vocabulary)
         .unwrap_or_default();
+    let company_context_for_prompt = state
+        .persistence
+        .load_context_fields(sid)
+        .map(|f| format!("{} {}", f.company_overview, f.leadership_principles))
+        .unwrap_or_default();
     let whisper_prompt =
-        build_whisper_initial_prompt(&digest_rust, &context_for_prompt, &session_vocabulary);
+        build_whisper_initial_prompt(&digest_rust, &context_for_prompt, &session_vocabulary, &company_context_for_prompt);
     if let Err(e) = state
         .persistence
         .save_whisper_initial_prompt(sid, &whisper_prompt)
@@ -1720,7 +1725,12 @@ async fn resolve_whisper_initial_prompt(state: &AppState, session_id: Uuid) -> A
             .load_context_fields(session_id)
             .map(|f| f.session_vocabulary)
             .unwrap_or_default();
-        return build_whisper_initial_prompt(&digest, &context, &session_vocabulary).into();
+        let company_ctx = state
+            .persistence
+            .load_context_fields(session_id)
+            .map(|f| format!("{} {}", f.company_overview, f.leadership_principles))
+            .unwrap_or_default();
+        return build_whisper_initial_prompt(&digest, &context, &session_vocabulary, &company_ctx).into();
     }
     FALLBACK_WHISPER_INITIAL_PROMPT.into()
 }
@@ -4226,7 +4236,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Give the user up to 120 s to finish answering; in practice they stop
     // manually well before that.
-    let (transcript, audio_path) =
+    let (transcript, audio_path, transcript_confidence) =
         crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
             .await
             .map_err(|e| e.to_string())?;
@@ -4344,6 +4354,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         rag_chunks,
         &company_context,
         &speaking_style,
+        transcript_confidence,
         mock_mode,
         failover,
         &prompts,
@@ -4559,6 +4570,7 @@ pub async fn regrade_mock_turn(
         rag_chunks,
         &company_context,
         &speaking_style,
+        None, // regrade reads from persistence — no live STT confidence available
         mock_mode,
         failover,
         &prompts_base_dir(),

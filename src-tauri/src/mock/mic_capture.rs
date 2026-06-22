@@ -43,9 +43,9 @@ pub enum MicCommand {
         turn_n: u32,
         reply: oneshot::Sender<Result<()>>,
     },
-    /// Stop recording, flush audio, return transcript + WAV path via channel.
+    /// Stop recording, flush audio, return transcript + WAV path + STT confidence via channel.
     EndTurn {
-        reply: oneshot::Sender<(String, String)>,
+        reply: oneshot::Sender<(String, String, Option<f32>)>,
     },
     /// Shut down the capture task entirely.
     Shutdown,
@@ -121,8 +121,8 @@ impl MicCapture {
         reply_rx.await.context("StartTurn reply channel closed")?
     }
 
-    /// Stop recording and await the transcript + audio path for the turn.
-    pub async fn end_turn(&self, timeout: Duration) -> Result<(String, String)> {
+    /// Stop recording and await the transcript + audio path + confidence for the turn.
+    pub async fn end_turn(&self, timeout: Duration) -> Result<(String, String, Option<f32>)> {
         let reply_rx = self.send_end_turn().await?;
         await_end_turn_reply(reply_rx, timeout).await
     }
@@ -131,7 +131,7 @@ impl MicCapture {
     /// awaiting it. Callers that hold a session-wide mutex use this to drop
     /// the guard before awaiting the (potentially long) recording shutdown
     /// so concurrent commands (e.g. `stop_mock`) are not blocked.
-    pub async fn send_end_turn(&self) -> Result<oneshot::Receiver<(String, String)>> {
+    pub async fn send_end_turn(&self) -> Result<oneshot::Receiver<(String, String, Option<f32>)>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(MicCommand::EndTurn { reply: reply_tx })
@@ -152,9 +152,9 @@ impl MicCapture {
 /// `MicCapture::end_turn` so callers that need to release a `Mutex` guard
 /// before awaiting can do so via [`MicCapture::send_end_turn`].
 pub async fn await_end_turn_reply(
-    reply_rx: oneshot::Receiver<(String, String)>,
+    reply_rx: oneshot::Receiver<(String, String, Option<f32>)>,
     timeout: Duration,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<f32>)> {
     tokio::time::timeout(timeout, reply_rx)
         .await
         .context("end_turn timeout")?
@@ -283,6 +283,9 @@ async fn capture_loop<R: Runtime>(
     let mut current_turn: Option<u32> = None;
     let mut audio_writer: Option<TurnAudioWriter> = None;
     let mut transcript_buf = String::new();
+    let mut rolling_context = String::new();
+    let mut logprob_sum: f32 = 0.0;
+    let mut logprob_count: u32 = 0;
     let mut stream_open = false;
 
     loop {
@@ -316,6 +319,9 @@ async fn capture_loop<R: Runtime>(
                                     &audio_dir,
                                 ));
                                 transcript_buf.clear();
+                                rolling_context.clear();
+                                logprob_sum = 0.0;
+                                logprob_count = 0;
                                 info!(turn_n, "mock mic: recording started");
                                 let _ = reply.send(Ok(()));
                             }
@@ -335,6 +341,9 @@ async fn capture_loop<R: Runtime>(
                                 Duration::from_millis(300),
                                 &mut audio_writer,
                                 &mut transcript_buf,
+                                &mut rolling_context,
+                                &mut logprob_sum,
+                                &mut logprob_count,
                                 &mut rnnoise,
                                 &mut downsampler,
                                 &mut vad,
@@ -356,6 +365,9 @@ async fn capture_loop<R: Runtime>(
                                 Duration::from_millis(150),
                                 &mut audio_writer,
                                 &mut transcript_buf,
+                                &mut rolling_context,
+                                &mut logprob_sum,
+                                &mut logprob_count,
                                 &mut rnnoise,
                                 &mut downsampler,
                                 &mut vad,
@@ -368,8 +380,16 @@ async fn capture_loop<R: Runtime>(
                             .map(|w| w.finish().unwrap_or_default())
                             .unwrap_or_default();
                         let text = std::mem::take(&mut transcript_buf);
+                        let confidence = if logprob_count > 0 {
+                            Some(logprob_sum / logprob_count as f32)
+                        } else {
+                            None
+                        };
+                        rolling_context.clear();
+                        logprob_sum = 0.0;
+                        logprob_count = 0;
                         current_turn = None;
-                        let _ = reply.send((text, path));
+                        let _ = reply.send((text, path, confidence));
                     }
                     MicCommand::Shutdown => {
                         if stream_open {
@@ -390,6 +410,9 @@ async fn capture_loop<R: Runtime>(
                         turn_n,
                         &mut audio_writer,
                         &mut transcript_buf,
+                        &mut rolling_context,
+                        &mut logprob_sum,
+                        &mut logprob_count,
                         &mut rnnoise,
                         &mut downsampler,
                         &mut vad,
@@ -415,6 +438,9 @@ async fn drain_audio_frames<R: Runtime>(
     max_wait: Duration,
     audio_writer: &mut Option<TurnAudioWriter>,
     transcript_buf: &mut String,
+    rolling_context: &mut String,
+    logprob_sum: &mut f32,
+    logprob_count: &mut u32,
     rnnoise: &mut RNNoiseProcessor,
     downsampler: &mut Downsampler,
     vad: &mut VadChunker,
@@ -430,6 +456,9 @@ async fn drain_audio_frames<R: Runtime>(
                     turn_n,
                     audio_writer,
                     transcript_buf,
+                    rolling_context,
+                    logprob_sum,
+                    logprob_count,
                     rnnoise,
                     downsampler,
                     vad,
@@ -449,6 +478,9 @@ async fn process_audio_frame<R: Runtime>(
     turn_n: u32,
     audio_writer: &mut Option<TurnAudioWriter>,
     transcript_buf: &mut String,
+    rolling_context: &mut String,
+    logprob_sum: &mut f32,
+    logprob_count: &mut u32,
     rnnoise: &mut RNNoiseProcessor,
     downsampler: &mut Downsampler,
     vad: &mut VadChunker,
@@ -477,49 +509,78 @@ async fn process_audio_frame<R: Runtime>(
 
     for chunk_frame in downsampled.chunks(160) {
         if let Some(chunk) = vad.process_frame(chunk_frame, AudioSource::Microphone) {
-            dispatch_chunk(app, whisper, chunk, turn_n, transcript_buf).await;
+            if let Some((text, lp)) =
+                dispatch_chunk(app, whisper, chunk, turn_n, rolling_context).await
+            {
+                if !transcript_buf.is_empty() {
+                    transcript_buf.push(' ');
+                }
+                transcript_buf.push_str(&text);
+                append_rolling_context(rolling_context, &text);
+                *logprob_sum += lp;
+                *logprob_count += 1;
+            }
         }
     }
 }
 
+/// Transcribe one VAD chunk using the rolling-context-aware engine, emit a
+/// `mock_user_transcribed` event, and return the recognised text alongside its
+/// average log-probability so the caller can track STT confidence for the turn.
+///
+/// Returns `None` on silence, engine error, or empty output.
 async fn dispatch_chunk<R: Runtime>(
     app: &AppHandle<R>,
     whisper: &Arc<WhisperEngine>,
     chunk: VadChunk,
     turn_n: u32,
-    buf: &mut String,
-) {
+    rolling_context: &str,
+) -> Option<(String, f32)> {
     let w = Arc::clone(whisper);
-    let result = tokio::task::spawn_blocking(move || w.transcribe(&chunk)).await;
+    let ctx = rolling_context.to_string();
+    let result = tokio::task::spawn_blocking(move || w.transcribe_with_context(&chunk, &ctx)).await;
 
-    let text = match result {
-        Ok(Ok(Some(r))) => r.text,
-        Ok(Ok(None)) => return,
+    let transcription = match result {
+        Ok(Ok(Some(r))) => r,
+        Ok(Ok(None)) => return None,
         Ok(Err(e)) => {
             warn!(error = %e, "mock transcription error");
-            return;
+            return None;
         }
         Err(e) => {
             warn!(error = %e, "mock transcription task panicked");
-            return;
+            return None;
         }
     };
 
-    if text.trim().is_empty() {
-        return;
+    let text = transcription.text.trim().to_string();
+    if text.is_empty() {
+        return None;
     }
 
-    if !buf.is_empty() {
-        buf.push(' ');
-    }
-    buf.push_str(text.trim());
+    let avg_logprob = transcription.avg_logprob.unwrap_or(-0.5);
 
     emit_mock_user_transcribed(
         app,
         MockUserTranscribedPayload {
             turn_n,
-            text: text.trim().to_owned(),
+            text: text.clone(),
             audio_path: String::new(),
         },
     );
+
+    Some((text, avg_logprob))
+}
+
+/// Keep the rolling context to the last 40 words so Whisper's `initial_prompt`
+/// stays well within its token budget.
+fn append_rolling_context(context: &mut String, new_text: &str) {
+    let combined = if context.is_empty() {
+        new_text.to_string()
+    } else {
+        format!("{context} {new_text}")
+    };
+    let words: Vec<&str> = combined.split_whitespace().collect();
+    let keep_from = words.len().saturating_sub(40);
+    *context = words[keep_from..].join(" ");
 }

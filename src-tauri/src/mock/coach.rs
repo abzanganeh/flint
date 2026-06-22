@@ -28,6 +28,10 @@ use crate::orchestrator::load_prompt;
 const ECHO_SCORE_CAP: u8 = 45;
 /// Minimum spoken words for a scored answer in practice mode.
 const MIN_ANSWER_WORDS: usize = 5;
+/// avg_logprob below this threshold indicates STT confidence was too low to
+/// score delivery fairly.  Whisper avg_logprob is typically in [-0.3, -0.6]
+/// for clear speech and < -0.7 for garbled / low-confidence output.
+const STT_LOW_CONFIDENCE_THRESHOLD: f32 = -0.7;
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -96,6 +100,9 @@ pub async fn run_coach<R: Runtime>(
     rag_chunks: Vec<ScoredChunk>,
     company_context: &str,
     speaking_style: &str,
+    // Mean avg_logprob across all Whisper chunks for this turn. `None` when
+    // the transcript came from persistence (regrade) rather than live capture.
+    transcript_confidence: Option<f32>,
     mode: MockMode,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
@@ -107,6 +114,7 @@ pub async fn run_coach<R: Runtime>(
         &rag_chunks,
         company_context,
         speaking_style,
+        transcript_confidence,
         mode,
         failover.active_provider_name(),
         prompts_dir,
@@ -145,6 +153,7 @@ pub async fn run_coach<R: Runtime>(
         &user_answer,
         &suggested_answer,
         company_context,
+        transcript_confidence,
         mode,
     );
     let score = feedback.score;
@@ -179,6 +188,7 @@ fn build_coach_prompt(
     rag_chunks: &[ScoredChunk],
     company_context: &str,
     speaking_style: &str,
+    transcript_confidence: Option<f32>,
     mode: MockMode,
     provider: &str,
     prompts_dir: &Path,
@@ -195,14 +205,34 @@ fn build_coach_prompt(
         .collect::<Vec<_>>()
         .join("\n---\n");
 
+    let confidence_note = build_confidence_note(transcript_confidence);
+
     let prompt = template
         .replace("{question}", question)
         .replace("{user_answer}", user_answer)
         .replace("{suggested_answer}", suggested_answer)
         .replace("{rag_chunks}", &rag_text)
         .replace("{company_context}", company_context)
-        .replace("{speaking_style}", speaking_style);
+        .replace("{speaking_style}", speaking_style)
+        .replace("{transcript_confidence_note}", &confidence_note);
     Ok(prompt)
+}
+
+/// Build a human-readable note about STT reliability for the coach prompt.
+fn build_confidence_note(transcript_confidence: Option<f32>) -> String {
+    match transcript_confidence {
+        Some(lp) if lp < STT_LOW_CONFIDENCE_THRESHOLD => {
+            format!(
+                "WARNING: speech-to-text confidence was low this turn \
+                 (avg_logprob={lp:.2}). The transcript may contain recognition \
+                 errors. Do NOT score delivery lower than 55 and do NOT flag \
+                 too_hesitant unless there is clear evidence of hesitation beyond \
+                 STT artefacts. Omit grammar_issues that look like transcription \
+                 noise (single garbled words, nonsense fragments)."
+            )
+        }
+        _ => String::new(),
+    }
 }
 
 /// Backfill rubric axes for legacy coach JSON and clamp values.
@@ -230,6 +260,7 @@ fn apply_coach_guardrails(
     user_answer: &str,
     suggested_answer: &str,
     company_context: &str,
+    transcript_confidence: Option<f32>,
     mode: MockMode,
 ) {
     let word_count = count_words(user_answer);
@@ -249,6 +280,27 @@ fn apply_coach_guardrails(
                 .insert(0, "No answer recorded".to_string());
         }
         return;
+    }
+
+    // If STT confidence was low, floor delivery at 55 and clear too_hesitant.
+    let stt_low = matches!(transcript_confidence, Some(lp) if lp < STT_LOW_CONFIDENCE_THRESHOLD);
+    if stt_low {
+        if let Some(axes) = &mut feedback.axes {
+            if axes.delivery < 55 {
+                axes.delivery = 55;
+            }
+        }
+        if feedback.score < 55 {
+            feedback.score = 55;
+        }
+        if feedback.tone.assessment == "too_hesitant" {
+            feedback.tone.assessment = "good".to_string();
+            feedback.tone.suggestion = String::new();
+        }
+        let note = "Note: transcription confidence was low — delivery score may not fully reflect actual delivery quality.";
+        if !feedback.context_gaps.iter().any(|g| g.contains("transcription confidence")) {
+            feedback.context_gaps.push(note.to_string());
+        }
     }
 
     if mode == MockMode::Practice && !suggested_answer.trim().is_empty() {
@@ -557,6 +609,7 @@ mod tests {
             "um",
             "full suggested script here",
             "",
+            None,
             MockMode::Practice,
         );
         assert_eq!(fb.score, 0);
@@ -569,7 +622,7 @@ mod tests {
             score: 85,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, script, script, "", MockMode::Practice);
+        apply_coach_guardrails(&mut fb, script, script, "", None, MockMode::Practice);
         assert_eq!(fb.score, ECHO_SCORE_CAP);
         assert!(fb
             .context_gaps
@@ -584,7 +637,32 @@ mod tests {
             score: 85,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, script, script, "", MockMode::Study);
+        apply_coach_guardrails(&mut fb, script, script, "", None, MockMode::Study);
         assert_eq!(fb.score, 85);
+    }
+
+    #[test]
+    fn guardrails_floors_delivery_on_low_stt_confidence() {
+        let answer = "Fisher takes fiduciary responsibility seriously fee only client interests.";
+        let mut fb = CoachFeedback {
+            score: 40,
+            tone: ToneAssessment {
+                assessment: "too_hesitant".to_string(),
+                suggestion: "Slow down.".to_string(),
+            },
+            axes: Some(CoachAxes {
+                content: 40,
+                specificity: 40,
+                company_alignment: 40,
+                delivery: 30,
+            }),
+            ..Default::default()
+        };
+        apply_coach_guardrails(&mut fb, answer, "", "", Some(-0.85), MockMode::Practice);
+        assert!(fb.score >= 55, "score should be floored at 55, got {}", fb.score);
+        assert_ne!(fb.tone.assessment, "too_hesitant");
+        let axes = fb.axes.as_ref().unwrap();
+        assert!(axes.delivery >= 55);
+        assert!(fb.context_gaps.iter().any(|g| g.contains("transcription confidence")));
     }
 }
