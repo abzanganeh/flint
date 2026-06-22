@@ -58,9 +58,7 @@ pub enum MicCommand {
         reply: oneshot::Sender<(String, String, Option<f32>)>,
     },
     /// Discard partial answer and return to listening for the same turn (M12).
-    AbortTurn {
-        reply: oneshot::Sender<Result<()>>,
-    },
+    AbortTurn { reply: oneshot::Sender<Result<()>> },
     /// Shut down the capture task entirely.
     Shutdown,
 }

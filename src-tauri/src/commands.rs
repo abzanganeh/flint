@@ -905,7 +905,10 @@ pub async fn update_session_vocabulary(
         .map_err(|e| e.to_string())?;
 
     if let Ok(Some(digest)) = state.persistence.load_session_digest(sid) {
-        let context = state.persistence.get_session_context(sid).unwrap_or_default();
+        let context = state
+            .persistence
+            .get_session_context(sid)
+            .unwrap_or_default();
         let company_ctx = format!(
             "{} {}",
             fields.company_overview, fields.leadership_principles
@@ -1152,8 +1155,12 @@ pub async fn confirm_digest(
         .load_context_fields(sid)
         .map(|f| format!("{} {}", f.company_overview, f.leadership_principles))
         .unwrap_or_default();
-    let whisper_prompt =
-        build_whisper_initial_prompt(&digest_rust, &context_for_prompt, &session_vocabulary, &company_context_for_prompt);
+    let whisper_prompt = build_whisper_initial_prompt(
+        &digest_rust,
+        &context_for_prompt,
+        &session_vocabulary,
+        &company_context_for_prompt,
+    );
     if let Err(e) = state
         .persistence
         .save_whisper_initial_prompt(sid, &whisper_prompt)
@@ -1792,7 +1799,8 @@ async fn resolve_whisper_initial_prompt(state: &AppState, session_id: Uuid) -> A
             .load_context_fields(session_id)
             .map(|f| format!("{} {}", f.company_overview, f.leadership_principles))
             .unwrap_or_default();
-        return build_whisper_initial_prompt(&digest, &context, &session_vocabulary, &company_ctx).into();
+        return build_whisper_initial_prompt(&digest, &context, &session_vocabulary, &company_ctx)
+            .into();
     }
     FALLBACK_WHISPER_INITIAL_PROMPT.into()
 }

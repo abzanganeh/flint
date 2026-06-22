@@ -307,7 +307,11 @@ fn apply_coach_guardrails(
             feedback.tone.suggestion = String::new();
         }
         let note = "Note: transcription confidence was low — delivery score may not fully reflect actual delivery quality.";
-        if !feedback.context_gaps.iter().any(|g| g.contains("transcription confidence")) {
+        if !feedback
+            .context_gaps
+            .iter()
+            .any(|g| g.contains("transcription confidence"))
+        {
             feedback.context_gaps.push(note.to_string());
         }
     }
@@ -705,11 +709,18 @@ mod tests {
             ..Default::default()
         };
         apply_coach_guardrails(&mut fb, answer, "", "", Some(-0.85), MockMode::Practice);
-        assert!(fb.score >= 55, "score should be floored at 55, got {}", fb.score);
+        assert!(
+            fb.score >= 55,
+            "score should be floored at 55, got {}",
+            fb.score
+        );
         assert_ne!(fb.tone.assessment, "too_hesitant");
         let axes = fb.axes.as_ref().unwrap();
         assert!(axes.delivery >= 55);
-        assert!(fb.context_gaps.iter().any(|g| g.contains("transcription confidence")));
+        assert!(fb
+            .context_gaps
+            .iter()
+            .any(|g| g.contains("transcription confidence")));
     }
 
     #[test]
@@ -722,14 +733,7 @@ mod tests {
             ..Default::default()
         };
         let answer = "A few things stood out about Fisher specifically.";
-        apply_coach_guardrails(
-            &mut fb,
-            answer,
-            answer,
-            "",
-            None,
-            MockMode::Practice,
-        );
+        apply_coach_guardrails(&mut fb, answer, answer, "", None, MockMode::Practice);
         assert!(!fb.tone.suggestion.to_lowercase().contains("fuck"));
     }
 }

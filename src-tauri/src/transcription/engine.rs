@@ -595,7 +595,10 @@ mod tests {
 
     #[test]
     fn build_context_prompt_trims_to_last_40_words() {
-        let many_words = (0..60).map(|i| format!("word{i}")).collect::<Vec<_>>().join(" ");
+        let many_words = (0..60)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let result = build_context_prompt("prompt.", &many_words);
         let tail_part = result.split(" | ").nth(1).unwrap_or("");
         assert!(tail_part.split_whitespace().count() <= 40);
