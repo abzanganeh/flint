@@ -12,6 +12,13 @@ const scoreColor = (score: number): string => {
   return "#ef4444";
 };
 
+const AXIS_LABELS: { key: keyof NonNullable<CoachFeedback["axes"]>; label: string }[] = [
+  { key: "content", label: "Content" },
+  { key: "specificity", label: "Specificity" },
+  { key: "company_alignment", label: "Company fit" },
+  { key: "delivery", label: "Delivery" },
+];
+
 const CoachPanel = ({ feedback, isLoading, score }: Props) => {
   if (isLoading) {
     return (
@@ -31,6 +38,14 @@ const CoachPanel = ({ feedback, isLoading, score }: Props) => {
     );
   }
 
+  const axes = feedback.axes;
+  const showAxes =
+    axes &&
+    (axes.content > 0 ||
+      axes.specificity > 0 ||
+      axes.companyAlignment > 0 ||
+      axes.delivery > 0);
+
   return (
     <div style={containerStyle}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -45,6 +60,45 @@ const CoachPanel = ({ feedback, isLoading, score }: Props) => {
           {score}
         </span>
       </div>
+
+      {showAxes && axes && (
+        <Section label="RUBRIC">
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {AXIS_LABELS.map(({ key, label }) => {
+              const value = axes[key];
+              if (value === 0 && key !== "delivery") return null;
+              return (
+                <div key={key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ ...bodyText, width: 72, flexShrink: 0, fontSize: "11px" }}>
+                    {label}
+                  </span>
+                  <div
+                    style={{
+                      flex: 1,
+                      height: 6,
+                      background: "#1e293b",
+                      borderRadius: 3,
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: `${value}%`,
+                        height: "100%",
+                        background: scoreColor(value),
+                        borderRadius: 3,
+                      }}
+                    />
+                  </div>
+                  <span style={{ ...bodyText, width: 24, textAlign: "right", fontSize: "11px" }}>
+                    {value}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Section>
+      )}
 
       {feedback.tone.suggestion && (
         <Section label="TONE">

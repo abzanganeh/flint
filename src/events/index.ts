@@ -283,6 +283,11 @@ export interface MockQuestionSpokenEventPayload {
   turn_n: number;
 }
 
+export interface MockTurnPhaseEventPayload {
+  turn_n: number;
+  phase: "listening" | "answering" | "paused";
+}
+
 export interface MockUserTranscribedEventPayload {
   turn_n: number;
   text: string;
@@ -317,6 +322,11 @@ export const onMockQuestionSpoken = (
   listen<MockQuestionSpokenEventPayload>("mock_question_spoken", (event) =>
     handler(event.payload),
   );
+
+export const onMockTurnPhase = (
+  handler: (payload: MockTurnPhaseEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockTurnPhaseEventPayload>("mock_turn_phase", (event) => handler(event.payload));
 
 export const onMockUserTranscribed = (
   handler: (payload: MockUserTranscribedEventPayload) => void,

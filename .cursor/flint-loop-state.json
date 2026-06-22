@@ -1,11 +1,15 @@
 {
-  "current_milestone": "m10-live-session-reliability",
-  "milestone_status": "ci_green",
-  "milestone_branch": { "flint": "feature/m10-live-session-reliability" },
-  "current_slice": 10,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9],
-  "loop_stopped": true,
-  "ci_fix_attempts": 1,
-  "open_prs": { "flint": "https://github.com/abzanganeh/flint/pull/22" },
-  "notes": "PR #22 merged to main 2026-06-20. Slice 10 (speaker assignment standard) deferred."
+  "current_milestone": "m11-mock-coach-quality",
+  "milestone_status": "in_progress",
+  "milestone_branch": { "flint": "feature/m11-mock-coach-quality" },
+  "current_slice": 8,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7],
+  "current_task_id": "m11-pr-ci",
+  "loop_stopped": false,
+  "ci_fix_attempts": 0,
+  "max_ci_fix_attempts": 6,
+  "task_attempts": 0,
+  "max_task_attempts": 3,
+  "open_prs": {},
+  "notes": "All 7 slices implemented. PR + CI pending."
 }

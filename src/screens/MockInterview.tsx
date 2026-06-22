@@ -3,6 +3,7 @@ import { type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   advanceMockTurn,
+  abortMockTurn,
   askMockQuestion,
   endMockTurn,
   regradeMockTurn,
@@ -10,7 +11,6 @@ import {
   savePreferredAnswer,
   skipMockTurn,
   startMock,
-  startMockTurn,
   stopMock,
   type CoachFeedback,
   type MockStudyMode,
@@ -20,10 +20,12 @@ import {
   onMockEnded,
   onMockQuestionStarted,
   onMockQuestionSpoken,
+  onMockTurnPhase,
   onMockSuggestedToken,
   onMockUserTranscribed,
 } from "../events";
 import CoachPanel from "../panels/CoachPanel";
+import MockSaveForLiveModal from "../components/MockSaveForLiveModal";
 import MicQualityBadge from "../components/MicQualityBadge";
 import SuggestedAnswerPanel from "../panels/SuggestedAnswerPanel";
 import { readShuffleQuestionsPreference, writeShuffleQuestionsPreference } from "../lib/shufflePreference";
@@ -37,7 +39,15 @@ export interface MockInterviewProps {
 type MockPace = "guided" | "continuous";
 
 /** idle = pick mode; ready = guided, waiting for Ask question; waiting = expecting question event */
-type TurnPhase = "idle" | "ready" | "waiting" | "speaking" | "question" | "answering" | "reviewing";
+type TurnPhase =
+  | "idle"
+  | "ready"
+  | "waiting"
+  | "speaking"
+  | "listening"
+  | "answering"
+  | "paused"
+  | "reviewing";
 
 interface TurnState {
   turnN: number;
@@ -81,11 +91,12 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     "idle" | "saving" | "saved" | "error"
   >("idle");
   const [savePreferredError, setSavePreferredError] = useState<string | null>(null);
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
   const studyModeRef = useRef<MockStudyMode>(studyMode);
-  const beginAnsweringRef = useRef<(() => Promise<void>) | null>(null);
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryPendingRef = useRef(false);
 
   useEffect(() => {
     paceRef.current = pace;
@@ -99,27 +110,6 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     unlisteners.current.forEach((fn) => fn());
     unlisteners.current = [];
   }, []);
-
-  const beginAnswering = useCallback(async () => {
-    setRecording(true);
-    setTurn((t) => ({
-      ...t,
-      userTranscript: "",
-      editTranscript: "",
-      coachFeedback: null,
-      coachLoading: false,
-    }));
-    setPhase("answering");
-    try {
-      await startMockTurn();
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
-
-  useEffect(() => {
-    beginAnsweringRef.current = beginAnswering;
-  }, [beginAnswering]);
 
   useEffect(() => {
     // Track whether the cleanup ran before the async setup resolved.
@@ -150,11 +140,27 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
         }),
         onMockQuestionSpoken((p) => {
           setTurn((t) => (p.turn_n === t.turnN ? t : t));
-          if (paceRef.current === "continuous") {
+          if (retryPendingRef.current) {
+            retryPendingRef.current = false;
+            setPhase("listening");
+            return;
+          }
+          setPhase("listening");
+        }),
+        onMockTurnPhase((p) => {
+          setTurn((t) => {
+            if (p.turn_n !== t.turnN) return t;
+            return t;
+          });
+          if (p.phase === "answering") {
+            setRecording(true);
             setPhase("answering");
-            void beginAnsweringRef.current?.();
-          } else {
-            setPhase("question");
+          } else if (p.phase === "listening") {
+            setRecording(false);
+            setPhase("listening");
+          } else if (p.phase === "paused") {
+            setRecording(false);
+            setPhase("paused");
           }
         }),
         onMockUserTranscribed((p) => {
@@ -233,9 +239,9 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     if (phase !== "speaking") return;
     const timer = setTimeout(() => {
       setError(
-        "Question speech timed out — click Start Answering if you heard the prompt, or Skip to move on.",
+        "Question speech timed out — speak when ready or Skip to move on.",
       );
-      setPhase("question");
+      setPhase("listening");
     }, 45_000);
     return () => clearTimeout(timer);
   }, [phase, turn.turnN]);
@@ -279,12 +285,39 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     }
   };
 
+  const handleMidAnswerRetry = async () => {
+    setError(null);
+    setTurn((t) => ({
+      ...t,
+      userTranscript: "",
+      editTranscript: "",
+      coachFeedback: null,
+      coachLoading: false,
+    }));
+    setRecording(false);
+    setPhase("listening");
+    try {
+      await abortMockTurn();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleRetry = async () => {
+    if (autoAdvanceRef.current) {
+      clearTimeout(autoAdvanceRef.current);
+      autoAdvanceRef.current = null;
+    }
     setError(null);
     setRetrying(true);
+    retryPendingRef.current = true;
+    setRecording(false);
+    setPhase("waiting");
     try {
       await retryMockTurn();
     } catch (e) {
+      retryPendingRef.current = false;
+      setPhase("reviewing");
       setError(String(e));
     } finally {
       setRetrying(false);
@@ -310,11 +343,21 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     try {
       await savePreferredAnswer(_sessionId, turn.question, text);
       setSavePreferredState("saved");
-      setTimeout(() => setSavePreferredState("idle"), 3000);
+      setTimeout(() => {
+        setSavePreferredState("idle");
+        setSaveConfirmOpen(false);
+      }, 1500);
     } catch (e) {
       setSavePreferredState("error");
       setSavePreferredError(String(e));
     }
+  };
+
+  const handleOpenSaveConfirm = () => {
+    if (!turn.editTranscript.trim()) return;
+    setSavePreferredError(null);
+    setSavePreferredState("idle");
+    setSaveConfirmOpen(true);
   };
 
   const handleStopAnswering = async () => {
@@ -350,10 +393,18 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     try {
       if (phase === "reviewing") {
         await advanceMockTurn();
-      } else if (phase === "answering" && recording) {
-        setRecording(false);
-        setTurn((t) => ({ ...t, coachLoading: true }));
-        await endMockTurn();
+      } else if (
+        phase === "answering" ||
+        phase === "paused" ||
+        phase === "listening"
+      ) {
+        if (phase === "answering" || phase === "paused") {
+          setRecording(false);
+          setTurn((t) => ({ ...t, coachLoading: true }));
+          await endMockTurn();
+        } else {
+          await skipMockTurn();
+        }
         return;
       }
       await stopMock(true);
@@ -749,7 +800,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
               fontSize: "12px",
             }}
           >
-            {phase === "answering" || phase === "question"
+            {phase === "answering" || phase === "listening" || phase === "paused"
               ? "Answer in your own words — suggested answer unlocks after you finish."
               : turn.coachLoading
                 ? "Analyzing your answer…"
@@ -757,7 +808,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </div>
         )}
 
-        {(phase === "answering" || phase === "reviewing") && (
+        {(phase === "answering" || phase === "paused" || phase === "reviewing") && (
           <div
             style={{
               background: "#111827",
@@ -836,7 +887,14 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   color: turn.userTranscript ? "#e2e8f0" : "#475569",
                 }}
               >
-                {turn.userTranscript || (recording ? "Listening…" : "No answer recorded.")}
+                {turn.userTranscript ||
+                  (phase === "listening"
+                    ? "Waiting for you to speak…"
+                    : phase === "paused"
+                      ? "Paused — speak to continue or tap Done."
+                      : recording
+                        ? "Listening…"
+                        : "No answer recorded.")}
               </p>
             )}
           </div>
@@ -851,62 +909,42 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
         )}
 
         {phase === "reviewing" && turn.editTranscript.trim() && (
-          <div
-            style={{
-              background: "#0d1117",
-              border: `1px solid ${savePreferredState === "saved" ? "#22c55e" : "#1e2028"}`,
-              borderRadius: 8,
-              padding: "12px 14px",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              data-testid="mock-review-save-button"
+              disabled={savePreferredState === "saved"}
+              onClick={() => handleOpenSaveConfirm()}
               style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
+                ...primaryBtn,
+                background: savePreferredState === "saved" ? "#16a34a" : "#7c3aed",
+                fontSize: "12px",
+                padding: "8px 16px",
               }}
             >
-              <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 600, letterSpacing: "0.06em" }}>
-                SAVE FOR LIVE
-              </span>
-              {savePreferredState === "saved" && (
-                <span style={{ color: "#22c55e", fontSize: "11px", fontWeight: 600 }}>
-                  Saved — Flint will serve this in Live
-                </span>
-              )}
-            </div>
-            <p style={{ margin: 0, fontSize: "12px", color: "#64748b", lineHeight: 1.5 }}>
-              Your answer above will be used as your Live script for this question. Edit it first if needed.
-            </p>
-            {savePreferredError && (
-              <p style={{ margin: 0, fontSize: "12px", color: "#fca5a5" }}>{savePreferredError}</p>
-            )}
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                disabled={savePreferredState === "saving" || savePreferredState === "saved"}
-                onClick={() => void handleSavePreferred()}
-                style={{
-                  ...primaryBtn,
-                  background: savePreferredState === "saved" ? "#16a34a" : "#7c3aed",
-                  opacity: savePreferredState === "saving" ? 0.6 : 1,
-                  fontSize: "12px",
-                  padding: "6px 14px",
-                }}
-              >
-                {savePreferredState === "saving"
-                  ? "Saving…"
-                  : savePreferredState === "saved"
-                    ? "Saved for Live"
-                    : "Save as preferred answer"}
-              </button>
-            </div>
+              {savePreferredState === "saved"
+                ? "Saved for Live"
+                : "Review & save for Live"}
+            </button>
           </div>
         )}
       </div>
+
+      <MockSaveForLiveModal
+        open={saveConfirmOpen}
+        previewText={turn.editTranscript.trim()}
+        saving={savePreferredState === "saving"}
+        saved={savePreferredState === "saved"}
+        error={savePreferredError}
+        onCancel={() => {
+          if (savePreferredState !== "saving") {
+            setSaveConfirmOpen(false);
+            setSavePreferredError(null);
+            setSavePreferredState("idle");
+          }
+        }}
+        onConfirm={() => void handleSavePreferred()}
+      />
 
       {/* Footer controls */}
       <div
@@ -947,28 +985,36 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           </>
         )}
 
-        {phase === "question" && (
+        {(phase === "listening" || phase === "answering" || phase === "paused") && (
           <>
+            <span style={{ color: "#52525b", fontSize: "12px", alignSelf: "center", flex: 1 }}>
+              {phase === "listening"
+                ? "Listening for your answer…"
+                : phase === "paused"
+                  ? "Paused — speak to continue"
+                  : "Recording your answer…"}
+            </span>
+            {(phase === "answering" || phase === "paused") && (
+              <button
+                type="button"
+                data-testid="mock-mid-retry-button"
+                onClick={() => void handleMidAnswerRetry()}
+                style={ghostBtn}
+              >
+                Retry
+              </button>
+            )}
             <button onClick={() => void handleSkip()} style={ghostBtn}>
               Skip
             </button>
-            <button onClick={() => void beginAnswering()} style={primaryBtn}>
-              Start Answering
-            </button>
-          </>
-        )}
-
-        {phase === "answering" && (
-          <>
-            <button onClick={() => void handleSkip()} style={ghostBtn}>
-              Skip
-            </button>
-            <button
-              onClick={() => void handleStopAnswering()}
-              style={{ ...primaryBtn, background: "#ef4444" }}
-            >
-              Done Answering
-            </button>
+            {(phase === "answering" || phase === "paused") && (
+              <button
+                onClick={() => void handleStopAnswering()}
+                style={{ ...primaryBtn, background: "#ef4444" }}
+              >
+                Done
+              </button>
+            )}
           </>
         )}
 

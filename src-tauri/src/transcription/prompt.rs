@@ -128,7 +128,12 @@ fn domain_vocab_tokens(domain_or_role: &str) -> Vec<&'static str> {
 }
 
 /// Build a session-specific Whisper initial prompt from digest + raw context text.
-pub fn build_whisper_initial_prompt(digest: &Digest, context_text: &str) -> String {
+pub fn build_whisper_initial_prompt(
+    digest: &Digest,
+    context_text: &str,
+    session_vocabulary: &str,
+    company_context: &str,
+) -> String {
     let role = digest.role.trim();
     let company = digest.company.trim();
     let domain = digest.domain.trim();
@@ -165,7 +170,12 @@ pub fn build_whisper_initial_prompt(digest: &Digest, context_text: &str) -> Stri
             tokens.push(t.to_string());
         }
     }
-    tokens.extend(extract_frequent_capitalised_tokens(context_text));
+    // Single-occurrence capitalised tokens from digest context (job title, company, etc.)
+    tokens.extend(extract_frequent_capitalised_tokens(context_text, 1));
+    // Proper nouns from company_context fields (company name, city, values).
+    // These appear only once yet are critical for STT accuracy.
+    tokens.extend(extract_frequent_capitalised_tokens(company_context, 1));
+    tokens.extend(parse_session_vocabulary(session_vocabulary));
 
     let mut seen = std::collections::HashSet::new();
     let prompt_lower = prompt.to_lowercase();
@@ -188,7 +198,16 @@ pub fn build_whisper_initial_prompt(digest: &Digest, context_text: &str) -> Stri
     truncate_prompt(&prompt)
 }
 
-fn extract_frequent_capitalised_tokens(text: &str) -> Vec<String> {
+/// Parse user-supplied session vocabulary (comma, semicolon, or newline separated).
+fn parse_session_vocabulary(raw: &str) -> Vec<String> {
+    raw.split([',', ';', '\n'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty() && s.len() >= 2)
+        .map(str::to_string)
+        .collect()
+}
+
+fn extract_frequent_capitalised_tokens(text: &str, min_count: u32) -> Vec<String> {
     let mut counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
 
     for word in text.split_whitespace() {
@@ -210,7 +229,10 @@ fn extract_frequent_capitalised_tokens(text: &str) -> Vec<String> {
         *counts.entry(cleaned).or_insert(0) += 1;
     }
 
-    let mut frequent: Vec<(String, u32)> = counts.into_iter().filter(|(_, c)| *c >= 2).collect();
+    let mut frequent: Vec<(String, u32)> = counts
+        .into_iter()
+        .filter(|(_, c)| *c >= min_count)
+        .collect();
     frequent.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     frequent.into_iter().map(|(w, _)| w).collect()
 }
@@ -249,7 +271,7 @@ mod tests {
 
     #[test]
     fn digest_produces_role_company_domain_prefix() {
-        let prompt = build_whisper_initial_prompt(&sample_digest(), "");
+        let prompt = build_whisper_initial_prompt(&sample_digest(), "", "", "");
         assert!(prompt.starts_with("IAM architect interview at Fisher Investments."));
         assert!(prompt.contains("Identity security"));
         assert!(prompt.contains("OAuth"));
@@ -259,7 +281,7 @@ mod tests {
     fn iam_domain_injects_rbac_abac() {
         let mut d = sample_digest();
         d.domain = "IAM and identity security".to_string();
-        let prompt = build_whisper_initial_prompt(&d, "");
+        let prompt = build_whisper_initial_prompt(&d, "", "", "");
         assert!(prompt.contains("RBAC"), "expected RBAC in prompt: {prompt}");
         assert!(prompt.contains("ABAC"), "expected ABAC in prompt: {prompt}");
         assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
@@ -269,7 +291,7 @@ mod tests {
     fn finance_domain_injects_fiduciary() {
         let mut d = sample_digest();
         d.domain = "Financial services and fiduciary compliance".to_string();
-        let prompt = build_whisper_initial_prompt(&d, "");
+        let prompt = build_whisper_initial_prompt(&d, "", "", "");
         assert!(
             prompt.contains("fiduciary"),
             "expected fiduciary in prompt: {prompt}"
@@ -282,7 +304,7 @@ mod tests {
         let mut d = sample_digest();
         d.role = "Identity security architect".to_string();
         d.domain = "Zero-trust IAM".to_string();
-        let prompt = build_whisper_initial_prompt(&d, "");
+        let prompt = build_whisper_initial_prompt(&d, "", "", "");
         assert!(
             prompt.contains("zero-trust") || prompt.contains("RBAC"),
             "prompt: {prompt}"
@@ -294,8 +316,34 @@ mod tests {
     fn truncates_at_220_chars() {
         let mut digest = sample_digest();
         digest.key_skills = (0..20).map(|i| format!("TechnologyStack{i}")).collect();
-        let prompt = build_whisper_initial_prompt(&digest, "");
+        let prompt = build_whisper_initial_prompt(&digest, "", "", "");
         assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn session_vocabulary_tokens_injected() {
+        let prompt = build_whisper_initial_prompt(
+            &sample_digest(),
+            "",
+            "Entitlement review, SCIM provisioning, Fisher",
+            "",
+        );
+        assert!(
+            prompt.contains("Entitlement") || prompt.contains("SCIM"),
+            "prompt: {prompt}"
+        );
+        assert!(prompt.chars().count() <= MAX_PROMPT_CHARS);
+    }
+
+    #[test]
+    fn company_context_proper_nouns_injected_into_prompt() {
+        let company_context = "Fisher Investments is headquartered in Camas, Washington. \
+                               Our culture is fiduciary-first and fee-only.";
+        let prompt = build_whisper_initial_prompt(&sample_digest(), "", "", company_context);
+        assert!(
+            prompt.contains("Fisher") || prompt.contains("Camas"),
+            "expected company name/city in prompt: {prompt}"
+        );
     }
 
     #[test]
@@ -310,7 +358,7 @@ mod tests {
             topics_to_avoid: vec![],
         };
         assert_eq!(
-            build_whisper_initial_prompt(&digest, ""),
+            build_whisper_initial_prompt(&digest, "", "", ""),
             FALLBACK_WHISPER_INITIAL_PROMPT
         );
     }

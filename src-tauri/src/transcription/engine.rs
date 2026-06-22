@@ -117,11 +117,27 @@ impl WhisperEngine {
     ///
     /// Discard events log at DEBUG only — transcript text is never logged.
     pub fn transcribe(&self, chunk: &VadChunk) -> Result<Option<TranscriptionResult>> {
+        self.transcribe_with_context(chunk, "")
+    }
+
+    /// Transcribe one VAD chunk with additional rolling-context text appended
+    /// to the session `initial_prompt`.
+    ///
+    /// `rolling_context` should be the last ~40 words of the in-progress
+    /// transcript for this turn.  Whisper uses this as a soft prior so that
+    /// proper nouns established earlier in the answer are more likely to be
+    /// recognised correctly in later chunks.
+    pub fn transcribe_with_context(
+        &self,
+        chunk: &VadChunk,
+        rolling_context: &str,
+    ) -> Result<Option<TranscriptionResult>> {
         if chunk.samples.is_empty() {
             return Ok(None);
         }
 
-        let beam = self.decode_chunk(chunk, false)?;
+        let prompt = build_context_prompt(&self.initial_prompt, rolling_context);
+        let beam = self.decode_chunk_with_prompt(chunk, false, &prompt)?;
         if beam.is_some() {
             return Ok(beam);
         }
@@ -130,7 +146,7 @@ impl WhisperEngine {
             source = ?chunk.source,
             "beam search produced no valid segments — retrying with greedy decode"
         );
-        self.decode_chunk(chunk, true)
+        self.decode_chunk_with_prompt(chunk, true, &prompt)
     }
 
     /// Greedy-only transcription — skips beam search and the single-timestamp
@@ -140,19 +156,24 @@ impl WhisperEngine {
         if chunk.samples.is_empty() {
             return Ok(None);
         }
-        self.decode_chunk(chunk, true)
+        self.decode_chunk_with_prompt(chunk, true, &self.initial_prompt.clone())
     }
 
-    fn decode_chunk(&self, chunk: &VadChunk, greedy: bool) -> Result<Option<TranscriptionResult>> {
+    fn decode_chunk_with_prompt(
+        &self,
+        chunk: &VadChunk,
+        greedy: bool,
+        prompt: &str,
+    ) -> Result<Option<TranscriptionResult>> {
         let mut state = self
             .model
             .create_state()
             .context("Failed to create Whisper state")?;
 
         let mut params = if greedy {
-            build_greedy_params(&self.initial_prompt)
+            build_greedy_params(prompt)
         } else {
-            build_full_params(&self.initial_prompt)
+            build_full_params(prompt)
         };
         params.set_n_threads(thread_count_for_tier(self.tier));
 
@@ -380,6 +401,30 @@ fn is_single_timestamp_ending(state: &whisper_rs::WhisperState) -> bool {
 // Helpers
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Combine the static session `initial_prompt` with the last ≤40 words of the
+/// in-progress transcript so that proper nouns established in earlier chunks
+/// are available as a soft prior for the current chunk.
+///
+/// Total length is capped at 400 characters — well within Whisper's token
+/// budget for `initial_prompt`.
+fn build_context_prompt(session_prompt: &str, rolling_context: &str) -> String {
+    let tail = rolling_context.trim();
+    if tail.is_empty() {
+        return session_prompt.to_string();
+    }
+    // Keep last 40 words of rolling context to avoid prompt bloat.
+    let words: Vec<&str> = tail.split_whitespace().collect();
+    let keep_from = words.len().saturating_sub(40);
+    let tail_trimmed = words[keep_from..].join(" ");
+
+    let combined = format!("{session_prompt} | {tail_trimmed}");
+    if combined.len() <= 400 {
+        combined
+    } else {
+        combined[..400].to_string()
+    }
+}
+
 fn thread_count_for_tier(tier: HardwareTier) -> i32 {
     // On macOS with Core ML enabled, whisper.cpp delegates inference to the
     // ANE/GPU and ignores n_threads. The value set here only affects CPU-bound
@@ -530,5 +575,39 @@ mod tests {
         assert_eq!(centiseconds_to_ms(150), 1500);
         assert_eq!(centiseconds_to_ms(0), 0);
         assert_eq!(centiseconds_to_ms(-5), 0);
+    }
+
+    // ── Rolling context prompt ────────────────────────────────────────────
+
+    #[test]
+    fn build_context_prompt_empty_rolling_returns_session_prompt() {
+        let result = build_context_prompt("IAM interview at Fisher.", "");
+        assert_eq!(result, "IAM interview at Fisher.");
+    }
+
+    #[test]
+    fn build_context_prompt_appends_tail_with_separator() {
+        let result = build_context_prompt("IAM interview.", "fiduciary fee-only");
+        assert!(result.contains("IAM interview."));
+        assert!(result.contains("fiduciary fee-only"));
+        assert!(result.contains(" | "));
+    }
+
+    #[test]
+    fn build_context_prompt_trims_to_last_40_words() {
+        let many_words = (0..60)
+            .map(|i| format!("word{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let result = build_context_prompt("prompt.", &many_words);
+        let tail_part = result.split(" | ").nth(1).unwrap_or("");
+        assert!(tail_part.split_whitespace().count() <= 40);
+    }
+
+    #[test]
+    fn build_context_prompt_caps_at_400_chars() {
+        let long = "a".repeat(350);
+        let result = build_context_prompt(&long, &long);
+        assert!(result.len() <= 400);
     }
 }

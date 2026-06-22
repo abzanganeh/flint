@@ -258,6 +258,10 @@ export interface SessionContextFields {
   roleExpectations: string;
   technicalPrep: string;
   strategyNotes: string;
+  /** `natural` | `polished` — how mock coach judges delivery. */
+  speakingStyle: string;
+  /** Comma-separated domain terms for Whisper (e.g. RBAC, OIDC). */
+  sessionVocabulary: string;
 }
 
 export interface SessionSnapshotDto {
@@ -305,6 +309,13 @@ export const ingestStructuredContext = (
  */
 export const getSessionContextFields = (sessionId: string): Promise<SessionContextFields> =>
   invoke<SessionContextFields>("get_session_context_fields", { sessionId });
+
+/** Save session vocabulary from Rehearsal (no re-ingest). Updates Whisper STT bias. */
+export const updateSessionVocabulary = (
+  sessionId: string,
+  sessionVocabulary: string,
+): Promise<void> =>
+  invoke<void>("update_session_vocabulary", { sessionId, sessionVocabulary });
 
 /** Discard in-progress session setup and return the state machine to IDLE. */
 export const abandonSessionDraft = (): Promise<void> =>
@@ -740,12 +751,20 @@ export interface GrammarIssue {
   why: string;
 }
 
+export interface CoachAxes {
+  content: number;
+  specificity: number;
+  company_alignment: number;
+  delivery: number;
+}
+
 export interface CoachFeedback {
   grammar_issues: GrammarIssue[];
   tone: { assessment: string; suggestion: string };
   context_gaps: string[];
   corrected_answer: string;
   score: number;
+  axes?: CoachAxes;
 }
 
 export type { MockStudyMode } from "../events";
@@ -760,6 +779,8 @@ export const askMockQuestion = (): Promise<void> =>
   invoke<void>("ask_mock_question");
 
 export const startMockTurn = (): Promise<void> => invoke<void>("start_mock_turn");
+
+export const abortMockTurn = (): Promise<void> => invoke<void>("abort_mock_turn");
 
 export const endMockTurn = (): Promise<void> => invoke<void>("end_mock_turn");
 

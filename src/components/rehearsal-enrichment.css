@@ -248,6 +248,100 @@
   color: #6b7280;
   line-height: 1.4;
 }
+.prep-checklist__field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.prep-checklist__item--actionable {
+  border-left-color: #a78bfa;
+}
+.prep-checklist__edit-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  color: #a78bfa;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 2px 8px;
+  text-transform: uppercase;
+}
+.prep-checklist__edit-btn:hover {
+  background: #1e2028;
+  border-color: #a78bfa;
+}
+.prep-checklist__preview {
+  margin: 0;
+  font-size: 11px;
+  color: #9ca3af;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.prep-checklist__inline-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 4px;
+}
+.prep-checklist__textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: #0f1117;
+  border: 1px solid #374151;
+  border-radius: 4px;
+  color: #e5e7eb;
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  resize: vertical;
+}
+.prep-checklist__textarea:focus {
+  border-color: #a78bfa;
+  outline: none;
+}
+.prep-checklist__inline-actions {
+  display: flex;
+  gap: 6px;
+}
+.prep-checklist__save-btn,
+.prep-checklist__cancel-btn {
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+}
+.prep-checklist__save-btn {
+  background: #7c3aed;
+  border: none;
+  color: #fff;
+}
+.prep-checklist__save-btn:hover:not(:disabled) {
+  background: #6d28d9;
+}
+.prep-checklist__save-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.prep-checklist__cancel-btn {
+  background: transparent;
+  border: 1px solid #374151;
+  color: #9ca3af;
+}
+.prep-checklist__cancel-btn:hover:not(:disabled) {
+  border-color: #6b7280;
+  color: #e5e7eb;
+}
+.prep-checklist__error {
+  margin: 0;
+  color: #f87171;
+  font-size: 11px;
+}
 
 /* ── FirstRunRehearsalModal (5.5.5) ────────────────────────────────────── */
 .first-run-modal__backdrop {

@@ -180,6 +180,11 @@ impl VadChunker {
             .unwrap_or(u64::MAX)
     }
 
+    /// True while a speech segment is being collected or ending (not idle silence).
+    pub fn speech_in_progress(&self) -> bool {
+        self.state != State::Idle
+    }
+
     fn push_pre_roll(&mut self, frame: &[f32]) {
         if self.pre_roll.len() >= PRE_POST_PADDING_FRAMES as usize {
             self.pre_roll.pop_front();

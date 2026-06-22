@@ -166,6 +166,10 @@ pub struct SessionContextFields {
     pub role_expectations: String,
     pub technical_prep: String,
     pub strategy_notes: String,
+    /// `natural` | `polished` — how the coach judges delivery tone.
+    pub speaking_style: String,
+    /// Comma- or newline-separated domain terms for Whisper bias (e.g. RBAC, OIDC).
+    pub session_vocabulary: String,
 }
 
 /// Metadata for an in-progress session setup draft (pre-live).
@@ -188,7 +192,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 15;
+const SCHEMA_VERSION: u32 = 16;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -465,6 +469,19 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v15")?;
         info!("sqlite schema migrated to version 15");
+    }
+
+    if current < 16 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN speaking_style TEXT NOT NULL DEFAULT 'polished';
+            ALTER TABLE sessions ADD COLUMN session_vocabulary TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 16;
+            ",
+        )
+        .context("schema migration v16")?;
+        info!("sqlite schema migrated to version 16");
     }
 
     Ok(())
@@ -1335,8 +1352,10 @@ impl SessionPersistence {
                      role_expectations     = ?5,
                      technical_prep        = ?6,
                      strategy_notes        = ?7,
+                     speaking_style        = ?8,
+                     session_vocabulary    = ?9,
                      updated_at            = strftime('%s','now')
-                 WHERE id = ?8",
+                 WHERE id = ?10",
                 rusqlite::params![
                     fields.job_description,
                     fields.profile,
@@ -1345,6 +1364,8 @@ impl SessionPersistence {
                     fields.role_expectations,
                     fields.technical_prep,
                     fields.strategy_notes,
+                    fields.speaking_style,
+                    fields.session_vocabulary,
                     sid,
                 ],
             )
@@ -1364,7 +1385,9 @@ impl SessionPersistence {
     pub fn load_context_fields(&self, session_id: Uuid) -> Result<SessionContextFields> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
-        let (jd, profile, co, lp, re, tp, sn): (
+        let (jd, profile, co, lp, re, tp, sn, ss, sv): (
+            String,
+            String,
             String,
             String,
             String,
@@ -1376,7 +1399,8 @@ impl SessionPersistence {
             .query_row(
                 "SELECT job_description, profile, company_overview,
                         leadership_principles, role_expectations,
-                        technical_prep, strategy_notes
+                        technical_prep, strategy_notes,
+                        speaking_style, session_vocabulary
                  FROM sessions WHERE id = ?1",
                 rusqlite::params![sid],
                 |r| {
@@ -1388,6 +1412,8 @@ impl SessionPersistence {
                         r.get(4)?,
                         r.get(5)?,
                         r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
                     ))
                 },
             )
@@ -1400,6 +1426,12 @@ impl SessionPersistence {
             role_expectations: re,
             technical_prep: tp,
             strategy_notes: sn,
+            speaking_style: if ss.is_empty() {
+                "polished".to_string()
+            } else {
+                ss
+            },
+            session_vocabulary: sv,
         })
     }
 
@@ -2036,10 +2068,13 @@ impl SessionPersistence {
     }
 
     /// Load session row metadata for draft resume / snapshot enrichment.
+    #[allow(clippy::type_complexity)]
     pub fn get_session_metadata(&self, session_id: Uuid) -> Result<DraftSessionMetadata> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         let row: (
+            String,
+            String,
             String,
             String,
             String,
@@ -2057,7 +2092,8 @@ impl SessionPersistence {
                 "SELECT state, name, session_type, domain, context_text,
                         job_description, profile, company_overview,
                         leadership_principles, role_expectations,
-                        technical_prep, strategy_notes
+                        technical_prep, strategy_notes,
+                        speaking_style, session_vocabulary
                  FROM sessions WHERE id = ?1",
                 params![sid],
                 |r| {
@@ -2074,12 +2110,28 @@ impl SessionPersistence {
                         r.get(9)?,
                         r.get(10)?,
                         r.get(11)?,
+                        r.get(12)?,
+                        r.get(13)?,
                     ))
                 },
             )
             .context("get session metadata")?;
-        let (state_str, name, session_type, domain, context_text, jd, profile, co, lp, re, tp, sn) =
-            row;
+        let (
+            state_str,
+            name,
+            session_type,
+            domain,
+            context_text,
+            jd,
+            profile,
+            co,
+            lp,
+            re,
+            tp,
+            sn,
+            ss,
+            sv,
+        ) = row;
         Ok(DraftSessionMetadata {
             session_id,
             state: parse_session_state(&state_str)?,
@@ -2095,6 +2147,12 @@ impl SessionPersistence {
                 role_expectations: re,
                 technical_prep: tp,
                 strategy_notes: sn,
+                speaking_style: if ss.is_empty() {
+                    "polished".to_string()
+                } else {
+                    ss
+                },
+                session_vocabulary: sv,
             },
         })
     }
@@ -3260,6 +3318,8 @@ mod tests {
             role_expectations: "Own the backend.".to_string(),
             technical_prep: "Review distributed systems.".to_string(),
             strategy_notes: "Emphasise ownership.".to_string(),
+            speaking_style: "natural".to_string(),
+            session_vocabulary: "RBAC, OIDC, Kafka".to_string(),
         };
         db.store_context_fields(sid, &fields).unwrap();
         let loaded = db.load_context_fields(sid).unwrap();
@@ -3270,6 +3330,8 @@ mod tests {
         assert_eq!(loaded.role_expectations, fields.role_expectations);
         assert_eq!(loaded.technical_prep, fields.technical_prep);
         assert_eq!(loaded.strategy_notes, fields.strategy_notes);
+        assert_eq!(loaded.speaking_style, "natural");
+        assert_eq!(loaded.session_vocabulary, "RBAC, OIDC, Kafka");
     }
 
     #[test]

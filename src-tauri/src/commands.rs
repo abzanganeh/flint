@@ -41,6 +41,8 @@ use crate::llm::provider::{CompletionConfig, LLMProvider};
 use crate::llm::stack::{self, PRIMARY_PROVIDERS};
 use crate::mock::coach::{coach_failure_payload, run_coach};
 use crate::mock::conductor::{Conductor, ConductorCommand, MockMode, MockPace};
+use crate::mock::context::format_company_context_for_prompt;
+use crate::mock::context::format_speaking_style_for_prompt;
 use crate::mock::mic_capture::MicCapture;
 use crate::mock::rag::query_mock_rag;
 use crate::mock::tts;
@@ -863,6 +865,71 @@ pub async fn get_session_context_fields(
         .map_err(|e| e.to_string())
 }
 
+/// Update session vocabulary from Rehearsal without re-ingesting context.
+///
+/// Rebuilds and persists the Whisper `initial_prompt` when a digest exists.
+/// Valid from: `REHEARSING`, `READY`, `MOCK_INTERVIEW`, `CONFIGURING`, `DIGEST_REVIEW`.
+#[tauri::command]
+pub async fn update_session_vocabulary(
+    state: State<'_, AppState>,
+    session_id: String,
+    session_vocabulary: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        match *machine.current() {
+            SessionState::Rehearsing
+            | SessionState::Ready
+            | SessionState::MockInterview
+            | SessionState::Configuring
+            | SessionState::DigestReview => {}
+            other => {
+                return Err(format!(
+                    "Cannot update session vocabulary from {} state",
+                    other
+                ));
+            }
+        }
+    }
+
+    let mut fields = state
+        .persistence
+        .load_context_fields(sid)
+        .map_err(|e| e.to_string())?;
+    fields.session_vocabulary = session_vocabulary.trim().to_string();
+    state
+        .persistence
+        .store_context_fields(sid, &fields)
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(Some(digest)) = state.persistence.load_session_digest(sid) {
+        let context = state
+            .persistence
+            .get_session_context(sid)
+            .unwrap_or_default();
+        let company_ctx = format!(
+            "{} {}",
+            fields.company_overview, fields.leadership_principles
+        );
+        let whisper_prompt = build_whisper_initial_prompt(
+            &digest,
+            &context,
+            &fields.session_vocabulary,
+            &company_ctx,
+        );
+        if let Err(e) = state
+            .persistence
+            .save_whisper_initial_prompt(sid, &whisper_prompt)
+        {
+            warn!(session_id = %sid, error = %e, "failed to persist whisper prompt after vocabulary update");
+        }
+    }
+
+    Ok(())
+}
+
 /// Ingest global question-bank entries into the session context vector store.
 fn spawn_global_bank_enrichment(
     session_id: Uuid,
@@ -1078,7 +1145,22 @@ pub async fn confirm_digest(
     // O(lines).
     let context_blob_opt = state.persistence.get_session_context(sid).ok();
     let context_for_prompt = context_blob_opt.clone().unwrap_or_default();
-    let whisper_prompt = build_whisper_initial_prompt(&digest_rust, &context_for_prompt);
+    let session_vocabulary = state
+        .persistence
+        .load_context_fields(sid)
+        .map(|f| f.session_vocabulary)
+        .unwrap_or_default();
+    let company_context_for_prompt = state
+        .persistence
+        .load_context_fields(sid)
+        .map(|f| format!("{} {}", f.company_overview, f.leadership_principles))
+        .unwrap_or_default();
+    let whisper_prompt = build_whisper_initial_prompt(
+        &digest_rust,
+        &context_for_prompt,
+        &session_vocabulary,
+        &company_context_for_prompt,
+    );
     if let Err(e) = state
         .persistence
         .save_whisper_initial_prompt(sid, &whisper_prompt)
@@ -1707,7 +1789,18 @@ async fn resolve_whisper_initial_prompt(state: &AppState, session_id: Uuid) -> A
             .persistence
             .get_session_context(session_id)
             .unwrap_or_default();
-        return build_whisper_initial_prompt(&digest, &context).into();
+        let session_vocabulary = state
+            .persistence
+            .load_context_fields(session_id)
+            .map(|f| f.session_vocabulary)
+            .unwrap_or_default();
+        let company_ctx = state
+            .persistence
+            .load_context_fields(session_id)
+            .map(|f| format!("{} {}", f.company_overview, f.leadership_principles))
+            .unwrap_or_default();
+        return build_whisper_initial_prompt(&digest, &context, &session_vocabulary, &company_ctx)
+            .into();
     }
     FALLBACK_WHISPER_INITIAL_PROMPT.into()
 }
@@ -4086,20 +4179,23 @@ pub async fn start_mock(
     let initial_prompt = resolve_whisper_initial_prompt(state.inner(), session_id).await;
     let whisper = init_whisper_engine(&profile, initial_prompt)?;
 
+    let active_turn_n = Arc::new(AtomicU32::new(0));
+    let mic_recording = Arc::new(AtomicBool::new(false));
+    let turn_awaiting_review = Arc::new(AtomicBool::new(false));
+
     let mic_capture = MicCapture::start(
         app.clone(),
         session_id,
         audio_dir.clone(),
         Arc::clone(&whisper),
+        Arc::clone(&mic_recording),
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    let role_packs = packs_for_role(&digest.domain, &digest.role);
+    let mic_listen_tx = mic_capture.listen_trigger();
 
-    let active_turn_n = Arc::new(AtomicU32::new(0));
-    let mic_recording = Arc::new(AtomicBool::new(false));
-    let turn_awaiting_review = Arc::new(AtomicBool::new(false));
+    let role_packs = packs_for_role(&digest.domain, &digest.role);
 
     let conductor = Conductor::start(
         app.clone(),
@@ -4118,6 +4214,7 @@ pub async fn start_mock(
         shuffle,
         Arc::clone(&active_turn_n),
         Arc::clone(&turn_awaiting_review),
+        mic_listen_tx,
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -4169,22 +4266,26 @@ pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String>
 
 /// Start recording the user's microphone for the current mock turn.
 ///
-/// Call after the frontend has confirmed the AI question has been spoken.
+/// Auto flow: listening begins after TTS; answering begins when the user speaks.
+/// Kept for API compatibility — no-op in M12.
 #[tauri::command]
-pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+pub async fn start_mock_turn(_state: State<'_, AppState>) -> Result<(), String> {
+    Ok(())
+}
+
+/// Discard a partial mock answer and return to listening for the same question (M12).
+#[tauri::command]
+pub async fn abort_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
     let guard = state.mock_tasks.lock().await;
     let handles = guard.as_ref().ok_or("no active mock session")?;
-    let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
-    if turn_n == 0 {
-        return Err("No mock question is active yet.".to_string());
+    if handles.active_turn_n.load(Ordering::SeqCst) == 0 {
+        return Err("No mock question is active.".to_string());
     }
     handles
         .mic_capture
-        .start_turn(turn_n)
+        .abort_turn()
         .await
-        .map_err(|e| e.to_string())?;
-    handles.mic_recording.store(true, Ordering::SeqCst);
-    Ok(())
+        .map_err(|e| e.to_string())
 }
 
 /// Stop recording, run coach LLM, persist results, and signal the conductor.
@@ -4213,7 +4314,7 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
 
     // Give the user up to 120 s to finish answering; in practice they stop
     // manually well before that.
-    let (transcript, audio_path) =
+    let (transcript, audio_path, transcript_confidence) =
         crate::mock::mic_capture::await_end_turn_reply(reply_rx, Duration::from_secs(120))
             .await
             .map_err(|e| e.to_string())?;
@@ -4225,6 +4326,24 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .await
         .session_id()
         .ok_or("no active session")?;
+
+    // Pull suggested script early so STT sanitization can use it as a hint.
+    let suggested_for_sanitize = {
+        let guard = state.mock_tasks.lock().await;
+        guard
+            .as_ref()
+            .and_then(|h| h.suggested_text.read().ok())
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    };
+    let transcript = crate::mock::transcript::sanitize_mock_transcript(
+        &transcript,
+        if suggested_for_sanitize.trim().is_empty() {
+            None
+        } else {
+            Some(suggested_for_sanitize.as_str())
+        },
+    );
 
     if transcript.trim().is_empty() {
         if audio_path.is_empty() {
@@ -4257,7 +4376,8 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         ) {
             warn!(error = %e, turn_n, "failed to persist empty-transcript coach feedback");
         }
-        signal_mock_turn_complete(&state, transcript, audio_path).await;
+        // Keep conductor on this question until advance_mock_turn (same as a scored turn)
+        // so Try again can re-ask the prompt.
         return Ok(());
     }
 
@@ -4311,6 +4431,14 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
     } else {
         vec![]
     };
+    let company_context = persistence
+        .load_context_fields(session_id)
+        .map(|f| format_company_context_for_prompt(&f))
+        .unwrap_or_default();
+    let speaking_style = persistence
+        .load_context_fields(session_id)
+        .map(|f| format_speaking_style_for_prompt(&f.speaking_style).to_string())
+        .unwrap_or_else(|_| format_speaking_style_for_prompt("polished").to_string());
     let prompts = prompts_base_dir();
 
     let (coach_json, score) = match run_coach(
@@ -4321,6 +4449,9 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         transcript.clone(),
         suggested_answer.clone(),
         rag_chunks,
+        &company_context,
+        &speaking_style,
+        transcript_confidence,
         mock_mode,
         failover,
         &prompts,
@@ -4420,12 +4551,21 @@ pub async fn retry_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
     if handles.active_turn_n.load(Ordering::SeqCst) == 0 {
         return Err("No mock question is active.".to_string());
     }
+    if handles.mic_recording.load(Ordering::SeqCst) {
+        return Err("Tap Done Answering before trying again.".to_string());
+    }
     if !handles.turn_awaiting_review.load(Ordering::SeqCst) {
         return Err(
-            "Cannot retry right now — wait until the question finishes speaking, or click Next question if you already moved on."
+            "Cannot retry — this question already finished. Click Next question, or wait for the next prompt."
                 .to_string(),
         );
     }
+    drop(guard);
+
+    tts::stop_active().await;
+
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
     handles
         .conductor
         .cmd_tx
@@ -4488,6 +4628,14 @@ pub async fn regrade_mock_turn(
     if trimmed.is_empty() {
         return Err("Transcript must not be empty.".to_string());
     }
+    let trimmed = crate::mock::transcript::sanitize_mock_transcript(
+        &trimmed,
+        if suggested_answer.trim().is_empty() {
+            None
+        } else {
+            Some(suggested_answer.as_str())
+        },
+    );
 
     state
         .persistence
@@ -4515,6 +4663,17 @@ pub async fn regrade_mock_turn(
         vec![]
     };
 
+    let company_context = state
+        .persistence
+        .load_context_fields(session_id)
+        .map(|f| format_company_context_for_prompt(&f))
+        .unwrap_or_default();
+    let speaking_style = state
+        .persistence
+        .load_context_fields(session_id)
+        .map(|f| format_speaking_style_for_prompt(&f.speaking_style).to_string())
+        .unwrap_or_else(|_| format_speaking_style_for_prompt("polished").to_string());
+
     let (coach_json, score) = match run_coach(
         app.clone(),
         session_id,
@@ -4523,6 +4682,9 @@ pub async fn regrade_mock_turn(
         trimmed.clone(),
         suggested_answer,
         rag_chunks,
+        &company_context,
+        &speaking_style,
+        None, // regrade reads from persistence — no live STT confidence available
         mock_mode,
         failover,
         &prompts_base_dir(),
@@ -4657,7 +4819,7 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         .session_id()
         .ok_or("no active session")?;
 
-    let (turn_n, persistence, conductor_tx, mic_recording) = {
+    let (turn_n, persistence, conductor_tx) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
         let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
@@ -4668,20 +4830,23 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
             turn_n,
             Arc::clone(&state.persistence),
             handles.conductor.cmd_tx.clone(),
-            Arc::clone(&handles.mic_recording),
         )
     };
 
     tts::stop_active().await;
 
-    if mic_recording.swap(false, Ordering::SeqCst) {
-        if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-            if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
-                let _ = crate::mock::mic_capture::await_end_turn_reply(
-                    reply_rx,
-                    Duration::from_secs(3),
-                )
-                .await;
+    {
+        let guard = state.mock_tasks.lock().await;
+        if let Some(handles) = guard.as_ref() {
+            if handles.active_turn_n.load(Ordering::SeqCst) != 0 {
+                if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
+                    let _ = crate::mock::mic_capture::await_end_turn_reply(
+                        reply_rx,
+                        Duration::from_secs(3),
+                    )
+                    .await;
+                }
+                handles.mic_recording.store(false, Ordering::SeqCst);
             }
         }
     }

@@ -300,6 +300,17 @@ pub fn emit_mock_question_spoken<R: Runtime>(
     let _ = app.emit("mock_question_spoken", payload);
 }
 
+/// Mock turn mic phase: listening (mic open, no REC), answering, or paused.
+#[derive(Debug, Clone, Serialize)]
+pub struct MockTurnPhasePayload {
+    pub turn_n: u32,
+    pub phase: String,
+}
+
+pub fn emit_mock_turn_phase<R: Runtime>(app: &AppHandle<R>, payload: MockTurnPhasePayload) {
+    let _ = app.emit("mock_turn_phase", payload);
+}
+
 pub fn emit_mock_user_transcribed<R: Runtime>(
     app: &AppHandle<R>,
     payload: MockUserTranscribedPayload,

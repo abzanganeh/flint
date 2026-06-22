@@ -15,6 +15,8 @@ const EMPTY_FIELD_LABELS: Record<keyof SessionContextFields, string> = {
   roleExpectations: "Role Expectations",
   technicalPrep: "Technical Prep",
   strategyNotes: "Strategy Notes",
+  speakingStyle: "Speaking Style",
+  sessionVocabulary: "Session Vocabulary",
 };
 
 const STORAGE_KEY = "flint_first_run_modal_dismissed";
@@ -82,9 +84,11 @@ export default function FirstRunRehearsalModal({
         )}
 
         <p className="first-run-modal__tip">
-          Use the <strong>Prep Checklist</strong> sidebar to fill missing fields.
-          Use <strong>Chat</strong> for quick research and <strong>Stories</strong> for
-          longer prep notes — but always tailor and save preferred answers for Live.
+          Click an empty item in the <strong>Prep Checklist</strong> to fill it —
+          Session Vocabulary can be added right there. For other fields, use{" "}
+          <strong>Edit in setup</strong>. Use <strong>Chat</strong> for quick research
+          and <strong>Stories</strong> for longer prep notes — but always tailor and
+          save preferred answers for Live.
         </p>
 
         <div className="first-run-modal__footer">

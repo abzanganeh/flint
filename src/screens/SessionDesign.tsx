@@ -61,6 +61,10 @@ Example: Distributed consensus, consistent hashing, Rust lifetimes`,
   strategyNotes: `Talking points, questions to ask, angles to emphasise…
 
 Example: Lead with the Rust migration I owned at my last company`,
+  speakingStyle: "",
+  sessionVocabulary: `Domain terms Whisper should recognise (comma-separated)…
+
+Example: RBAC, ABAC, OIDC, SCIM, entitlement review, Fisher`,
 };
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -102,6 +106,8 @@ function emptyFields(): SessionContextFields {
     roleExpectations: "",
     technicalPrep: "",
     strategyNotes: "",
+    speakingStyle: "polished",
+    sessionVocabulary: "",
   };
 }
 
@@ -514,6 +520,33 @@ export default function SessionDesign({
               onChange={setField("strategyNotes")}
               disabled={isLoading}
               rows={3}
+            />
+
+            <div className="sd-field">
+              <div className="sd-context-label">
+                <label htmlFor="sd-speakingStyle">Speaking style</label>
+                <span className="sd-hint">How mock coach judges your delivery</span>
+              </div>
+              <select
+                id="sd-speakingStyle"
+                className="sd-input"
+                value={fields.speakingStyle || "polished"}
+                onChange={(e) => setField("speakingStyle")(e.target.value)}
+                disabled={isLoading}
+              >
+                <option value="polished">Polished — executive, structured</option>
+                <option value="natural">Natural — conversational, authentic</option>
+              </select>
+            </div>
+
+            <FieldBlock
+              id="sessionVocabulary"
+              label="Session vocabulary"
+              hint="Domain acronyms for speech recognition"
+              value={fields.sessionVocabulary}
+              onChange={setField("sessionVocabulary")}
+              disabled={isLoading}
+              rows={2}
             />
           </div>
         )}

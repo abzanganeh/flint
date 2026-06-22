@@ -21,14 +21,18 @@ use crate::interfaces::vector::ScoredChunk;
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 use crate::mock::conductor::MockMode;
+use crate::mock::echo::{collect_shared_vocab_terms, should_cap_echo_score};
+use crate::mock::transcript::text_has_profanity;
 use crate::orchestrator::load_prompt;
 
-/// Minimum word overlap (Jaccard) with the suggested script to flag echo reading.
-const SUGGESTED_ECHO_THRESHOLD: f32 = 0.55;
 /// Score cap when the user reads the suggested answer in practice mode.
 const ECHO_SCORE_CAP: u8 = 45;
 /// Minimum spoken words for a scored answer in practice mode.
 const MIN_ANSWER_WORDS: usize = 5;
+/// avg_logprob below this threshold indicates STT confidence was too low to
+/// score delivery fairly.  Whisper avg_logprob is typically in [-0.3, -0.6]
+/// for clear speech and < -0.7 for garbled / low-confidence output.
+const STT_LOW_CONFIDENCE_THRESHOLD: f32 = -0.7;
 
 // ── Domain types ──────────────────────────────────────────────────────────────
 
@@ -45,6 +49,14 @@ pub struct ToneAssessment {
     pub suggestion: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CoachAxes {
+    pub content: u8,
+    pub specificity: u8,
+    pub company_alignment: u8,
+    pub delivery: u8,
+}
+
 /// Structured coaching output that the frontend renders in the Coach panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoachFeedback {
@@ -53,6 +65,9 @@ pub struct CoachFeedback {
     pub context_gaps: Vec<String>,
     pub corrected_answer: String,
     pub score: u8,
+    /// Multi-axis rubric — optional for backward compat with persisted turns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axes: Option<CoachAxes>,
 }
 
 impl Default for CoachFeedback {
@@ -66,6 +81,7 @@ impl Default for CoachFeedback {
             context_gaps: vec![],
             corrected_answer: String::new(),
             score: 0,
+            axes: None,
         }
     }
 }
@@ -83,6 +99,11 @@ pub async fn run_coach<R: Runtime>(
     user_answer: String,
     suggested_answer: String,
     rag_chunks: Vec<ScoredChunk>,
+    company_context: &str,
+    speaking_style: &str,
+    // Mean avg_logprob across all Whisper chunks for this turn. `None` when
+    // the transcript came from persistence (regrade) rather than live capture.
+    transcript_confidence: Option<f32>,
     mode: MockMode,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
@@ -92,6 +113,9 @@ pub async fn run_coach<R: Runtime>(
         &user_answer,
         &suggested_answer,
         &rag_chunks,
+        company_context,
+        speaking_style,
+        transcript_confidence,
         mode,
         failover.active_provider_name(),
         prompts_dir,
@@ -124,7 +148,15 @@ pub async fn run_coach<R: Runtime>(
     }
 
     let (mut feedback, mut json) = parse_coach_json(&raw);
-    apply_coach_guardrails(&mut feedback, &user_answer, &suggested_answer, mode);
+    normalize_feedback(&mut feedback);
+    apply_coach_guardrails(
+        &mut feedback,
+        &user_answer,
+        &suggested_answer,
+        company_context,
+        transcript_confidence,
+        mode,
+    );
     let score = feedback.score;
     json = serde_json::to_string(&feedback).unwrap_or(json);
 
@@ -149,11 +181,15 @@ pub async fn run_coach<R: Runtime>(
 
 // ── Prompt builder ────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn build_coach_prompt(
     question: &str,
     user_answer: &str,
     suggested_answer: &str,
     rag_chunks: &[ScoredChunk],
+    company_context: &str,
+    speaking_style: &str,
+    transcript_confidence: Option<f32>,
     mode: MockMode,
     provider: &str,
     prompts_dir: &Path,
@@ -170,12 +206,61 @@ fn build_coach_prompt(
         .collect::<Vec<_>>()
         .join("\n---\n");
 
+    let confidence_note = build_confidence_note(transcript_confidence);
+
     let prompt = template
         .replace("{question}", question)
         .replace("{user_answer}", user_answer)
         .replace("{suggested_answer}", suggested_answer)
-        .replace("{rag_chunks}", &rag_text);
+        .replace("{rag_chunks}", &rag_text)
+        .replace("{company_context}", company_context)
+        .replace("{speaking_style}", speaking_style)
+        .replace("{transcript_confidence_note}", &confidence_note);
     Ok(prompt)
+}
+
+/// Build a human-readable note about STT reliability for the coach prompt.
+fn build_confidence_note(transcript_confidence: Option<f32>) -> String {
+    let mut parts = vec![
+        "Speech-to-text is machine-generated and often garbles words. Whisper \
+         frequently hallucinates profanity where none was spoken (e.g. 'specifically' \
+         misheard as 'specific' + an expletive). NEVER coach the candidate on swearing \
+         unless the prepared script also contains that language. Do NOT quote expletives \
+         in tone.suggestion or grammar_issues."
+            .to_string(),
+    ];
+
+    if let Some(lp) = transcript_confidence.filter(|lp| *lp < STT_LOW_CONFIDENCE_THRESHOLD) {
+        parts.push(format!(
+            "WARNING: speech-to-text confidence was low this turn \
+             (avg_logprob={lp:.2}). The transcript may contain additional recognition \
+             errors. Do NOT score delivery lower than 55 and do NOT flag too_hesitant \
+             unless there is clear evidence of hesitation beyond STT artefacts. Omit \
+             grammar_issues that look like transcription noise (single garbled words, \
+             nonsense fragments)."
+        ));
+    }
+
+    parts.join("\n")
+}
+
+/// Backfill rubric axes for legacy coach JSON and clamp values.
+fn normalize_feedback(feedback: &mut CoachFeedback) {
+    if feedback.axes.is_none() {
+        feedback.axes = Some(CoachAxes {
+            content: feedback.score,
+            specificity: feedback.score,
+            company_alignment: feedback.score,
+            delivery: feedback.score,
+        });
+    }
+    if let Some(axes) = &mut feedback.axes {
+        axes.content = axes.content.min(100);
+        axes.specificity = axes.specificity.min(100);
+        axes.company_alignment = axes.company_alignment.min(100);
+        axes.delivery = axes.delivery.min(100);
+    }
+    feedback.score = feedback.score.min(100);
 }
 
 /// Enforce deterministic scoring rules the LLM may ignore.
@@ -183,12 +268,17 @@ fn apply_coach_guardrails(
     feedback: &mut CoachFeedback,
     user_answer: &str,
     suggested_answer: &str,
+    company_context: &str,
+    transcript_confidence: Option<f32>,
     mode: MockMode,
 ) {
     let word_count = count_words(user_answer);
 
     if word_count < MIN_ANSWER_WORDS {
         feedback.score = 0;
+        if let Some(axes) = &mut feedback.axes {
+            *axes = CoachAxes::default();
+        }
         if !feedback
             .context_gaps
             .iter()
@@ -201,45 +291,85 @@ fn apply_coach_guardrails(
         return;
     }
 
-    if mode == MockMode::Practice {
-        let overlap = word_jaccard(user_answer, suggested_answer);
-        if overlap >= SUGGESTED_ECHO_THRESHOLD {
+    // If STT confidence was low, floor delivery at 55 and clear too_hesitant.
+    let stt_low = matches!(transcript_confidence, Some(lp) if lp < STT_LOW_CONFIDENCE_THRESHOLD);
+    if stt_low {
+        if let Some(axes) = &mut feedback.axes {
+            if axes.delivery < 55 {
+                axes.delivery = 55;
+            }
+        }
+        if feedback.score < 55 {
+            feedback.score = 55;
+        }
+        if feedback.tone.assessment == "too_hesitant" {
+            feedback.tone.assessment = "good".to_string();
+            feedback.tone.suggestion = String::new();
+        }
+        let note = "Note: transcription confidence was low — delivery score may not fully reflect actual delivery quality.";
+        if !feedback
+            .context_gaps
+            .iter()
+            .any(|g| g.contains("transcription confidence"))
+        {
+            feedback.context_gaps.push(note.to_string());
+        }
+    }
+
+    if mode == MockMode::Practice && !suggested_answer.trim().is_empty() {
+        let exclude = collect_shared_vocab_terms(company_context, suggested_answer);
+        if should_cap_echo_score(user_answer, suggested_answer, &exclude) {
             feedback.score = feedback.score.min(ECHO_SCORE_CAP);
+            if let Some(axes) = &mut feedback.axes {
+                axes.delivery = axes.delivery.min(ECHO_SCORE_CAP);
+            }
             let msg = "You read the suggested answer — practice in your own words.";
             if !feedback.context_gaps.iter().any(|g| g == msg) {
                 feedback.context_gaps.insert(0, msg.to_string());
             }
         }
     }
+
+    scrub_false_profanity_coaching(feedback, user_answer, suggested_answer);
 }
 
 fn count_words(text: &str) -> usize {
     text.split_whitespace().filter(|w| !w.is_empty()).count()
 }
 
-fn tokenize_words(text: &str) -> Vec<String> {
-    text.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() > 2)
-        .map(str::to_string)
-        .collect()
+/// Remove coach feedback that cites profanity when neither transcript nor script contains it.
+fn scrub_false_profanity_coaching(
+    feedback: &mut CoachFeedback,
+    user_answer: &str,
+    suggested_answer: &str,
+) {
+    if text_has_profanity(user_answer) || text_has_profanity(suggested_answer) {
+        return;
+    }
+
+    if feedback_cites_profanity(&feedback.tone.suggestion) {
+        feedback.tone.suggestion = if feedback.tone.assessment == "good" {
+            String::new()
+        } else {
+            "Slow down slightly for clearer, confident delivery.".to_string()
+        };
+    }
+
+    feedback.grammar_issues.retain(|issue| {
+        !feedback_cites_profanity(&issue.original)
+            && !feedback_cites_profanity(&issue.fix)
+            && !feedback_cites_profanity(&issue.why)
+    });
 }
 
-fn word_jaccard(a: &str, b: &str) -> f32 {
-    let ta = tokenize_words(a);
-    let tb = tokenize_words(b);
-    if ta.is_empty() || tb.is_empty() {
-        return 0.0;
-    }
-    let set_a: std::collections::HashSet<_> = ta.iter().collect();
-    let set_b: std::collections::HashSet<_> = tb.iter().collect();
-    let inter = set_a.intersection(&set_b).count() as f32;
-    let union = set_a.union(&set_b).count() as f32;
-    if union <= f32::EPSILON {
-        0.0
-    } else {
-        inter / union
-    }
+fn feedback_cites_profanity(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("fuck")
+        || lower.contains("f*ck")
+        || lower.contains("expletive")
+        || lower.contains("profan")
+        || lower.contains("swear")
+        || lower.contains("curse")
 }
 
 // ── JSON parser ───────────────────────────────────────────────────────────────
@@ -460,6 +590,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn parse_valid_coach_json_with_axes() {
+        let raw = r#"{
+          "grammar_issues": [],
+          "tone": { "assessment": "good", "suggestion": "" },
+          "context_gaps": [],
+          "corrected_answer": "I led the migration.",
+          "score": 82,
+          "axes": { "content": 85, "specificity": 80, "company_alignment": 75, "delivery": 78 }
+        }"#;
+        let (fb, _) = parse_coach_json(raw);
+        assert_eq!(fb.score, 82);
+        let axes = fb.axes.expect("axes");
+        assert_eq!(axes.content, 85);
+        assert_eq!(axes.company_alignment, 75);
+    }
+
+    #[test]
     fn parse_valid_coach_json() {
         let raw = r#"
         Some preamble the model forgot to omit.
@@ -511,6 +658,8 @@ mod tests {
             &mut fb,
             "um",
             "full suggested script here",
+            "",
+            None,
             MockMode::Practice,
         );
         assert_eq!(fb.score, 0);
@@ -523,7 +672,7 @@ mod tests {
             score: 85,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, script, script, MockMode::Practice);
+        apply_coach_guardrails(&mut fb, script, script, "", None, MockMode::Practice);
         assert_eq!(fb.score, ECHO_SCORE_CAP);
         assert!(fb
             .context_gaps
@@ -538,7 +687,53 @@ mod tests {
             score: 85,
             ..Default::default()
         };
-        apply_coach_guardrails(&mut fb, script, script, MockMode::Study);
+        apply_coach_guardrails(&mut fb, script, script, "", None, MockMode::Study);
         assert_eq!(fb.score, 85);
+    }
+
+    #[test]
+    fn guardrails_floors_delivery_on_low_stt_confidence() {
+        let answer = "Fisher takes fiduciary responsibility seriously fee only client interests.";
+        let mut fb = CoachFeedback {
+            score: 40,
+            tone: ToneAssessment {
+                assessment: "too_hesitant".to_string(),
+                suggestion: "Slow down.".to_string(),
+            },
+            axes: Some(CoachAxes {
+                content: 40,
+                specificity: 40,
+                company_alignment: 40,
+                delivery: 30,
+            }),
+            ..Default::default()
+        };
+        apply_coach_guardrails(&mut fb, answer, "", "", Some(-0.85), MockMode::Practice);
+        assert!(
+            fb.score >= 55,
+            "score should be floored at 55, got {}",
+            fb.score
+        );
+        assert_ne!(fb.tone.assessment, "too_hesitant");
+        let axes = fb.axes.as_ref().unwrap();
+        assert!(axes.delivery >= 55);
+        assert!(fb
+            .context_gaps
+            .iter()
+            .any(|g| g.contains("transcription confidence")));
+    }
+
+    #[test]
+    fn guardrails_scrubs_false_profanity_coaching() {
+        let mut fb = CoachFeedback {
+            tone: ToneAssessment {
+                assessment: "good".to_string(),
+                suggestion: "Avoid filler words like 'F*CK!'".to_string(),
+            },
+            ..Default::default()
+        };
+        let answer = "A few things stood out about Fisher specifically.";
+        apply_coach_guardrails(&mut fb, answer, answer, "", None, MockMode::Practice);
+        assert!(!fb.tone.suggestion.to_lowercase().contains("fuck"));
     }
 }

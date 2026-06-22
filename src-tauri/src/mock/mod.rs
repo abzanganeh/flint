@@ -11,6 +11,10 @@
 pub mod audio_writer;
 pub mod coach;
 pub mod conductor;
+pub mod context;
+pub mod echo;
 pub mod mic_capture;
 pub mod rag;
+pub mod transcript;
 pub mod tts;
+pub mod turn_phase;
