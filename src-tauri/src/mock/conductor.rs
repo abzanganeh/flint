@@ -120,6 +120,7 @@ impl Conductor {
         shuffle: bool,
         active_turn_n: Arc<AtomicU32>,
         turn_awaiting_review: Arc<AtomicBool>,
+        mic_listen_tx: mpsc::Sender<u32>,
     ) -> Self {
         let (cmd_tx, cmd_rx) = mpsc::channel::<ConductorCommand>(8);
         tokio::spawn(conductor_loop(
@@ -139,6 +140,7 @@ impl Conductor {
             shuffle,
             active_turn_n,
             turn_awaiting_review,
+            mic_listen_tx,
             cmd_rx,
         ));
         Self { cmd_tx }
@@ -168,6 +170,7 @@ async fn conductor_loop<R: Runtime>(
     shuffle: bool,
     active_turn_n: Arc<AtomicU32>,
     turn_awaiting_review: Arc<AtomicBool>,
+    mic_listen_tx: mpsc::Sender<u32>,
     mut cmd_rx: mpsc::Receiver<ConductorCommand>,
 ) {
     let mut base_questions: Vec<String> = persistence
@@ -373,6 +376,9 @@ async fn conductor_loop<R: Runtime>(
                         MockQuestionSpokenPayload { turn_n },
                     );
                     turn_awaiting_review.store(true, Ordering::SeqCst);
+                    if let Err(e) = mic_listen_tx.send(turn_n).await {
+                        warn!(error = %e, turn_n, "failed to start mock turn listening");
+                    }
                 } => {}
             }
             if cmd.is_none() {

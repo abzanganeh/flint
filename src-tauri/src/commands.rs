@@ -4171,20 +4171,23 @@ pub async fn start_mock(
     let initial_prompt = resolve_whisper_initial_prompt(state.inner(), session_id).await;
     let whisper = init_whisper_engine(&profile, initial_prompt)?;
 
+    let active_turn_n = Arc::new(AtomicU32::new(0));
+    let mic_recording = Arc::new(AtomicBool::new(false));
+    let turn_awaiting_review = Arc::new(AtomicBool::new(false));
+
     let mic_capture = MicCapture::start(
         app.clone(),
         session_id,
         audio_dir.clone(),
         Arc::clone(&whisper),
+        Arc::clone(&mic_recording),
     )
     .await
     .map_err(|e| e.to_string())?;
 
-    let role_packs = packs_for_role(&digest.domain, &digest.role);
+    let mic_listen_tx = mic_capture.listen_trigger();
 
-    let active_turn_n = Arc::new(AtomicU32::new(0));
-    let mic_recording = Arc::new(AtomicBool::new(false));
-    let turn_awaiting_review = Arc::new(AtomicBool::new(false));
+    let role_packs = packs_for_role(&digest.domain, &digest.role);
 
     let conductor = Conductor::start(
         app.clone(),
@@ -4203,6 +4206,7 @@ pub async fn start_mock(
         shuffle,
         Arc::clone(&active_turn_n),
         Arc::clone(&turn_awaiting_review),
+        mic_listen_tx,
     );
 
     // REHEARSING → MOCK_INTERVIEW.
@@ -4254,21 +4258,10 @@ pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String>
 
 /// Start recording the user's microphone for the current mock turn.
 ///
-/// Call after the frontend has confirmed the AI question has been spoken.
+/// Auto flow: listening begins after TTS; answering begins when the user speaks.
+/// Kept for API compatibility — no-op in M12.
 #[tauri::command]
-pub async fn start_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state.mock_tasks.lock().await;
-    let handles = guard.as_ref().ok_or("no active mock session")?;
-    let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
-    if turn_n == 0 {
-        return Err("No mock question is active yet.".to_string());
-    }
-    handles
-        .mic_capture
-        .start_turn(turn_n)
-        .await
-        .map_err(|e| e.to_string())?;
-    handles.mic_recording.store(true, Ordering::SeqCst);
+pub async fn start_mock_turn(_state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
@@ -4803,7 +4796,7 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
         .session_id()
         .ok_or("no active session")?;
 
-    let (turn_n, persistence, conductor_tx, mic_recording) = {
+    let (turn_n, persistence, conductor_tx) = {
         let guard = state.mock_tasks.lock().await;
         let handles = guard.as_ref().ok_or("no active mock session")?;
         let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
@@ -4814,20 +4807,23 @@ pub async fn skip_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
             turn_n,
             Arc::clone(&state.persistence),
             handles.conductor.cmd_tx.clone(),
-            Arc::clone(&handles.mic_recording),
         )
     };
 
     tts::stop_active().await;
 
-    if mic_recording.swap(false, Ordering::SeqCst) {
-        if let Some(handles) = state.mock_tasks.lock().await.as_ref() {
-            if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
-                let _ = crate::mock::mic_capture::await_end_turn_reply(
-                    reply_rx,
-                    Duration::from_secs(3),
-                )
-                .await;
+    {
+        let guard = state.mock_tasks.lock().await;
+        if let Some(handles) = guard.as_ref() {
+            if handles.active_turn_n.load(Ordering::SeqCst) != 0 {
+                if let Ok(reply_rx) = handles.mic_capture.send_end_turn().await {
+                    let _ = crate::mock::mic_capture::await_end_turn_reply(
+                        reply_rx,
+                        Duration::from_secs(3),
+                    )
+                    .await;
+                }
+                handles.mic_recording.store(false, Ordering::SeqCst);
             }
         }
     }

@@ -96,7 +96,7 @@ pub async fn speak_best_effort(text: &str) {
 /// Fix words that TTS engines commonly mispronounce in interview prompts.
 fn normalize_tts_pronunciation(text: &str) -> String {
     // "resume" (CV) → re-ZOOM; "résumé" → reh-zoo-MAY on most engines.
-    let text = replace_word(&text, "resumes", "résumés");
+    let text = replace_word(text, "resumes", "résumés");
     let text = replace_word(&text, "Resumes", "Résumés");
     let text = replace_word(&text, "resume", "résumé");
     let text = replace_word(&text, "Resume", "Résumé");

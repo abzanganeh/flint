@@ -32,12 +32,13 @@ pub fn text_has_profanity(text: &str) -> bool {
 fn repair_specifically_profanity_hallucination(words: &mut Vec<String>) {
     let mut i = 0;
     while i < words.len() {
-        if is_specific_stem(&words[i]) {
-            if i + 1 < words.len() && is_profanity_word(&words[i + 1]) {
-                words[i] = punctuate_replacement("specifically", &words[i], &words[i + 1]);
-                words.remove(i + 1);
-                continue;
-            }
+        if is_specific_stem(&words[i])
+            && i + 1 < words.len()
+            && is_profanity_word(&words[i + 1])
+        {
+            words[i] = punctuate_replacement("specifically", &words[i], &words[i + 1]);
+            words.remove(i + 1);
+            continue;
         }
         i += 1;
     }
