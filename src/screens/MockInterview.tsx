@@ -25,6 +25,7 @@ import {
   onMockUserTranscribed,
 } from "../events";
 import CoachPanel from "../panels/CoachPanel";
+import MockSaveForLiveModal from "../components/MockSaveForLiveModal";
 import MicQualityBadge from "../components/MicQualityBadge";
 import SuggestedAnswerPanel from "../panels/SuggestedAnswerPanel";
 import { readShuffleQuestionsPreference, writeShuffleQuestionsPreference } from "../lib/shufflePreference";
@@ -90,6 +91,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     "idle" | "saving" | "saved" | "error"
   >("idle");
   const [savePreferredError, setSavePreferredError] = useState<string | null>(null);
+  const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
   const studyModeRef = useRef<MockStudyMode>(studyMode);
@@ -341,11 +343,21 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     try {
       await savePreferredAnswer(_sessionId, turn.question, text);
       setSavePreferredState("saved");
-      setTimeout(() => setSavePreferredState("idle"), 3000);
+      setTimeout(() => {
+        setSavePreferredState("idle");
+        setSaveConfirmOpen(false);
+      }, 1500);
     } catch (e) {
       setSavePreferredState("error");
       setSavePreferredError(String(e));
     }
+  };
+
+  const handleOpenSaveConfirm = () => {
+    if (!turn.editTranscript.trim()) return;
+    setSavePreferredError(null);
+    setSavePreferredState("idle");
+    setSaveConfirmOpen(true);
   };
 
   const handleStopAnswering = async () => {
@@ -897,62 +909,42 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
         )}
 
         {phase === "reviewing" && turn.editTranscript.trim() && (
-          <div
-            style={{
-              background: "#0d1117",
-              border: `1px solid ${savePreferredState === "saved" ? "#22c55e" : "#1e2028"}`,
-              borderRadius: 8,
-              padding: "12px 14px",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div
+          <div style={{ display: "flex", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              data-testid="mock-review-save-button"
+              disabled={savePreferredState === "saved"}
+              onClick={() => handleOpenSaveConfirm()}
               style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
+                ...primaryBtn,
+                background: savePreferredState === "saved" ? "#16a34a" : "#7c3aed",
+                fontSize: "12px",
+                padding: "8px 16px",
               }}
             >
-              <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 600, letterSpacing: "0.06em" }}>
-                SAVE FOR LIVE
-              </span>
-              {savePreferredState === "saved" && (
-                <span style={{ color: "#22c55e", fontSize: "11px", fontWeight: 600 }}>
-                  Saved — Flint will serve this in Live
-                </span>
-              )}
-            </div>
-            <p style={{ margin: 0, fontSize: "12px", color: "#64748b", lineHeight: 1.5 }}>
-              Your answer above will be used as your Live script for this question. Edit it first if needed.
-            </p>
-            {savePreferredError && (
-              <p style={{ margin: 0, fontSize: "12px", color: "#fca5a5" }}>{savePreferredError}</p>
-            )}
-            <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button
-                type="button"
-                disabled={savePreferredState === "saving" || savePreferredState === "saved"}
-                onClick={() => void handleSavePreferred()}
-                style={{
-                  ...primaryBtn,
-                  background: savePreferredState === "saved" ? "#16a34a" : "#7c3aed",
-                  opacity: savePreferredState === "saving" ? 0.6 : 1,
-                  fontSize: "12px",
-                  padding: "6px 14px",
-                }}
-              >
-                {savePreferredState === "saving"
-                  ? "Saving…"
-                  : savePreferredState === "saved"
-                    ? "Saved for Live"
-                    : "Save as preferred answer"}
-              </button>
-            </div>
+              {savePreferredState === "saved"
+                ? "Saved for Live"
+                : "Review & save for Live"}
+            </button>
           </div>
         )}
       </div>
+
+      <MockSaveForLiveModal
+        open={saveConfirmOpen}
+        previewText={turn.editTranscript.trim()}
+        saving={savePreferredState === "saving"}
+        saved={savePreferredState === "saved"}
+        error={savePreferredError}
+        onCancel={() => {
+          if (savePreferredState !== "saving") {
+            setSaveConfirmOpen(false);
+            setSavePreferredError(null);
+            setSavePreferredState("idle");
+          }
+        }}
+        onConfirm={() => void handleSavePreferred()}
+      />
 
       {/* Footer controls */}
       <div
