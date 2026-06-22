@@ -780,6 +780,8 @@ export const askMockQuestion = (): Promise<void> =>
 
 export const startMockTurn = (): Promise<void> => invoke<void>("start_mock_turn");
 
+export const abortMockTurn = (): Promise<void> => invoke<void>("abort_mock_turn");
+
 export const endMockTurn = (): Promise<void> => invoke<void>("end_mock_turn");
 
 export const advanceMockTurn = (): Promise<void> => invoke<void>("advance_mock_turn");

@@ -26,6 +26,11 @@ impl MockMicPhase {
             Self::Paused => "paused",
         }
     }
+
+    /// Mid-answer retry is valid only while recording or paused mid-turn.
+    pub fn allows_mid_answer_abort(self) -> bool {
+        matches!(self, Self::Answering | Self::Paused)
+    }
 }
 
 /// Tracks per-turn speech accumulation for the mock pause gate.
@@ -81,5 +86,13 @@ mod tests {
         assert_eq!(MockMicPhase::Listening.as_str(), "listening");
         assert_eq!(MockMicPhase::Answering.as_str(), "answering");
         assert_eq!(MockMicPhase::Paused.as_str(), "paused");
+    }
+
+    #[test]
+    fn mid_answer_abort_only_while_answering_or_paused() {
+        assert!(!MockMicPhase::Off.allows_mid_answer_abort());
+        assert!(!MockMicPhase::Listening.allows_mid_answer_abort());
+        assert!(MockMicPhase::Answering.allows_mid_answer_abort());
+        assert!(MockMicPhase::Paused.allows_mid_answer_abort());
     }
 }

@@ -57,6 +57,10 @@ pub enum MicCommand {
     EndTurn {
         reply: oneshot::Sender<(String, String, Option<f32>)>,
     },
+    /// Discard partial answer and return to listening for the same turn (M12).
+    AbortTurn {
+        reply: oneshot::Sender<Result<()>>,
+    },
     /// Shut down the capture task entirely.
     Shutdown,
 }
@@ -174,6 +178,16 @@ impl MicCapture {
             .await
             .context("send EndTurn")?;
         Ok(reply_rx)
+    }
+
+    /// Discard the in-progress answer and reopen listen mode for the active turn.
+    pub async fn abort_turn(&self) -> Result<()> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(MicCommand::AbortTurn { reply: reply_tx })
+            .await
+            .context("send AbortTurn")?;
+        reply_rx.await.context("AbortTurn reply channel closed")?
     }
 
     /// Shut down the capture loop and release any held audio resources.
@@ -484,6 +498,22 @@ async fn capture_loop<R: Runtime>(
                         mic_recording.store(false, Ordering::SeqCst);
                         let _ = reply.send((text, path, confidence));
                     }
+                    MicCommand::AbortTurn { reply } => {
+                        let result = abort_active_turn(
+                            &app,
+                            &mut mock_phase,
+                            &mut audio_writer,
+                            &mut transcript_buf,
+                            &mut rolling_context,
+                            &mut logprob_sum,
+                            &mut logprob_count,
+                            &mut speech_tracker,
+                            &mut vad,
+                            current_turn,
+                            &mic_recording,
+                        );
+                        let _ = reply.send(result);
+                    }
                     MicCommand::Shutdown => {
                         if stream_open {
                             close_cpal_stream(&cpal_tx).await;
@@ -585,6 +615,46 @@ async fn begin_listening<R: Runtime>(
         },
     );
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn abort_active_turn<R: Runtime>(
+    app: &AppHandle<R>,
+    mock_phase: &mut MockMicPhase,
+    audio_writer: &mut Option<TurnAudioWriter>,
+    transcript_buf: &mut String,
+    rolling_context: &mut String,
+    logprob_sum: &mut f32,
+    logprob_count: &mut u32,
+    speech_tracker: &mut TurnSpeechTracker,
+    vad: &mut VadChunker,
+    current_turn: Option<u32>,
+    mic_recording: &Arc<AtomicBool>,
+) -> Result<()> {
+    if !mock_phase.allows_mid_answer_abort() {
+        anyhow::bail!("Cannot retry — start speaking before using Retry.");
+    }
+    let turn_n = current_turn.ok_or_else(|| anyhow::anyhow!("No active mock turn."))?;
+
+    audio_writer.take();
+    transcript_buf.clear();
+    rolling_context.clear();
+    *logprob_sum = 0.0;
+    *logprob_count = 0;
+    speech_tracker.reset();
+    if let Ok(v) = VadChunker::new() {
+        *vad = v;
+    }
+    *mock_phase = MockMicPhase::Listening;
+    mic_recording.store(false, Ordering::SeqCst);
+    emit_mock_turn_phase(
+        app,
+        MockTurnPhasePayload {
+            turn_n,
+            phase: MockMicPhase::Listening.as_str().to_string(),
+        },
+    );
     Ok(())
 }
 

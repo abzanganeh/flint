@@ -4265,6 +4265,21 @@ pub async fn start_mock_turn(_state: State<'_, AppState>) -> Result<(), String> 
     Ok(())
 }
 
+/// Discard a partial mock answer and return to listening for the same question (M12).
+#[tauri::command]
+pub async fn abort_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
+    if handles.active_turn_n.load(Ordering::SeqCst) == 0 {
+        return Err("No mock question is active.".to_string());
+    }
+    handles
+        .mic_capture
+        .abort_turn()
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Stop recording, run coach LLM, persist results, and signal the conductor.
 ///
 /// Coach runs before the conductor advances so `mock_coach_feedback` is emitted

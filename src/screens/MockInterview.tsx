@@ -3,6 +3,7 @@ import { type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
   advanceMockTurn,
+  abortMockTurn,
   askMockQuestion,
   endMockTurn,
   regradeMockTurn,
@@ -277,6 +278,24 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
       } else {
         setPhase("waiting");
       }
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleMidAnswerRetry = async () => {
+    setError(null);
+    setTurn((t) => ({
+      ...t,
+      userTranscript: "",
+      editTranscript: "",
+      coachFeedback: null,
+      coachLoading: false,
+    }));
+    setRecording(false);
+    setPhase("listening");
+    try {
+      await abortMockTurn();
     } catch (e) {
       setError(String(e));
     }
@@ -983,6 +1002,16 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   ? "Paused — speak to continue"
                   : "Recording your answer…"}
             </span>
+            {(phase === "answering" || phase === "paused") && (
+              <button
+                type="button"
+                data-testid="mock-mid-retry-button"
+                onClick={() => void handleMidAnswerRetry()}
+                style={ghostBtn}
+              >
+                Retry
+              </button>
+            )}
             <button onClick={() => void handleSkip()} style={ghostBtn}>
               Skip
             </button>

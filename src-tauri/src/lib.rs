@@ -276,6 +276,7 @@ pub fn run() {
             commands::start_mock,
             commands::ask_mock_question,
             commands::start_mock_turn,
+            commands::abort_mock_turn,
             commands::end_mock_turn,
             commands::advance_mock_turn,
             commands::retry_mock_turn,
