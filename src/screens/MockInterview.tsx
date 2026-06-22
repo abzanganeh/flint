@@ -86,6 +86,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const studyModeRef = useRef<MockStudyMode>(studyMode);
   const beginAnsweringRef = useRef<(() => Promise<void>) | null>(null);
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryPendingRef = useRef(false);
 
   useEffect(() => {
     paceRef.current = pace;
@@ -150,6 +151,12 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
         }),
         onMockQuestionSpoken((p) => {
           setTurn((t) => (p.turn_n === t.turnN ? t : t));
+          if (retryPendingRef.current) {
+            retryPendingRef.current = false;
+            setPhase("answering");
+            void beginAnsweringRef.current?.();
+            return;
+          }
           if (paceRef.current === "continuous") {
             setPhase("answering");
             void beginAnsweringRef.current?.();
@@ -280,11 +287,20 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   };
 
   const handleRetry = async () => {
+    if (autoAdvanceRef.current) {
+      clearTimeout(autoAdvanceRef.current);
+      autoAdvanceRef.current = null;
+    }
     setError(null);
     setRetrying(true);
+    retryPendingRef.current = true;
+    setRecording(false);
+    setPhase("waiting");
     try {
       await retryMockTurn();
     } catch (e) {
+      retryPendingRef.current = false;
+      setPhase("reviewing");
       setError(String(e));
     } finally {
       setRetrying(false);

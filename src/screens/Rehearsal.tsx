@@ -581,7 +581,12 @@ const Rehearsal = ({
                 {/* Tab content */}
                 <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
                   {sideTab === "checklist" && (
-                    <PrepChecklist fields={contextFields} />
+                    <PrepChecklist
+                      fields={contextFields}
+                      sessionId={sessionId}
+                      onFieldsUpdated={loadFields}
+                      onOpenSessionDesign={onReturnToSetup}
+                    />
                   )}
                   {sideTab === "questions" && (
                     <QuestionBank

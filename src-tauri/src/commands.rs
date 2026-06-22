@@ -865,6 +865,68 @@ pub async fn get_session_context_fields(
         .map_err(|e| e.to_string())
 }
 
+/// Update session vocabulary from Rehearsal without re-ingesting context.
+///
+/// Rebuilds and persists the Whisper `initial_prompt` when a digest exists.
+/// Valid from: `REHEARSING`, `READY`, `MOCK_INTERVIEW`, `CONFIGURING`, `DIGEST_REVIEW`.
+#[tauri::command]
+pub async fn update_session_vocabulary(
+    state: State<'_, AppState>,
+    session_id: String,
+    session_vocabulary: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        match *machine.current() {
+            SessionState::Rehearsing
+            | SessionState::Ready
+            | SessionState::MockInterview
+            | SessionState::Configuring
+            | SessionState::DigestReview => {}
+            other => {
+                return Err(format!(
+                    "Cannot update session vocabulary from {} state",
+                    other
+                ));
+            }
+        }
+    }
+
+    let mut fields = state
+        .persistence
+        .load_context_fields(sid)
+        .map_err(|e| e.to_string())?;
+    fields.session_vocabulary = session_vocabulary.trim().to_string();
+    state
+        .persistence
+        .store_context_fields(sid, &fields)
+        .map_err(|e| e.to_string())?;
+
+    if let Ok(Some(digest)) = state.persistence.load_session_digest(sid) {
+        let context = state.persistence.get_session_context(sid).unwrap_or_default();
+        let company_ctx = format!(
+            "{} {}",
+            fields.company_overview, fields.leadership_principles
+        );
+        let whisper_prompt = build_whisper_initial_prompt(
+            &digest,
+            &context,
+            &fields.session_vocabulary,
+            &company_ctx,
+        );
+        if let Err(e) = state
+            .persistence
+            .save_whisper_initial_prompt(sid, &whisper_prompt)
+        {
+            warn!(session_id = %sid, error = %e, "failed to persist whisper prompt after vocabulary update");
+        }
+    }
+
+    Ok(())
+}
+
 /// Ingest global question-bank entries into the session context vector store.
 fn spawn_global_bank_enrichment(
     session_id: Uuid,
@@ -4249,6 +4311,24 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         .session_id()
         .ok_or("no active session")?;
 
+    // Pull suggested script early so STT sanitization can use it as a hint.
+    let suggested_for_sanitize = {
+        let guard = state.mock_tasks.lock().await;
+        guard
+            .as_ref()
+            .and_then(|h| h.suggested_text.read().ok())
+            .map(|g| g.clone())
+            .unwrap_or_default()
+    };
+    let transcript = crate::mock::transcript::sanitize_mock_transcript(
+        &transcript,
+        if suggested_for_sanitize.trim().is_empty() {
+            None
+        } else {
+            Some(suggested_for_sanitize.as_str())
+        },
+    );
+
     if transcript.trim().is_empty() {
         if audio_path.is_empty() {
             state
@@ -4280,7 +4360,8 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
         ) {
             warn!(error = %e, turn_n, "failed to persist empty-transcript coach feedback");
         }
-        signal_mock_turn_complete(&state, transcript, audio_path).await;
+        // Keep conductor on this question until advance_mock_turn (same as a scored turn)
+        // so Try again can re-ask the prompt.
         return Ok(());
     }
 
@@ -4454,12 +4535,21 @@ pub async fn retry_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
     if handles.active_turn_n.load(Ordering::SeqCst) == 0 {
         return Err("No mock question is active.".to_string());
     }
+    if handles.mic_recording.load(Ordering::SeqCst) {
+        return Err("Tap Done Answering before trying again.".to_string());
+    }
     if !handles.turn_awaiting_review.load(Ordering::SeqCst) {
         return Err(
-            "Cannot retry right now — wait until the question finishes speaking, or click Next question if you already moved on."
+            "Cannot retry — this question already finished. Click Next question, or wait for the next prompt."
                 .to_string(),
         );
     }
+    drop(guard);
+
+    tts::stop_active().await;
+
+    let guard = state.mock_tasks.lock().await;
+    let handles = guard.as_ref().ok_or("no active mock session")?;
     handles
         .conductor
         .cmd_tx
@@ -4522,6 +4612,14 @@ pub async fn regrade_mock_turn(
     if trimmed.is_empty() {
         return Err("Transcript must not be empty.".to_string());
     }
+    let trimmed = crate::mock::transcript::sanitize_mock_transcript(
+        &trimmed,
+        if suggested_answer.trim().is_empty() {
+            None
+        } else {
+            Some(suggested_answer.as_str())
+        },
+    );
 
     state
         .persistence

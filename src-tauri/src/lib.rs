@@ -196,6 +196,7 @@ pub fn run() {
             commands::ingest_context,
             commands::ingest_structured_context,
             commands::get_session_context_fields,
+            commands::update_session_vocabulary,
             commands::abandon_session_draft,
             commands::confirm_digest,
             commands::get_digest,

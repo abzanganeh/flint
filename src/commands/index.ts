@@ -310,6 +310,13 @@ export const ingestStructuredContext = (
 export const getSessionContextFields = (sessionId: string): Promise<SessionContextFields> =>
   invoke<SessionContextFields>("get_session_context_fields", { sessionId });
 
+/** Save session vocabulary from Rehearsal (no re-ingest). Updates Whisper STT bias. */
+export const updateSessionVocabulary = (
+  sessionId: string,
+  sessionVocabulary: string,
+): Promise<void> =>
+  invoke<void>("update_session_vocabulary", { sessionId, sessionVocabulary });
+
 /** Discard in-progress session setup and return the state machine to IDLE. */
 export const abandonSessionDraft = (): Promise<void> =>
   invoke<void>("abandon_session_draft");

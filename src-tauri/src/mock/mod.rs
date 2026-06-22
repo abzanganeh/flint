@@ -15,4 +15,5 @@ pub mod context;
 pub mod echo;
 pub mod mic_capture;
 pub mod rag;
+pub mod transcript;
 pub mod tts;

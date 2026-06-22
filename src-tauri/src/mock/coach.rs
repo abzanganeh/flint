@@ -22,6 +22,7 @@ use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 use crate::mock::conductor::MockMode;
 use crate::mock::echo::{collect_shared_vocab_terms, should_cap_echo_score};
+use crate::mock::transcript::text_has_profanity;
 use crate::orchestrator::load_prompt;
 
 /// Score cap when the user reads the suggested answer in practice mode.
@@ -220,19 +221,27 @@ fn build_coach_prompt(
 
 /// Build a human-readable note about STT reliability for the coach prompt.
 fn build_confidence_note(transcript_confidence: Option<f32>) -> String {
-    match transcript_confidence {
-        Some(lp) if lp < STT_LOW_CONFIDENCE_THRESHOLD => {
-            format!(
-                "WARNING: speech-to-text confidence was low this turn \
-                 (avg_logprob={lp:.2}). The transcript may contain recognition \
-                 errors. Do NOT score delivery lower than 55 and do NOT flag \
-                 too_hesitant unless there is clear evidence of hesitation beyond \
-                 STT artefacts. Omit grammar_issues that look like transcription \
-                 noise (single garbled words, nonsense fragments)."
-            )
-        }
-        _ => String::new(),
+    let mut parts = vec![
+        "Speech-to-text is machine-generated and often garbles words. Whisper \
+         frequently hallucinates profanity where none was spoken (e.g. 'specifically' \
+         misheard as 'specific' + an expletive). NEVER coach the candidate on swearing \
+         unless the prepared script also contains that language. Do NOT quote expletives \
+         in tone.suggestion or grammar_issues."
+            .to_string(),
+    ];
+
+    if let Some(lp) = transcript_confidence.filter(|lp| *lp < STT_LOW_CONFIDENCE_THRESHOLD) {
+        parts.push(format!(
+            "WARNING: speech-to-text confidence was low this turn \
+             (avg_logprob={lp:.2}). The transcript may contain additional recognition \
+             errors. Do NOT score delivery lower than 55 and do NOT flag too_hesitant \
+             unless there is clear evidence of hesitation beyond STT artefacts. Omit \
+             grammar_issues that look like transcription noise (single garbled words, \
+             nonsense fragments)."
+        ));
     }
+
+    parts.join("\n")
 }
 
 /// Backfill rubric axes for legacy coach JSON and clamp values.
@@ -316,10 +325,47 @@ fn apply_coach_guardrails(
             }
         }
     }
+
+    scrub_false_profanity_coaching(feedback, user_answer, suggested_answer);
 }
 
 fn count_words(text: &str) -> usize {
     text.split_whitespace().filter(|w| !w.is_empty()).count()
+}
+
+/// Remove coach feedback that cites profanity when neither transcript nor script contains it.
+fn scrub_false_profanity_coaching(
+    feedback: &mut CoachFeedback,
+    user_answer: &str,
+    suggested_answer: &str,
+) {
+    if text_has_profanity(user_answer) || text_has_profanity(suggested_answer) {
+        return;
+    }
+
+    if feedback_cites_profanity(&feedback.tone.suggestion) {
+        feedback.tone.suggestion = if feedback.tone.assessment == "good" {
+            String::new()
+        } else {
+            "Slow down slightly for clearer, confident delivery.".to_string()
+        };
+    }
+
+    feedback.grammar_issues.retain(|issue| {
+        !feedback_cites_profanity(&issue.original)
+            && !feedback_cites_profanity(&issue.fix)
+            && !feedback_cites_profanity(&issue.why)
+    });
+}
+
+fn feedback_cites_profanity(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    lower.contains("fuck")
+        || lower.contains("f*ck")
+        || lower.contains("expletive")
+        || lower.contains("profan")
+        || lower.contains("swear")
+        || lower.contains("curse")
 }
 
 // ── JSON parser ───────────────────────────────────────────────────────────────
@@ -664,5 +710,26 @@ mod tests {
         let axes = fb.axes.as_ref().unwrap();
         assert!(axes.delivery >= 55);
         assert!(fb.context_gaps.iter().any(|g| g.contains("transcription confidence")));
+    }
+
+    #[test]
+    fn guardrails_scrubs_false_profanity_coaching() {
+        let mut fb = CoachFeedback {
+            tone: ToneAssessment {
+                assessment: "good".to_string(),
+                suggestion: "Avoid filler words like 'F*CK!'".to_string(),
+            },
+            ..Default::default()
+        };
+        let answer = "A few things stood out about Fisher specifically.";
+        apply_coach_guardrails(
+            &mut fb,
+            answer,
+            answer,
+            "",
+            None,
+            MockMode::Practice,
+        );
+        assert!(!fb.tone.suggestion.to_lowercase().contains("fuck"));
     }
 }

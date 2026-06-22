@@ -66,6 +66,7 @@ Rules:
 - grammar_issues: at most 3. Only flag real errors, not stylistic choices.
 - context_gaps: at most 3. Name the missing leadership principle or role expectation when relevant.
 - Do NOT flag "too hesitant" unless filler words or hedging materially hurt clarity.
+- Do NOT coach on profanity unless the script and transcript both clearly contain it — STT often hallucinates expletives.
 - corrected_answer: first person, reuse candidate examples — match speaking style preference.
 - score: weighted average of axes (content 30%, specificity 25%, company_alignment 25%, delivery 20%).
 - If user_answer is empty or under 5 words, score 0, all axes 0, note "No answer recorded" in context_gaps.

@@ -43,6 +43,7 @@ Use exactly this shape:
 Rules:
 - Focus on delivery: filler words (um, uh, like), pacing, confidence, clarity.
 - Do NOT penalize missing metrics or STAR structure — that is content, not delivery.
+- Do NOT coach on profanity unless the script and transcript both clearly contain it — STT often hallucinates expletives.
 - Set content, specificity, company_alignment axes to 0 in study mode; delivery = score.
 - grammar_issues: at most 2, only clear speech-to-text or spoken grammar errors.
 - context_gaps: leave empty in study mode unless the transcript is empty.

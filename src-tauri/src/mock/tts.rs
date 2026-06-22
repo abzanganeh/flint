@@ -81,7 +81,8 @@ async fn run_tracked(mut child: tokio::process::Child) -> Result<std::process::E
 /// LLM output.
 #[instrument(skip(text), fields(len = text.len()))]
 pub async fn speak(text: &str) -> Result<()> {
-    let text = truncate_for_tts(text);
+    let text = normalize_tts_pronunciation(text);
+    let text = truncate_for_tts(&text);
     run_tts_command(&text).await
 }
 
@@ -90,6 +91,47 @@ pub async fn speak_best_effort(text: &str) {
     if let Err(e) = speak(text).await {
         warn!(error = %e, "TTS failed (non-fatal)");
     }
+}
+
+/// Fix words that TTS engines commonly mispronounce in interview prompts.
+fn normalize_tts_pronunciation(text: &str) -> String {
+    // "resume" (CV) → re-ZOOM; "résumé" → reh-zoo-MAY on most engines.
+    let text = replace_word(&text, "resumes", "résumés");
+    let text = replace_word(&text, "Resumes", "Résumés");
+    let text = replace_word(&text, "resume", "résumé");
+    let text = replace_word(&text, "Resume", "Résumé");
+    replace_word(&text, "resumé", "résumé")
+}
+
+/// Replace `from` with `to` only on whole-word matches (ASCII alphanumeric boundaries).
+fn replace_word(text: &str, from: &str, to: &str) -> String {
+    if from.is_empty() {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(idx) = rest.find(from) {
+        out.push_str(&rest[..idx]);
+        let after = idx + from.len();
+        let word_start = idx == 0
+            || !rest[..idx]
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_ascii_alphanumeric());
+        let word_end = after >= rest.len()
+            || !rest[after..]
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric());
+        if word_start && word_end {
+            out.push_str(to);
+        } else {
+            out.push_str(from);
+        }
+        rest = &rest[after..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn truncate_for_tts(text: &str) -> String {
@@ -421,5 +463,29 @@ mod tests {
         let long = "x".repeat(600);
         let result = truncate_for_tts(&long);
         assert_eq!(result.len(), 500);
+    }
+
+    #[test]
+    fn normalize_resume_cv_pronunciation() {
+        assert_eq!(
+            normalize_tts_pronunciation("Walk me through your resume."),
+            "Walk me through your résumé."
+        );
+        assert_eq!(
+            normalize_tts_pronunciation("Resume mentions device trust"),
+            "Résumé mentions device trust"
+        );
+        assert_eq!(
+            normalize_tts_pronunciation("Compare two resumes side by side"),
+            "Compare two résumés side by side"
+        );
+    }
+
+    #[test]
+    fn normalize_does_not_touch_presume() {
+        assert_eq!(
+            normalize_tts_pronunciation("I presume you reviewed the resume."),
+            "I presume you reviewed the résumé."
+        );
     }
 }
