@@ -56,6 +56,7 @@ async fn check_for_recovery_detects_live_session() {
             speaker: "System".to_string(),
             text: "Tell me about a challenge you faced.".to_string(),
             timestamp_ms: 1000,
+            label_source: "channel".to_string(),
         })
         .expect("write chunk");
 
@@ -125,6 +126,7 @@ async fn discard_session_clears_data_and_returns_idle() {
             speaker: "System".to_string(),
             text: "Describe your experience.".to_string(),
             timestamp_ms: 500,
+            label_source: "channel".to_string(),
         })
         .expect("write chunk");
 

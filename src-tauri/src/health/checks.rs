@@ -609,7 +609,7 @@ fn check_echo_cancellation() -> HealthCheckResult {
                 "PipeWire/PulseAudio echo-cancel module is loaded.",
             );
         }
-        return warn(
+        warn(
             HealthCheck::EchoCancellation,
             "Echo cancellation is not enabled — the interviewer's voice may leak into your mic when using laptop speakers.",
             "Wear headphones for the cleanest capture, or enable PipeWire's echo-cancel module: \
@@ -617,7 +617,7 @@ fn check_echo_cancellation() -> HealthCheckResult {
              aec_method=webrtc source_name=echo-cancel-source \
              sink_name=echo-cancel-sink`. \
              Then set `FLINT_MIC_SOURCE=echo-cancel-source` before starting Flint.",
-        );
+        )
     }
     #[cfg(target_os = "macos")]
     {

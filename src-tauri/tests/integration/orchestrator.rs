@@ -451,6 +451,7 @@ async fn run_orchestrator_processes_question_and_exits_when_channel_closed() {
         text: "What is your favourite programming language?".to_string(),
         session_id,
         detected_at: Instant::now(),
+        source: flint_lib::audio::pipeline::DetectedQuestionSource::System,
     })
     .await
     .expect("send question");
@@ -509,6 +510,7 @@ async fn run_orchestrator_debounces_rapid_questions() {
             text: text.to_string(),
             session_id,
             detected_at: Instant::now(),
+            source: flint_lib::audio::pipeline::DetectedQuestionSource::System,
         })
         .await
         .expect("send");
@@ -541,6 +543,7 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
             question: format!("Question {i} with several words to fill up the budget"),
             directional_response: "Directional answer ".repeat(20),
             depth_response: "Depth answer ".repeat(20),
+            user_answer: String::new(),
             created_at_ms: i as i64,
         });
     }
