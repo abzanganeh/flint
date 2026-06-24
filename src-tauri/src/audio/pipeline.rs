@@ -121,28 +121,60 @@ struct DedupEntry {
     at: Instant,
 }
 
+/// Direction of a suppression event.
+///
+/// `SystemBleedIntoMic` is the dominant case (user without headphones — the
+/// interviewer's voice on speakers leaks into the mic). `MicBleedIntoSystem`
+/// is rare and indicates a misconfigured loopback (mic feeding back into the
+/// system sink); we surface it at INFO+ once per session as a hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuppressionDirection {
+    SystemBleedIntoMic,
+    MicBleedIntoSystem,
+}
+
 #[derive(Default)]
 struct CrossChannelDedup {
     recent_system: Vec<DedupEntry>,
     recent_mic: Vec<DedupEntry>,
+    /// Whether we have already logged the user-facing "mic loopback bleed"
+    /// hint this session. Avoids log spam while still surfacing the warning.
+    mic_to_system_warned: bool,
 }
 
 impl CrossChannelDedup {
-    /// Returns true iff `text` near-duplicates content recently transcribed on
-    /// the OPPOSITE channel — i.e. this arrival is the echo, not the source.
-    fn should_suppress(&mut self, source: AudioSource, text: &str, now: Instant) -> bool {
+    /// Returns the suppression direction iff `text` near-duplicates content
+    /// recently transcribed on the OPPOSITE channel — i.e. this arrival is
+    /// the echo, not the source.
+    fn should_suppress(
+        &mut self,
+        source: AudioSource,
+        text: &str,
+        now: Instant,
+    ) -> Option<SuppressionDirection> {
         let tokens = tokenize_for_echo(text);
         if tokens.len() < ECHO_MIN_WORDS {
-            return false;
+            return None;
         }
         self.prune(now);
         let opposite = match source {
             AudioSource::Microphone => &self.recent_system,
             AudioSource::System => &self.recent_mic,
         };
-        opposite
+        let matched = opposite
             .iter()
-            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
+            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD);
+        if !matched {
+            return None;
+        }
+        Some(match source {
+            // Mic arrived AFTER System spoke the same words → speakers bled
+            // into the mic; the System chunk is the truth, drop the Mic copy.
+            AudioSource::Microphone => SuppressionDirection::SystemBleedIntoMic,
+            // System arrived AFTER Mic spoke the same words → loopback is
+            // recording the user's own voice; drop the System copy.
+            AudioSource::System => SuppressionDirection::MicBleedIntoSystem,
+        })
     }
 
     /// Record an accepted transcript so later echoes on the opposite channel
@@ -389,12 +421,30 @@ async fn process_frame(
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if guard.should_suppress(source, &result.text, now) {
-            tracing::debug!(
-                source = %source,
-                text = %result.text,
-                "suppressed near-identical cross-channel echo"
-            );
+        if let Some(direction) = guard.should_suppress(source, &result.text, now) {
+            match direction {
+                SuppressionDirection::SystemBleedIntoMic => {
+                    tracing::debug!(
+                        source = %source,
+                        "suppressed cross-channel echo (system -> mic)"
+                    );
+                }
+                SuppressionDirection::MicBleedIntoSystem => {
+                    if !guard.mic_to_system_warned {
+                        guard.mic_to_system_warned = true;
+                        tracing::warn!(
+                            "Mic audio appears to be looping back into the system audio \
+                             channel. Check your audio routing — Flint expects the system \
+                             sink monitor as the loopback, not the mic itself."
+                        );
+                    } else {
+                        tracing::debug!(
+                            source = %source,
+                            "suppressed cross-channel echo (mic -> system)"
+                        );
+                    }
+                }
+            }
             return Ok(());
         }
         guard.record(source, &result.text, now);
@@ -595,11 +645,13 @@ mod tests {
             "tell me about a project you led at your company",
             now,
         );
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            "I led the fraud detection platform migration last year",
-            now + Duration::from_millis(200),
-        ));
+        assert!(dedup
+            .should_suppress(
+                AudioSource::Microphone,
+                "I led the fraud detection platform migration last year",
+                now + Duration::from_millis(200),
+            )
+            .is_none());
     }
 
     #[test]
@@ -608,7 +660,10 @@ mod tests {
         let now = Instant::now();
         let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
         dedup.record(AudioSource::Microphone, text, now);
-        assert!(dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(300),));
+        assert_eq!(
+            dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(300),),
+            Some(SuppressionDirection::MicBleedIntoSystem)
+        );
     }
 
     #[test]
@@ -618,11 +673,14 @@ mod tests {
         let text = "Why do you like to work with Fisher Investors";
         dedup.record(AudioSource::System, text, now);
 
-        assert!(dedup.should_suppress(
-            AudioSource::Microphone,
-            text,
-            now + Duration::from_millis(200),
-        ));
+        assert_eq!(
+            dedup.should_suppress(
+                AudioSource::Microphone,
+                text,
+                now + Duration::from_millis(200),
+            ),
+            Some(SuppressionDirection::SystemBleedIntoMic)
+        );
     }
 
     #[test]
@@ -632,7 +690,10 @@ mod tests {
         let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
         dedup.record(AudioSource::Microphone, text, now);
 
-        assert!(dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(200),));
+        assert_eq!(
+            dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(200),),
+            Some(SuppressionDirection::MicBleedIntoSystem)
+        );
     }
 
     #[test]
@@ -641,11 +702,13 @@ mod tests {
         let now = Instant::now();
         dedup.record(AudioSource::System, "tell me about a project you led", now);
 
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            "I led the fraud detection platform migration last year",
-            now + Duration::from_millis(500),
-        ));
+        assert!(dedup
+            .should_suppress(
+                AudioSource::Microphone,
+                "I led the fraud detection platform migration last year",
+                now + Duration::from_millis(500),
+            )
+            .is_none());
     }
 
     #[test]
@@ -655,7 +718,9 @@ mod tests {
         let text = "alpha bravo charlie delta echo test phrase here";
         dedup.record(AudioSource::System, text, now);
         let later = now + ECHO_WINDOW + Duration::from_millis(1);
-        assert!(!dedup.should_suppress(AudioSource::Microphone, text, later,));
+        assert!(dedup
+            .should_suppress(AudioSource::Microphone, text, later,)
+            .is_none());
     }
 
     #[test]
@@ -667,11 +732,13 @@ mod tests {
             "all right lets take our time with this question",
             now,
         );
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            "all right lets say guard over here now",
-            now + Duration::from_millis(300),
-        ));
+        assert!(dedup
+            .should_suppress(
+                AudioSource::Microphone,
+                "all right lets say guard over here now",
+                now + Duration::from_millis(300),
+            )
+            .is_none());
     }
 
     #[test]

@@ -26,6 +26,7 @@ const CHECK_LABELS: Record<HealthCheckName, string> = {
   supabase_connection: "Supabase connection",
   global_hotkey: "Global hotkey",
   panic_hotkey: "Panic hotkey",
+  echo_cancellation: "Echo cancellation",
 };
 
 type OsFamily = "linux" | "macos" | "windows" | "other";

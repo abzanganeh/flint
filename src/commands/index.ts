@@ -22,7 +22,8 @@ export type HealthCheckName =
   | "local_sqlite"
   | "supabase_connection"
   | "global_hotkey"
-  | "panic_hotkey";
+  | "panic_hotkey"
+  | "echo_cancellation";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 

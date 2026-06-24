@@ -15,7 +15,16 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Drop the first ~300 ms of mic frames after a Listening phase begins.
+///
+/// TTS playback ends just before the mic stream opens, but on Linux the speaker
+/// driver still has ~150-300 ms of decay buffered. RNNoise + Whisper would
+/// transcribe that tail as "user speech" and contaminate the answer transcript.
+/// The quiet window guarantees the first frames Whisper sees are real silence
+/// (or the genuine start of the user's reply).
+const POST_TTS_QUIET_MS: u64 = 300;
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -340,6 +349,7 @@ async fn capture_loop<R: Runtime>(
     let mut logprob_count: u32 = 0;
     let mut stream_open = false;
     let mut speech_tracker = TurnSpeechTracker::default();
+    let mut quiet_until: Option<Instant> = None;
 
     loop {
         tokio::select! {
@@ -362,6 +372,7 @@ async fn capture_loop<R: Runtime>(
                     &mut logprob_count,
                     &mut speech_tracker,
                     &mic_recording,
+                    &mut quiet_until,
                 ).await {
                     warn!(error = %e, turn_n, "mock mic: listen trigger failed");
                 }
@@ -387,6 +398,7 @@ async fn capture_loop<R: Runtime>(
                             &mut logprob_count,
                             &mut speech_tracker,
                             &mic_recording,
+                            &mut quiet_until,
                         ).await;
                         if result.is_ok() {
                             info!(turn_n, "mock mic: listening started");
@@ -414,6 +426,7 @@ async fn capture_loop<R: Runtime>(
                             &mut logprob_count,
                             &mut speech_tracker,
                             &mic_recording,
+                            &mut quiet_until,
                         ).await;
                         if result.is_ok() {
                             enter_answering(
@@ -542,6 +555,7 @@ async fn capture_loop<R: Runtime>(
                         &mut vad,
                         &mut speech_tracker,
                         &mic_recording,
+                        &mut quiet_until,
                     )
                     .await;
                 }
@@ -574,6 +588,7 @@ async fn begin_listening<R: Runtime>(
     logprob_count: &mut u32,
     speech_tracker: &mut TurnSpeechTracker,
     mic_recording: &Arc<AtomicBool>,
+    quiet_until: &mut Option<Instant>,
 ) -> Result<()> {
     if *stream_open {
         close_cpal_stream(cpal_tx).await;
@@ -604,6 +619,7 @@ async fn begin_listening<R: Runtime>(
     *logprob_count = 0;
     speech_tracker.reset();
     mic_recording.store(false, Ordering::SeqCst);
+    *quiet_until = Some(Instant::now() + Duration::from_millis(POST_TTS_QUIET_MS));
 
     emit_mock_turn_phase(
         app,
@@ -699,9 +715,20 @@ async fn process_mock_frame<R: Runtime>(
     vad: &mut VadChunker,
     speech_tracker: &mut TurnSpeechTracker,
     mic_recording: &Arc<AtomicBool>,
+    quiet_until: &mut Option<Instant>,
 ) {
     if frame.len() != FRAME_SAMPLES {
         return;
+    }
+
+    // Drop frames captured during the post-TTS quiet window. Speakers may
+    // still be decaying for ~300 ms after the TTS subprocess exits; running
+    // RNNoise + VAD + Whisper on that tail produces phantom answers.
+    if let Some(deadline) = *quiet_until {
+        if Instant::now() < deadline {
+            return;
+        }
+        *quiet_until = None;
     }
 
     let mut proc = frame;
