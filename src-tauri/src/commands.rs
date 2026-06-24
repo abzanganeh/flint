@@ -3279,6 +3279,53 @@ pub async fn signal_question_ended(
     Ok(())
 }
 
+/// M13 S4 — manually relabel a transcript chunk's speaker.
+///
+/// The frontend calls this when the user disputes a chunk's speaker label
+/// (typically after a `chunk_label_suspicious` event). Persists the override
+/// with `label_source = 'user'` and emits `transcript_chunk_relabeled` so any
+/// already-rendered chunk in the UI can update its badge.
+///
+/// `new_speaker` must be one of `"System"` (interviewer) or `"Microphone"`
+/// (user). Other values are rejected to prevent typos from corrupting the
+/// downstream context routing.
+#[tauri::command]
+pub async fn relabel_transcript_chunk<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, AppState>,
+    chunk_id: String,
+    new_speaker: String,
+) -> Result<(), String> {
+    if !matches!(new_speaker.as_str(), "System" | "Microphone") {
+        return Err(format!(
+            "new_speaker must be \"System\" or \"Microphone\" (got {new_speaker:?})"
+        ));
+    }
+
+    let chunk_uuid = uuid::Uuid::parse_str(&chunk_id)
+        .map_err(|_| format!("invalid chunk_id: {chunk_id}"))?;
+
+    let updated = state
+        .persistence
+        .relabel_transcript_chunk(chunk_uuid, &new_speaker)
+        .map_err(|e| format!("Failed to relabel chunk: {e}"))?;
+
+    if !updated {
+        return Err(format!("No transcript chunk with id {chunk_id}"));
+    }
+
+    crate::events::emit_transcript_chunk_relabeled(
+        &app_handle,
+        crate::events::TranscriptChunkRelabeledPayload {
+            chunk_id,
+            speaker: new_speaker,
+            label_source: "user".to_string(),
+        },
+    );
+
+    Ok(())
+}
+
 /// Assign which diarized speaker is the interviewer (M10 Slice 8).
 #[tauri::command]
 pub async fn assign_speaker(

@@ -117,6 +117,13 @@ export const signalQuestionEnded = (sessionId: string): Promise<void> =>
 export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
   invoke<void>("assign_speaker", { sessionId, speakerId });
 
+/** M13 S4 — manual speaker override for a previously emitted chunk. */
+export const relabelTranscriptChunk = (
+  chunkId: string,
+  newSpeaker: "System" | "Microphone",
+): Promise<void> =>
+  invoke<void>("relabel_transcript_chunk", { chunkId, newSpeaker });
+
 /** Manual turn: rehearsal uses `run_rehearsal_turn`; live uses `trigger_response`. */
 export const triggerResponse = async (
   question: string,

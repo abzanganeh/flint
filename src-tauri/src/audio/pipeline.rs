@@ -43,8 +43,9 @@ use crate::audio::capture::{AudioFrame, AudioSource};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunker, WHISPER_MIN_SEGMENT_MS};
 use crate::events::{
-    emit_audio_quality_status, emit_thread_status, emit_transcription_chunk,
-    AudioQualityStatusPayload, ThreadStatusPayload, TranscriptionChunkPayload,
+    emit_audio_quality_status, emit_chunk_label_suspicious, emit_thread_status,
+    emit_transcription_chunk, AudioQualityStatusPayload, ChunkLabelSuspiciousPayload,
+    ThreadStatusPayload, TranscriptionChunkPayload,
 };
 
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
@@ -53,6 +54,12 @@ use crate::transcription::hybrid::{
     finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
 };
 use crate::transcription::sanitizer::sanitize_live_transcript;
+use crate::transcription::speaker_suspicion;
+
+/// Default `label_source` value applied to every chunk emitted from this
+/// pipeline. The suspicion detector and the manual `relabel_transcript_chunk`
+/// command upgrade this to `"heuristic"` or `"user"` respectively.
+const LABEL_SOURCE_CHANNEL: &str = "channel";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -456,24 +463,53 @@ async fn process_frame(
         AudioSource::Microphone => "Microphone",
     };
     let timestamp = frame.timestamp.elapsed().as_millis() as i64;
+    let chunk_id = Uuid::new_v4();
     emit_transcription_chunk(
         app_handle,
         TranscriptionChunkPayload {
             text: result.text.clone(),
             speaker: speaker.to_string(),
             timestamp,
+            chunk_id: chunk_id.to_string(),
+            label_source: LABEL_SOURCE_CHANNEL.to_string(),
         },
     );
     // Persist every chunk immediately — crash-recovery insurance.
     let chunk = TranscriptChunk {
-        id: Uuid::new_v4(),
+        id: chunk_id,
         session_id,
         speaker: speaker.to_string(),
         text: result.text.clone(),
         timestamp_ms: timestamp,
+        label_source: LABEL_SOURCE_CHANNEL.to_string(),
     };
     if let Err(e) = persistence.write_transcript_chunk(&chunk) {
         tracing::warn!(error = %e, "transcript chunk persist failed — continuing");
+    }
+
+    // ── Step 4b.1: non-phone-mode label suspicion ─────────────────────────
+    // Phone-call mode collapses both speakers onto one channel so the
+    // heuristic is meaningless there; only run in normal dual-stream mode
+    // (where echo suppression is enabled).
+    if echo_suppression_enabled {
+        if let Some(verdict) = speaker_suspicion::evaluate(speaker, &result.text) {
+            tracing::info!(
+                chunk_id = %chunk_id,
+                speaker = %speaker,
+                suggested = %verdict.suggested_speaker,
+                reason = %verdict.reason.as_str(),
+                "speaker label looks suspicious"
+            );
+            emit_chunk_label_suspicious(
+                app_handle,
+                ChunkLabelSuspiciousPayload {
+                    chunk_id: chunk_id.to_string(),
+                    current_speaker: speaker.to_string(),
+                    suggested_speaker: verdict.suggested_speaker,
+                    reason: verdict.reason.as_str().to_string(),
+                },
+            );
+        }
     }
 
     // ── Steps 4c/4d: hybrid question detection on System audio only ───────
@@ -576,6 +612,8 @@ pub fn emit_audio_gap_marker(app_handle: &AppHandle, source: AudioSource, gap_se
             text,
             speaker: source.to_string(),
             timestamp: 0,
+            chunk_id: String::new(),
+            label_source: LABEL_SOURCE_CHANNEL.to_string(),
         },
     );
 }

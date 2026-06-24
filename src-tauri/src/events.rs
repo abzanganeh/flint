@@ -6,6 +6,36 @@ pub struct TranscriptionChunkPayload {
     pub text: String,
     pub speaker: String,
     pub timestamp: i64,
+    /// Persisted chunk id so the frontend can tie events back to SQLite rows
+    /// (used by the relabel command). Empty for synthetic chunks like
+    /// audio-gap markers.
+    #[serde(default)]
+    pub chunk_id: String,
+    /// Provenance of [`speaker`] — `"channel"`, `"heuristic"`, `"llm"`, or
+    /// `"user"`. See [`crate::session::persistence::TranscriptChunk`].
+    #[serde(default)]
+    pub label_source: String,
+}
+
+/// M13 S4 — emitted when a heuristic detects that a chunk's channel-derived
+/// speaker label probably does not match what was actually said. The frontend
+/// surfaces this as a "Was this you?" prompt that can call
+/// `relabel_transcript_chunk` to override.
+#[derive(Debug, Clone, Serialize)]
+pub struct ChunkLabelSuspiciousPayload {
+    pub chunk_id: String,
+    pub current_speaker: String,
+    pub suggested_speaker: String,
+    pub reason: String,
+}
+
+/// M13 S4 — fired after a successful manual relabel so any UI that already
+/// rendered the chunk can update its speaker badge in place.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptChunkRelabeledPayload {
+    pub chunk_id: String,
+    pub speaker: String,
+    pub label_source: String,
 }
 
 /// Emitted at the start of every orchestrator turn (live and rehearsal).
@@ -138,6 +168,20 @@ pub fn emit_transcription_chunk<R: Runtime>(
     payload: TranscriptionChunkPayload,
 ) {
     let _ = app.emit("transcription_chunk", payload);
+}
+
+pub fn emit_chunk_label_suspicious<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: ChunkLabelSuspiciousPayload,
+) {
+    let _ = app.emit("chunk_label_suspicious", payload);
+}
+
+pub fn emit_transcript_chunk_relabeled<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: TranscriptChunkRelabeledPayload,
+) {
+    let _ = app.emit("transcript_chunk_relabeled", payload);
 }
 
 pub fn emit_turn_started<R: Runtime>(app: &AppHandle<R>, payload: TurnStartedPayload) {
