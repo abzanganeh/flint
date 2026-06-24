@@ -130,10 +130,7 @@ impl WhisperEngine {
     /// thresholds: known-hallucination drop, repeat-ngram collapse, word/sec
     /// plausibility check. Returns `None` when the whole result should be
     /// dropped.
-    fn post_process(
-        result: TranscriptionResult,
-        duration_ms: u32,
-    ) -> Option<TranscriptionResult> {
+    fn post_process(result: TranscriptionResult, duration_ms: u32) -> Option<TranscriptionResult> {
         if result.text.trim().is_empty() {
             return None;
         }

@@ -292,7 +292,9 @@ mod tests {
     fn known_hallucination_thanks_for_watching() {
         assert!(is_known_hallucination("Thanks for watching!"));
         assert!(is_known_hallucination("THANK YOU FOR WATCHING"));
-        assert!(is_known_hallucination("Thanks for watching, see you next time"));
+        assert!(is_known_hallucination(
+            "Thanks for watching, see you next time"
+        ));
     }
 
     #[test]
@@ -307,7 +309,9 @@ mod tests {
         assert!(!is_known_hallucination(
             "Tell me about a time you led a project."
         ));
-        assert!(!is_known_hallucination("I worked on the team for three years"));
+        assert!(!is_known_hallucination(
+            "I worked on the team for three years"
+        ));
     }
 
     #[test]

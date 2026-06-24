@@ -2888,9 +2888,7 @@ mod tests {
         let chunk = sample_chunk(sid, 1234, "I worked on the identity platform.");
         db.write_transcript_chunk(&chunk).unwrap();
 
-        let updated = db
-            .relabel_transcript_chunk(chunk.id, "Microphone")
-            .unwrap();
+        let updated = db.relabel_transcript_chunk(chunk.id, "Microphone").unwrap();
         assert!(updated);
 
         let conn = db.db.lock().unwrap();

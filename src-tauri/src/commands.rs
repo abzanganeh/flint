@@ -3315,8 +3315,8 @@ pub async fn relabel_transcript_chunk<R: tauri::Runtime>(
         ));
     }
 
-    let chunk_uuid = uuid::Uuid::parse_str(&chunk_id)
-        .map_err(|_| format!("invalid chunk_id: {chunk_id}"))?;
+    let chunk_uuid =
+        uuid::Uuid::parse_str(&chunk_id).map_err(|_| format!("invalid chunk_id: {chunk_id}"))?;
 
     let updated = state
         .persistence

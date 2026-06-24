@@ -174,8 +174,10 @@ mod tests {
 
     #[test]
     fn interviewer_question_on_system_passes() {
-        assert!(
-            evaluate("System", "Tell me about a project you led at your last role.").is_none()
-        );
+        assert!(evaluate(
+            "System",
+            "Tell me about a project you led at your last role."
+        )
+        .is_none());
     }
 }

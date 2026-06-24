@@ -118,11 +118,7 @@ impl AudioAuditCounters {
         Self::default()
     }
 
-    pub fn record_chunk(
-        &self,
-        source: AudioSource,
-        avg_logprob: Option<f32>,
-    ) {
+    pub fn record_chunk(&self, source: AudioSource, avg_logprob: Option<f32>) {
         let mut guard = self.inner.lock().expect("audit mutex poisoned");
         let bucket = match source {
             AudioSource::System => &mut guard.system,
@@ -166,7 +162,11 @@ impl AudioAuditCounters {
             suspicions: guard.suspicions,
             mean_logprob_system: guard.system.mean_logprob(),
             mean_logprob_mic: guard.mic.mean_logprob(),
-            suppression_rate: compute_suppression_rate(&guard.system, &guard.mic, &guard.suppressions),
+            suppression_rate: compute_suppression_rate(
+                &guard.system,
+                &guard.mic,
+                &guard.suppressions,
+            ),
         }
     }
 }
@@ -227,11 +227,7 @@ pub fn write_summary_to_metrics_log(session_id: uuid::Uuid, summary: &AudioAudit
 
     use std::fs::OpenOptions;
     use std::io::Write;
-    match OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    match OpenOptions::new().create(true).append(true).open(&path) {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{line}") {
                 tracing::warn!(path = %path.display(), error = %e, "audit: metrics write failed");
@@ -282,7 +278,10 @@ mod tests {
     #[test]
     fn counters_record_suppressions_per_reason() {
         let counters = AudioAuditCounters::new();
-        counters.record_suppression(AudioSource::Microphone, SuppressionReason::EchoSystemBleedIntoMic);
+        counters.record_suppression(
+            AudioSource::Microphone,
+            SuppressionReason::EchoSystemBleedIntoMic,
+        );
         counters.record_suppression(AudioSource::System, SuppressionReason::KnownHallucination);
         counters.record_suppression(AudioSource::System, SuppressionReason::SanitizerEmpty);
 
