@@ -27,6 +27,9 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use crate::audio::capture::AudioSource;
 use crate::audio::vad::VadChunk;
 use crate::health::hardware::HardwareTier;
+use crate::transcription::sanitizer::{
+    collapse_repeated_ngrams, is_known_hallucination, validate_segment,
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Whisper.cpp parameters — §26.  DO NOT change without updating the spec.
@@ -38,6 +41,9 @@ const LANGUAGE: &str = "en";
 const NO_SPEECH_THRESHOLD: f32 = 0.6;
 const COMPRESSION_RATIO_THRESHOLD: f32 = 2.4;
 const LOGPROB_THRESHOLD: f32 = -1.0;
+/// Step size used by Whisper.cpp's temperature-fallback ladder (§26).
+/// Set explicitly so the contract is locked even if whisper-rs defaults change.
+const TEMPERATURE_INC: f32 = 0.2;
 /// §26 fallback — overridden per session via [`WhisperEngine::initial_prompt`].
 pub const DEFAULT_INITIAL_PROMPT: &str = "Professional interview conversation.";
 /// §26 `max_context: -1` — no context carry-over between VAD chunks.
@@ -120,6 +126,39 @@ impl WhisperEngine {
         self.transcribe_with_context(chunk, "")
     }
 
+    /// Apply segment-level safety filters that go beyond Whisper.cpp's numeric
+    /// thresholds: known-hallucination drop, repeat-ngram collapse, word/sec
+    /// plausibility check. Returns `None` when the whole result should be
+    /// dropped.
+    fn post_process(
+        result: TranscriptionResult,
+        duration_ms: u32,
+    ) -> Option<TranscriptionResult> {
+        if result.text.trim().is_empty() {
+            return None;
+        }
+        if is_known_hallucination(&result.text) {
+            tracing::debug!(
+                source = ?result.source,
+                "Whisper segment discarded — known hallucination string"
+            );
+            return None;
+        }
+        let collapsed = collapse_repeated_ngrams(&result.text);
+        if !validate_segment(&collapsed, duration_ms) {
+            tracing::debug!(
+                source = ?result.source,
+                duration_ms,
+                "Whisper segment discarded — implausible word/sec ratio"
+            );
+            return None;
+        }
+        Some(TranscriptionResult {
+            text: collapsed,
+            ..result
+        })
+    }
+
     /// Transcribe one VAD chunk with additional rolling-context text appended
     /// to the session `initial_prompt`.
     ///
@@ -138,15 +177,16 @@ impl WhisperEngine {
 
         let prompt = build_context_prompt(&self.initial_prompt, rolling_context);
         let beam = self.decode_chunk_with_prompt(chunk, false, &prompt)?;
-        if beam.is_some() {
-            return Ok(beam);
+        if let Some(result) = beam {
+            return Ok(Self::post_process(result, chunk.duration_ms));
         }
 
         tracing::debug!(
             source = ?chunk.source,
             "beam search produced no valid segments — retrying with greedy decode"
         );
-        self.decode_chunk_with_prompt(chunk, true, &prompt)
+        let greedy = self.decode_chunk_with_prompt(chunk, true, &prompt)?;
+        Ok(greedy.and_then(|r| Self::post_process(r, chunk.duration_ms)))
     }
 
     /// Greedy-only transcription — skips beam search and the single-timestamp
@@ -156,7 +196,8 @@ impl WhisperEngine {
         if chunk.samples.is_empty() {
             return Ok(None);
         }
-        self.decode_chunk_with_prompt(chunk, true, &self.initial_prompt.clone())
+        let result = self.decode_chunk_with_prompt(chunk, true, &self.initial_prompt.clone())?;
+        Ok(result.and_then(|r| Self::post_process(r, chunk.duration_ms)))
     }
 
     fn decode_chunk_with_prompt(
@@ -229,6 +270,7 @@ fn build_greedy_params(initial_prompt: &str) -> FullParams<'static, 'static> {
 fn apply_common_params(params: &mut FullParams<'_, '_>, initial_prompt: &str) {
     params.set_language(Some(LANGUAGE));
     params.set_temperature(TEMPERATURE);
+    params.set_temperature_inc(TEMPERATURE_INC);
     params.set_no_speech_thold(NO_SPEECH_THRESHOLD);
     params.set_entropy_thold(COMPRESSION_RATIO_THRESHOLD);
     params.set_logprob_thold(LOGPROB_THRESHOLD);
@@ -236,6 +278,15 @@ fn apply_common_params(params: &mut FullParams<'_, '_>, initial_prompt: &str) {
     params.set_initial_prompt(initial_prompt);
     params.set_no_context(true);
     params.set_n_max_text_ctx(MAX_TEXT_CONTEXT_TOKENS);
+
+    // M13 S2: lock down hallucination defaults so whisper-rs upstream changes
+    // cannot regress us without a deliberate edit. `suppress_blank` removes
+    // the leading blank token that Whisper emits between segments;
+    // `suppress_nst` (suppress_non_speech_tokens) drops applause/music/laughter
+    // bracket tokens that tend to surface during silence on the System loopback
+    // channel.
+    params.set_suppress_blank(true);
+    params.set_suppress_nst(true);
 
     params.set_print_special(false);
     params.set_print_progress(false);

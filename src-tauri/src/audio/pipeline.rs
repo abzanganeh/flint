@@ -52,6 +52,7 @@ use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
     finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
 };
+use crate::transcription::sanitizer::sanitize_live_transcript;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -364,9 +365,23 @@ async fn process_frame(
         .await
         .map_err(|e| anyhow::anyhow!("Whisper task panicked: {e}"))??;
 
-    let Some(result) = transcription else {
+    let Some(mut result) = transcription else {
         return Ok(()); // silence or hallucination — discarded by engine
     };
+
+    // M13 S2: live sanitiser — strip hallucinated profanity / known stock
+    // hallucination tails / repeated ngram loops that survived the engine
+    // filters. Returns None when the whole utterance should be dropped.
+    match sanitize_live_transcript(&result.text) {
+        Some(clean) => result.text = clean,
+        None => {
+            tracing::debug!(
+                source = %source,
+                "transcript chunk dropped — sanitiser removed entire content"
+            );
+            return Ok(());
+        }
+    }
 
     let now = Instant::now();
     if echo_suppression_enabled {
