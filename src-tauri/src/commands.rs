@@ -3192,6 +3192,7 @@ pub async fn trigger_response(
             text: question_text.clone(),
             session_id: sid,
             detected_at: std::time::Instant::now(),
+            source: crate::audio::pipeline::DetectedQuestionSource::UserTriggered,
         };
         handles
             .question_tx
@@ -3264,6 +3265,7 @@ pub async fn signal_question_ended(
         text: question_text.clone(),
         session_id: sid,
         detected_at: std::time::Instant::now(),
+        source: crate::audio::pipeline::DetectedQuestionSource::PhoneManual,
     };
     handles
         .question_tx

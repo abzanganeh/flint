@@ -1,5 +1,9 @@
 [System]
-Summarise the conversation history below in 3–5 sentences. Preserve key topics discussed, important facts stated, and any commitments made. Do not add interpretation. Plain factual summary only.
+Summarise the conversation history below in 3-5 sentences. Preserve key
+topics discussed, important facts stated, commitments made, and the candidate's
+own answers when present. Keep the speaker roles distinct in your summary —
+the interviewer asked the questions, the AI suggested phrasings, and the
+candidate answered. Do not add interpretation. Plain factual summary only.
 
 [History to compress]
 {old_turns}

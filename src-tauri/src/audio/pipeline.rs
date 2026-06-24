@@ -71,6 +71,27 @@ pub struct DetectedQuestion {
     pub text: String,
     pub session_id: Uuid,
     pub detected_at: Instant,
+    /// Provenance — who/what produced this question. The orchestrator
+    /// asserts this is never `Microphone` so a future bug that routes the
+    /// user's own speech into `question_tx` cannot dispatch responses to
+    /// the user's own utterance (M13 S5).
+    pub source: DetectedQuestionSource,
+}
+
+/// Origin of a [`DetectedQuestion`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedQuestionSource {
+    /// Loopback / system audio (the interviewer in non-phone mode).
+    System,
+    /// Phone-call mode manual confirmation via Ctrl+Q (the single-channel
+    /// audio is mixed but the user has marked the end of the interviewer's
+    /// question).
+    PhoneManual,
+    /// React-side `trigger_response` — the user typed or pasted a question.
+    UserTriggered,
+    /// Microphone — must NEVER reach the orchestrator. Reserved as a sentinel
+    /// for tests / defensive checks.
+    Microphone,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -587,6 +608,7 @@ fn send_detected_question(
         text,
         session_id,
         detected_at: Instant::now(),
+        source: DetectedQuestionSource::System,
     };
     if question_tx.try_send(q).is_err() {
         tracing::warn!(
@@ -660,6 +682,7 @@ mod tests {
             text: "Tell me about yourself.".to_string(),
             session_id: Uuid::new_v4(),
             detected_at: Instant::now(),
+            source: DetectedQuestionSource::System,
         };
         assert!(!q.text.is_empty());
     }
