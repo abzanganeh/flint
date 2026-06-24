@@ -48,13 +48,14 @@ use crate::events::{
     ThreadStatusPayload, TranscriptionChunkPayload,
 };
 
+use crate::audio::audit::{AudioAuditCounters, SuppressionReason};
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
     finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
 };
 use crate::transcription::sanitizer::sanitize_live_transcript;
-use crate::transcription::speaker_suspicion;
+use crate::transcription::speaker_suspicion::{self, SuspicionReason};
 
 /// Default `label_source` value applied to every chunk emitted from this
 /// pipeline. The suspicion detector and the manual `relabel_transcript_chunk`
@@ -311,6 +312,7 @@ pub async fn run_audio_pipeline(
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
     mic_quality: Arc<SyncMutex<MicQualityMonitor>>,
+    audit: Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
 ) -> Result<()> {
@@ -349,6 +351,7 @@ pub async fn run_audio_pipeline(
             &persistence,
             &dedup,
             &mic_quality,
+            &audit,
             echo_suppression_enabled,
             phone_mode_manual_only,
         )
@@ -379,6 +382,7 @@ async fn process_frame(
     persistence: &Arc<SessionPersistence>,
     dedup: &SyncMutex<CrossChannelDedup>,
     mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
+    audit: &Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
 ) -> Result<()> {
@@ -420,6 +424,7 @@ async fn process_frame(
     }
 
     // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
+    let chunk_duration_ms = chunk.duration_ms;
     let whisper = Arc::clone(whisper);
     let transcription = tokio::task::spawn_blocking(move || whisper.transcribe(&chunk))
         .await
@@ -439,6 +444,16 @@ async fn process_frame(
                 source = %source,
                 "transcript chunk dropped — sanitiser removed entire content"
             );
+            audit.record_suppression(source, SuppressionReason::SanitizerEmpty);
+            log_chunk_metric(
+                source,
+                chunk_duration_ms,
+                None,
+                true,
+                Some(SuppressionReason::SanitizerEmpty.as_str()),
+                LABEL_SOURCE_CHANNEL,
+                false,
+            );
             return Ok(());
         }
     }
@@ -450,12 +465,13 @@ async fn process_frame(
             Err(poisoned) => poisoned.into_inner(),
         };
         if let Some(direction) = guard.should_suppress(source, &result.text, now) {
-            match direction {
+            let reason = match direction {
                 SuppressionDirection::SystemBleedIntoMic => {
                     tracing::debug!(
                         source = %source,
                         "suppressed cross-channel echo (system -> mic)"
                     );
+                    SuppressionReason::EchoSystemBleedIntoMic
                 }
                 SuppressionDirection::MicBleedIntoSystem => {
                     if !guard.mic_to_system_warned {
@@ -471,8 +487,20 @@ async fn process_frame(
                             "suppressed cross-channel echo (mic -> system)"
                         );
                     }
+                    SuppressionReason::EchoMicBleedIntoSystem
                 }
-            }
+            };
+            drop(guard);
+            audit.record_suppression(source, reason);
+            log_chunk_metric(
+                source,
+                chunk_duration_ms,
+                result.avg_logprob,
+                true,
+                Some(reason.as_str()),
+                LABEL_SOURCE_CHANNEL,
+                false,
+            );
             return Ok(());
         }
         guard.record(source, &result.text, now);
@@ -508,6 +536,18 @@ async fn process_frame(
         tracing::warn!(error = %e, "transcript chunk persist failed — continuing");
     }
 
+    // M13 S6 — record an accepted chunk for the session-end audit summary.
+    audit.record_chunk(source, result.avg_logprob);
+    log_chunk_metric(
+        source,
+        chunk_duration_ms,
+        result.avg_logprob,
+        false,
+        None,
+        LABEL_SOURCE_CHANNEL,
+        true,
+    );
+
     // ── Step 4b.1: non-phone-mode label suspicion ─────────────────────────
     // Phone-call mode collapses both speakers onto one channel so the
     // heuristic is meaningless there; only run in normal dual-stream mode
@@ -521,6 +561,14 @@ async fn process_frame(
                 reason = %verdict.reason.as_str(),
                 "speaker label looks suspicious"
             );
+            match verdict.reason {
+                SuspicionReason::QuestionShapeOnMic => {
+                    audit.record_suspicion_question_on_mic();
+                }
+                SuspicionReason::FirstPersonOnSystem => {
+                    audit.record_suspicion_first_person_on_system();
+                }
+            }
             emit_chunk_label_suspicious(
                 app_handle,
                 ChunkLabelSuspiciousPayload {
@@ -597,6 +645,31 @@ async fn dispatch_confirm_plan(
         }
     }
     Ok(())
+}
+
+/// M13 S6 — emit the per-chunk structured log line per
+/// `.cursor/rules/flint-performance.mdc`. INFO level so it surfaces in the
+/// dev dashboard without requiring debug builds.
+fn log_chunk_metric(
+    source: AudioSource,
+    duration_ms: u32,
+    avg_logprob: Option<f32>,
+    suppressed: bool,
+    suppression_reason: Option<&'static str>,
+    label_source: &'static str,
+    was_validated: bool,
+) {
+    tracing::info!(
+        target: "flint::audio::chunk",
+        source = %source,
+        duration_ms,
+        avg_logprob = ?avg_logprob,
+        suppressed,
+        suppression_reason = ?suppression_reason,
+        label_source,
+        was_validated,
+        "transcription_chunk_metric"
+    );
 }
 
 fn send_detected_question(

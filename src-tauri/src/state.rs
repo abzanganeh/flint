@@ -90,6 +90,9 @@ pub struct LiveTaskHandles {
     pub system_transcript_buffer: Arc<std::sync::Mutex<SystemTranscriptBuffer>>,
     /// Phone-mode diarization state (M10 Slice 8).
     pub diarizer: Arc<std::sync::Mutex<DiarizerManager>>,
+    /// M13 S6 — audio pipeline audit counters. Snapshotted on session end and
+    /// written to `~/.flint/metrics.log`.
+    pub audit: Arc<crate::audio::audit::AudioAuditCounters>,
 }
 
 /// Shared application state for Tauri commands.

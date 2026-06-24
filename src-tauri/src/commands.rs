@@ -2968,6 +2968,8 @@ pub async fn start_session(
         run_orchestrator(question_rx, orch_config, orch_app).await;
     });
 
+    let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
+
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
         sid,
@@ -2979,6 +2981,7 @@ pub async fn start_session(
         mic_rx,
         Arc::clone(&state.persistence),
         Arc::new(std::sync::Mutex::new(MicQualityMonitor::default())),
+        Arc::clone(&audit),
         !is_phone_call_mode,
         is_phone_call_mode,
     ));
@@ -2994,6 +2997,7 @@ pub async fn start_session(
         turn_cancel: turn_cancel_slot,
         system_transcript_buffer,
         diarizer: Arc::clone(&diarizer),
+        audit,
     };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
@@ -3077,6 +3081,13 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
 
         handles.pipeline.abort();
         handles.orchestrator.abort();
+
+        // M13 S6 — snapshot the per-session audit counters and append a JSON
+        // summary line to ~/.flint/metrics.log before the handles drop.
+        if let Some(sid) = state.state_machine.lock().await.session_id() {
+            let summary = handles.audit.snapshot();
+            crate::audio::audit::write_summary_to_metrics_log(sid, &summary);
+        }
     }
 
     // Clear per-session memory.

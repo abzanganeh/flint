@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod capture;
 pub mod diarizer;
 pub mod pipeline;
