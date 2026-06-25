@@ -281,6 +281,21 @@ pub async fn run_orchestrator<R: Runtime>(
     let mut turn_number: usize = 0;
 
     while let Some(first) = question_rx.recv().await {
+        // M13 S5 — defensive check: only the System loopback channel, the
+        // phone-mode manual confirmation, and the React-side trigger button
+        // may produce a question for the orchestrator. Mic-tagged questions
+        // mean a regression in the audio pipeline routing; drop the turn and
+        // log loudly rather than silently dispatching responses to the user's
+        // own utterance.
+        if !is_valid_question_source(first.source) {
+            tracing::error!(
+                session_id = %config.session_id,
+                source = ?first.source,
+                "orchestrator received question with invalid source — turn dropped"
+            );
+            continue;
+        }
+
         // ── Silence debounce ─────────────────────────────────────────────────
         // Drain additional questions that arrive within the debounce window,
         // keeping only the last one (most complete utterance).
@@ -354,6 +369,19 @@ pub async fn run_orchestrator<R: Runtime>(
     }
 
     info!(session_id = %config.session_id, "orchestrator stopped");
+}
+
+/// True for every [`DetectedQuestionSource`] variant the orchestrator is
+/// allowed to consume. Microphone is reserved as a sentinel that should never
+/// reach the orchestrator (M13 S5).
+fn is_valid_question_source(source: crate::audio::pipeline::DetectedQuestionSource) -> bool {
+    use crate::audio::pipeline::DetectedQuestionSource;
+    matches!(
+        source,
+        DetectedQuestionSource::System
+            | DetectedQuestionSource::PhoneManual
+            | DetectedQuestionSource::UserTriggered
+    )
 }
 
 /// Drain the channel for `window` duration, returning the last question seen.
@@ -772,15 +800,15 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // ── 8. Update conversation memory ─────────────────────────────────────
     {
         let mut mem = cfg.memory.lock().await;
-        mem.push_turn(Turn {
-            question: cfg.question_text.clone(),
-            directional_response: directional_text.clone(),
-            depth_response: depth_text.clone(),
-            created_at_ms: std::time::SystemTime::now()
+        mem.push_turn(Turn::new(
+            cfg.question_text.clone(),
+            directional_text.clone(),
+            depth_text.clone(),
+            std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0),
-        });
+        ));
     }
 
     // ── 8. Token usage estimate (4 chars ≈ 1 token) ───────────────────────
@@ -966,16 +994,19 @@ mod tests {
 
     #[tokio::test]
     async fn debounce_returns_latest_question() {
+        use crate::audio::pipeline::DetectedQuestionSource;
         let (tx, mut rx) = mpsc::channel(8);
         let first = DetectedQuestion {
             text: "first".to_string(),
             session_id: Uuid::new_v4(),
             detected_at: std::time::Instant::now(),
+            source: DetectedQuestionSource::System,
         };
         let second = DetectedQuestion {
             text: "second".to_string(),
             session_id: Uuid::new_v4(),
             detected_at: std::time::Instant::now(),
+            source: DetectedQuestionSource::System,
         };
         // Send the second question immediately before the debounce timer fires.
         tx.send(second).await.unwrap();
@@ -983,5 +1014,25 @@ mod tests {
 
         let result = debounce(&mut rx, first, Duration::from_millis(50)).await;
         assert_eq!(result.text, "second");
+    }
+
+    #[test]
+    fn orchestrator_accepts_system_phone_and_user_sources() {
+        use crate::audio::pipeline::DetectedQuestionSource;
+        assert!(is_valid_question_source(DetectedQuestionSource::System));
+        assert!(is_valid_question_source(
+            DetectedQuestionSource::PhoneManual
+        ));
+        assert!(is_valid_question_source(
+            DetectedQuestionSource::UserTriggered
+        ));
+    }
+
+    #[test]
+    fn orchestrator_rejects_microphone_source() {
+        use crate::audio::pipeline::DetectedQuestionSource;
+        assert!(!is_valid_question_source(
+            DetectedQuestionSource::Microphone
+        ));
     }
 }

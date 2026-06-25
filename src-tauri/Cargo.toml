@@ -68,6 +68,7 @@ tauri-plugin-global-shortcut = "2"
 tauri-plugin-deep-link = "2"
 arboard = "3"
 hound = "3"
+regex = "1.12.4"
 
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

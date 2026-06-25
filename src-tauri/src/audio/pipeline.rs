@@ -43,15 +43,24 @@ use crate::audio::capture::{AudioFrame, AudioSource};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunker, WHISPER_MIN_SEGMENT_MS};
 use crate::events::{
-    emit_audio_quality_status, emit_thread_status, emit_transcription_chunk,
-    AudioQualityStatusPayload, ThreadStatusPayload, TranscriptionChunkPayload,
+    emit_audio_quality_status, emit_chunk_label_suspicious, emit_thread_status,
+    emit_transcription_chunk, AudioQualityStatusPayload, ChunkLabelSuspiciousPayload,
+    ThreadStatusPayload, TranscriptionChunkPayload,
 };
 
+use crate::audio::audit::{AudioAuditCounters, SuppressionReason};
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
     finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
 };
+use crate::transcription::sanitizer::sanitize_live_transcript;
+use crate::transcription::speaker_suspicion::{self, SuspicionReason};
+
+/// Default `label_source` value applied to every chunk emitted from this
+/// pipeline. The suspicion detector and the manual `relabel_transcript_chunk`
+/// command upgrade this to `"heuristic"` or `"user"` respectively.
+const LABEL_SOURCE_CHANNEL: &str = "channel";
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -63,6 +72,27 @@ pub struct DetectedQuestion {
     pub text: String,
     pub session_id: Uuid,
     pub detected_at: Instant,
+    /// Provenance — who/what produced this question. The orchestrator
+    /// asserts this is never `Microphone` so a future bug that routes the
+    /// user's own speech into `question_tx` cannot dispatch responses to
+    /// the user's own utterance (M13 S5).
+    pub source: DetectedQuestionSource,
+}
+
+/// Origin of a [`DetectedQuestion`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectedQuestionSource {
+    /// Loopback / system audio (the interviewer in non-phone mode).
+    System,
+    /// Phone-call mode manual confirmation via Ctrl+Q (the single-channel
+    /// audio is mixed but the user has marked the end of the interviewer's
+    /// question).
+    PhoneManual,
+    /// React-side `trigger_response` — the user typed or pasted a question.
+    UserTriggered,
+    /// Microphone — must NEVER reach the orchestrator. Reserved as a sentinel
+    /// for tests / defensive checks.
+    Microphone,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -120,28 +150,60 @@ struct DedupEntry {
     at: Instant,
 }
 
+/// Direction of a suppression event.
+///
+/// `SystemBleedIntoMic` is the dominant case (user without headphones — the
+/// interviewer's voice on speakers leaks into the mic). `MicBleedIntoSystem`
+/// is rare and indicates a misconfigured loopback (mic feeding back into the
+/// system sink); we surface it at INFO+ once per session as a hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuppressionDirection {
+    SystemBleedIntoMic,
+    MicBleedIntoSystem,
+}
+
 #[derive(Default)]
 struct CrossChannelDedup {
     recent_system: Vec<DedupEntry>,
     recent_mic: Vec<DedupEntry>,
+    /// Whether we have already logged the user-facing "mic loopback bleed"
+    /// hint this session. Avoids log spam while still surfacing the warning.
+    mic_to_system_warned: bool,
 }
 
 impl CrossChannelDedup {
-    /// Returns true iff `text` near-duplicates content recently transcribed on
-    /// the OPPOSITE channel — i.e. this arrival is the echo, not the source.
-    fn should_suppress(&mut self, source: AudioSource, text: &str, now: Instant) -> bool {
+    /// Returns the suppression direction iff `text` near-duplicates content
+    /// recently transcribed on the OPPOSITE channel — i.e. this arrival is
+    /// the echo, not the source.
+    fn should_suppress(
+        &mut self,
+        source: AudioSource,
+        text: &str,
+        now: Instant,
+    ) -> Option<SuppressionDirection> {
         let tokens = tokenize_for_echo(text);
         if tokens.len() < ECHO_MIN_WORDS {
-            return false;
+            return None;
         }
         self.prune(now);
         let opposite = match source {
             AudioSource::Microphone => &self.recent_system,
             AudioSource::System => &self.recent_mic,
         };
-        opposite
+        let matched = opposite
             .iter()
-            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
+            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD);
+        if !matched {
+            return None;
+        }
+        Some(match source {
+            // Mic arrived AFTER System spoke the same words → speakers bled
+            // into the mic; the System chunk is the truth, drop the Mic copy.
+            AudioSource::Microphone => SuppressionDirection::SystemBleedIntoMic,
+            // System arrived AFTER Mic spoke the same words → loopback is
+            // recording the user's own voice; drop the System copy.
+            AudioSource::System => SuppressionDirection::MicBleedIntoSystem,
+        })
     }
 
     /// Record an accepted transcript so later echoes on the opposite channel
@@ -250,6 +312,7 @@ pub async fn run_audio_pipeline(
     mut mic_rx: mpsc::Receiver<AudioFrame>,
     persistence: Arc<SessionPersistence>,
     mic_quality: Arc<SyncMutex<MicQualityMonitor>>,
+    audit: Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
 ) -> Result<()> {
@@ -288,6 +351,7 @@ pub async fn run_audio_pipeline(
             &persistence,
             &dedup,
             &mic_quality,
+            &audit,
             echo_suppression_enabled,
             phone_mode_manual_only,
         )
@@ -318,6 +382,7 @@ async fn process_frame(
     persistence: &Arc<SessionPersistence>,
     dedup: &SyncMutex<CrossChannelDedup>,
     mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
+    audit: &Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
 ) -> Result<()> {
@@ -359,14 +424,39 @@ async fn process_frame(
     }
 
     // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
+    let chunk_duration_ms = chunk.duration_ms;
     let whisper = Arc::clone(whisper);
     let transcription = tokio::task::spawn_blocking(move || whisper.transcribe(&chunk))
         .await
         .map_err(|e| anyhow::anyhow!("Whisper task panicked: {e}"))??;
 
-    let Some(result) = transcription else {
+    let Some(mut result) = transcription else {
         return Ok(()); // silence or hallucination — discarded by engine
     };
+
+    // M13 S2: live sanitiser — strip hallucinated profanity / known stock
+    // hallucination tails / repeated ngram loops that survived the engine
+    // filters. Returns None when the whole utterance should be dropped.
+    match sanitize_live_transcript(&result.text) {
+        Some(clean) => result.text = clean,
+        None => {
+            tracing::debug!(
+                source = %source,
+                "transcript chunk dropped — sanitiser removed entire content"
+            );
+            audit.record_suppression(source, SuppressionReason::SanitizerEmpty);
+            log_chunk_metric(
+                source,
+                chunk_duration_ms,
+                None,
+                true,
+                Some(SuppressionReason::SanitizerEmpty.as_str()),
+                LABEL_SOURCE_CHANNEL,
+                false,
+            );
+            return Ok(());
+        }
+    }
 
     let now = Instant::now();
     if echo_suppression_enabled {
@@ -374,11 +464,42 @@ async fn process_frame(
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if guard.should_suppress(source, &result.text, now) {
-            tracing::debug!(
-                source = %source,
-                text = %result.text,
-                "suppressed near-identical cross-channel echo"
+        if let Some(direction) = guard.should_suppress(source, &result.text, now) {
+            let reason = match direction {
+                SuppressionDirection::SystemBleedIntoMic => {
+                    tracing::debug!(
+                        source = %source,
+                        "suppressed cross-channel echo (system -> mic)"
+                    );
+                    SuppressionReason::EchoSystemBleedIntoMic
+                }
+                SuppressionDirection::MicBleedIntoSystem => {
+                    if !guard.mic_to_system_warned {
+                        guard.mic_to_system_warned = true;
+                        tracing::warn!(
+                            "Mic audio appears to be looping back into the system audio \
+                             channel. Check your audio routing — Flint expects the system \
+                             sink monitor as the loopback, not the mic itself."
+                        );
+                    } else {
+                        tracing::debug!(
+                            source = %source,
+                            "suppressed cross-channel echo (mic -> system)"
+                        );
+                    }
+                    SuppressionReason::EchoMicBleedIntoSystem
+                }
+            };
+            drop(guard);
+            audit.record_suppression(source, reason);
+            log_chunk_metric(
+                source,
+                chunk_duration_ms,
+                result.avg_logprob,
+                true,
+                Some(reason.as_str()),
+                LABEL_SOURCE_CHANNEL,
+                false,
             );
             return Ok(());
         }
@@ -391,24 +512,73 @@ async fn process_frame(
         AudioSource::Microphone => "Microphone",
     };
     let timestamp = frame.timestamp.elapsed().as_millis() as i64;
+    let chunk_id = Uuid::new_v4();
     emit_transcription_chunk(
         app_handle,
         TranscriptionChunkPayload {
             text: result.text.clone(),
             speaker: speaker.to_string(),
             timestamp,
+            chunk_id: chunk_id.to_string(),
+            label_source: LABEL_SOURCE_CHANNEL.to_string(),
         },
     );
     // Persist every chunk immediately — crash-recovery insurance.
     let chunk = TranscriptChunk {
-        id: Uuid::new_v4(),
+        id: chunk_id,
         session_id,
         speaker: speaker.to_string(),
         text: result.text.clone(),
         timestamp_ms: timestamp,
+        label_source: LABEL_SOURCE_CHANNEL.to_string(),
     };
     if let Err(e) = persistence.write_transcript_chunk(&chunk) {
         tracing::warn!(error = %e, "transcript chunk persist failed — continuing");
+    }
+
+    // M13 S6 — record an accepted chunk for the session-end audit summary.
+    audit.record_chunk(source, result.avg_logprob);
+    log_chunk_metric(
+        source,
+        chunk_duration_ms,
+        result.avg_logprob,
+        false,
+        None,
+        LABEL_SOURCE_CHANNEL,
+        true,
+    );
+
+    // ── Step 4b.1: non-phone-mode label suspicion ─────────────────────────
+    // Phone-call mode collapses both speakers onto one channel so the
+    // heuristic is meaningless there; only run in normal dual-stream mode
+    // (where echo suppression is enabled).
+    if echo_suppression_enabled {
+        if let Some(verdict) = speaker_suspicion::evaluate(speaker, &result.text) {
+            tracing::info!(
+                chunk_id = %chunk_id,
+                speaker = %speaker,
+                suggested = %verdict.suggested_speaker,
+                reason = %verdict.reason.as_str(),
+                "speaker label looks suspicious"
+            );
+            match verdict.reason {
+                SuspicionReason::QuestionShapeOnMic => {
+                    audit.record_suspicion_question_on_mic();
+                }
+                SuspicionReason::FirstPersonOnSystem => {
+                    audit.record_suspicion_first_person_on_system();
+                }
+            }
+            emit_chunk_label_suspicious(
+                app_handle,
+                ChunkLabelSuspiciousPayload {
+                    chunk_id: chunk_id.to_string(),
+                    current_speaker: speaker.to_string(),
+                    suggested_speaker: verdict.suggested_speaker,
+                    reason: verdict.reason.as_str().to_string(),
+                },
+            );
+        }
     }
 
     // ── Steps 4c/4d: hybrid question detection on System audio only ───────
@@ -477,6 +647,31 @@ async fn dispatch_confirm_plan(
     Ok(())
 }
 
+/// M13 S6 — emit the per-chunk structured log line per
+/// `.cursor/rules/flint-performance.mdc`. INFO level so it surfaces in the
+/// dev dashboard without requiring debug builds.
+fn log_chunk_metric(
+    source: AudioSource,
+    duration_ms: u32,
+    avg_logprob: Option<f32>,
+    suppressed: bool,
+    suppression_reason: Option<&'static str>,
+    label_source: &'static str,
+    was_validated: bool,
+) {
+    tracing::info!(
+        target: "flint::audio::chunk",
+        source = %source,
+        duration_ms,
+        avg_logprob = ?avg_logprob,
+        suppressed,
+        suppression_reason = ?suppression_reason,
+        label_source,
+        was_validated,
+        "transcription_chunk_metric"
+    );
+}
+
 fn send_detected_question(
     question_tx: &mpsc::Sender<DetectedQuestion>,
     session_id: Uuid,
@@ -486,6 +681,7 @@ fn send_detected_question(
         text,
         session_id,
         detected_at: Instant::now(),
+        source: DetectedQuestionSource::System,
     };
     if question_tx.try_send(q).is_err() {
         tracing::warn!(
@@ -511,6 +707,8 @@ pub fn emit_audio_gap_marker(app_handle: &AppHandle, source: AudioSource, gap_se
             text,
             speaker: source.to_string(),
             timestamp: 0,
+            chunk_id: String::new(),
+            label_source: LABEL_SOURCE_CHANNEL.to_string(),
         },
     );
 }
@@ -557,6 +755,7 @@ mod tests {
             text: "Tell me about yourself.".to_string(),
             session_id: Uuid::new_v4(),
             detected_at: Instant::now(),
+            source: DetectedQuestionSource::System,
         };
         assert!(!q.text.is_empty());
     }
@@ -580,11 +779,13 @@ mod tests {
             "tell me about a project you led at your company",
             now,
         );
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            "I led the fraud detection platform migration last year",
-            now + Duration::from_millis(200),
-        ));
+        assert!(dedup
+            .should_suppress(
+                AudioSource::Microphone,
+                "I led the fraud detection platform migration last year",
+                now + Duration::from_millis(200),
+            )
+            .is_none());
     }
 
     #[test]
@@ -593,7 +794,10 @@ mod tests {
         let now = Instant::now();
         let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
         dedup.record(AudioSource::Microphone, text, now);
-        assert!(dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(300),));
+        assert_eq!(
+            dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(300),),
+            Some(SuppressionDirection::MicBleedIntoSystem)
+        );
     }
 
     #[test]
@@ -603,11 +807,14 @@ mod tests {
         let text = "Why do you like to work with Fisher Investors";
         dedup.record(AudioSource::System, text, now);
 
-        assert!(dedup.should_suppress(
-            AudioSource::Microphone,
-            text,
-            now + Duration::from_millis(200),
-        ));
+        assert_eq!(
+            dedup.should_suppress(
+                AudioSource::Microphone,
+                text,
+                now + Duration::from_millis(200),
+            ),
+            Some(SuppressionDirection::SystemBleedIntoMic)
+        );
     }
 
     #[test]
@@ -617,7 +824,10 @@ mod tests {
         let text = "I am excited about the AI Engineer opportunity at Fisher Investors";
         dedup.record(AudioSource::Microphone, text, now);
 
-        assert!(dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(200),));
+        assert_eq!(
+            dedup.should_suppress(AudioSource::System, text, now + Duration::from_millis(200),),
+            Some(SuppressionDirection::MicBleedIntoSystem)
+        );
     }
 
     #[test]
@@ -626,11 +836,13 @@ mod tests {
         let now = Instant::now();
         dedup.record(AudioSource::System, "tell me about a project you led", now);
 
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            "I led the fraud detection platform migration last year",
-            now + Duration::from_millis(500),
-        ));
+        assert!(dedup
+            .should_suppress(
+                AudioSource::Microphone,
+                "I led the fraud detection platform migration last year",
+                now + Duration::from_millis(500),
+            )
+            .is_none());
     }
 
     #[test]
@@ -640,7 +852,9 @@ mod tests {
         let text = "alpha bravo charlie delta echo test phrase here";
         dedup.record(AudioSource::System, text, now);
         let later = now + ECHO_WINDOW + Duration::from_millis(1);
-        assert!(!dedup.should_suppress(AudioSource::Microphone, text, later,));
+        assert!(dedup
+            .should_suppress(AudioSource::Microphone, text, later,)
+            .is_none());
     }
 
     #[test]
@@ -652,11 +866,13 @@ mod tests {
             "all right lets take our time with this question",
             now,
         );
-        assert!(!dedup.should_suppress(
-            AudioSource::Microphone,
-            "all right lets say guard over here now",
-            now + Duration::from_millis(300),
-        ));
+        assert!(dedup
+            .should_suppress(
+                AudioSource::Microphone,
+                "all right lets say guard over here now",
+                now + Duration::from_millis(300),
+            )
+            .is_none());
     }
 
     #[test]

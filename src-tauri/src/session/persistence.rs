@@ -44,6 +44,12 @@ pub struct TranscriptChunk {
     pub text: String,
     /// Wall-clock offset from session start in milliseconds.
     pub timestamp_ms: i64,
+    /// Provenance of [`speaker`] — one of:
+    /// - `"channel"`: derived from the cpal stream that captured the audio.
+    /// - `"heuristic"`: refined by a regex/rule classifier (suspicion detector).
+    /// - `"llm"`: confirmed/changed by an LLM verifier.
+    /// - `"user"`: manually set via the relabel command.
+    pub label_source: String,
 }
 
 /// Type of AI response.
@@ -192,7 +198,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 16;
+const SCHEMA_VERSION: u32 = 17;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -482,6 +488,22 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v16")?;
         info!("sqlite schema migrated to version 16");
+    }
+
+    if current < 17 {
+        // M13 S4: track speaker-label provenance so the frontend can
+        // distinguish channel-derived labels from heuristic/LLM/user
+        // overrides. Old rows default to 'channel'.
+        conn.execute_batch(
+            "
+            ALTER TABLE transcript_chunks
+                ADD COLUMN label_source TEXT NOT NULL DEFAULT 'channel';
+
+            PRAGMA user_version = 17;
+            ",
+        )
+        .context("schema migration v17")?;
+        info!("sqlite schema migrated to version 17");
     }
 
     Ok(())
@@ -809,25 +831,44 @@ impl SessionPersistence {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         conn.execute(
             "INSERT OR IGNORE INTO transcript_chunks
-                 (id, session_id, speaker, text, timestamp_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (id, session_id, speaker, text, timestamp_ms, label_source)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 chunk.id.to_string(),
                 chunk.session_id.to_string(),
                 chunk.speaker,
                 chunk.text,
                 chunk.timestamp_ms,
+                chunk.label_source,
             ],
         )
         .context("insert transcript chunk")?;
 
         debug!(
-            session_id = %chunk.session_id,
-            chunk_id   = %chunk.id,
-            speaker    = %chunk.speaker,
+            session_id   = %chunk.session_id,
+            chunk_id     = %chunk.id,
+            speaker      = %chunk.speaker,
+            label_source = %chunk.label_source,
             "transcript chunk persisted",
         );
         Ok(())
+    }
+
+    /// M13 S4 — manually relabel a previously persisted chunk's speaker.
+    /// Sets `label_source = 'user'` so subsequent reads know the override is
+    /// authoritative. Returns `Ok(false)` if no row matched.
+    pub fn relabel_transcript_chunk(&self, chunk_id: Uuid, new_speaker: &str) -> Result<bool> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let updated = conn
+            .execute(
+                "UPDATE transcript_chunks
+                    SET speaker = ?1,
+                        label_source = 'user'
+                  WHERE id = ?2",
+                params![new_speaker, chunk_id.to_string()],
+            )
+            .context("update transcript chunk speaker")?;
+        Ok(updated > 0)
     }
 
     // ── Responses ────────────────────────────────────────────────────────────
@@ -896,37 +937,8 @@ impl SessionPersistence {
         let recovered_id = Uuid::parse_str(&row_id).context("parse session_id")?;
         let state = parse_session_state(&state_str)?;
 
-        // Load transcript chunks.
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, speaker, text, timestamp_ms
-                 FROM transcript_chunks
-                 WHERE session_id = ?1
-                 ORDER BY created_at ASC",
-            )
-            .context("prepare transcript query")?;
-
-        let transcript_chunks = stmt
-            .query_map(params![sid], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })
-            .context("query transcript chunks")?
-            .map(|row| {
-                let (id, speaker, text, ts) = row.context("read transcript row")?;
-                Ok(TranscriptChunk {
-                    id: Uuid::parse_str(&id).context("parse chunk uuid")?,
-                    session_id: recovered_id,
-                    speaker,
-                    text,
-                    timestamp_ms: ts,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let transcript_chunks =
+            load_transcript_chunks_for(&conn, &sid, recovered_id, "load_session_for_recovery")?;
 
         // Load responses.
         let mut stmt = conn
@@ -1003,36 +1015,8 @@ impl SessionPersistence {
 
         let state = parse_session_state(&state_str)?;
 
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, speaker, text, timestamp_ms
-                 FROM transcript_chunks
-                 WHERE session_id = ?1
-                 ORDER BY created_at ASC",
-            )
-            .context("prepare transcript query (load_session_data)")?;
-
-        let transcript_chunks = stmt
-            .query_map(params![sid], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)?,
-                ))
-            })
-            .context("query transcript chunks (load_session_data)")?
-            .map(|row| {
-                let (id, speaker, text, ts) = row.context("read transcript row")?;
-                Ok(TranscriptChunk {
-                    id: Uuid::parse_str(&id).context("parse chunk uuid")?,
-                    session_id,
-                    speaker,
-                    text,
-                    timestamp_ms: ts,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let transcript_chunks =
+            load_transcript_chunks_for(&conn, &sid, session_id, "load_session_data")?;
 
         let mut stmt = conn
             .prepare(
@@ -2694,6 +2678,49 @@ fn verify_integrity(conn: &rusqlite::Connection) -> Result<()> {
     );
 }
 
+/// Shared loader for transcript_chunks rows. Reads `label_source` so callers
+/// preserve provenance through recovery and replay flows.
+fn load_transcript_chunks_for(
+    conn: &rusqlite::Connection,
+    sid: &str,
+    session_id: Uuid,
+    context_label: &'static str,
+) -> Result<Vec<TranscriptChunk>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, speaker, text, timestamp_ms, label_source
+             FROM transcript_chunks
+             WHERE session_id = ?1
+             ORDER BY created_at ASC",
+        )
+        .with_context(|| format!("prepare transcript query ({context_label})"))?;
+
+    let rows = stmt
+        .query_map(params![sid], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, i64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        })
+        .with_context(|| format!("query transcript chunks ({context_label})"))?
+        .map(|row| {
+            let (id, speaker, text, ts, label_source) = row.context("read transcript row")?;
+            Ok(TranscriptChunk {
+                id: Uuid::parse_str(&id).context("parse chunk uuid")?,
+                session_id,
+                speaker,
+                text,
+                timestamp_ms: ts,
+                label_source,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn parse_session_state(s: &str) -> Result<SessionState> {
     match s {
         "IDLE" => Ok(SessionState::Idle),
@@ -2733,6 +2760,7 @@ mod tests {
             speaker: "System".to_string(),
             text: text.to_string(),
             timestamp_ms: ts,
+            label_source: "channel".to_string(),
         }
     }
 
@@ -2842,14 +2870,46 @@ mod tests {
         db.write_transcript_chunk(&chunk).unwrap();
 
         let conn = db.db.lock().unwrap();
-        let text: String = conn
+        let (text, label_source): (String, String) = conn
             .query_row(
-                "SELECT text FROM transcript_chunks WHERE id = ?1",
+                "SELECT text, label_source FROM transcript_chunks WHERE id = ?1",
                 params![chunk.id.to_string()],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(text, "Tell me about yourself.");
+        assert_eq!(label_source, "channel");
+    }
+
+    #[test]
+    fn relabel_transcript_chunk_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let chunk = sample_chunk(sid, 1234, "I worked on the identity platform.");
+        db.write_transcript_chunk(&chunk).unwrap();
+
+        let updated = db.relabel_transcript_chunk(chunk.id, "Microphone").unwrap();
+        assert!(updated);
+
+        let conn = db.db.lock().unwrap();
+        let (speaker, label_source): (String, String) = conn
+            .query_row(
+                "SELECT speaker, label_source FROM transcript_chunks WHERE id = ?1",
+                params![chunk.id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(speaker, "Microphone");
+        assert_eq!(label_source, "user");
+    }
+
+    #[test]
+    fn relabel_transcript_chunk_returns_false_for_missing_id() {
+        let db = new_db();
+        let updated = db
+            .relabel_transcript_chunk(Uuid::new_v4(), "System")
+            .unwrap();
+        assert!(!updated);
     }
 
     #[test]

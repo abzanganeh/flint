@@ -6,6 +6,25 @@ export interface TranscriptionChunkEventPayload {
   text: string;
   speaker: Speaker;
   timestamp: number;
+  /** Persisted chunk id; empty for synthetic markers (audio gaps). */
+  chunk_id?: string;
+  /** Provenance: "channel" | "heuristic" | "llm" | "user" (M13 S4). */
+  label_source?: string;
+}
+
+/** M13 S4 — heuristic-flagged label mismatch on a previously emitted chunk. */
+export interface ChunkLabelSuspiciousEventPayload {
+  chunk_id: string;
+  current_speaker: Speaker;
+  suggested_speaker: Speaker;
+  reason: string;
+}
+
+/** M13 S4 — confirmation of a manual relabel; UI updates the badge in place. */
+export interface TranscriptChunkRelabeledEventPayload {
+  chunk_id: string;
+  speaker: Speaker;
+  label_source: string;
 }
 
 export interface TurnStartedEventPayload {
@@ -107,6 +126,20 @@ export const onTranscriptionChunk = (
   handler: (payload: TranscriptionChunkEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<TranscriptionChunkEventPayload>("transcription_chunk", (event) =>
+    handler(event.payload),
+  );
+
+export const onChunkLabelSuspicious = (
+  handler: (payload: ChunkLabelSuspiciousEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<ChunkLabelSuspiciousEventPayload>("chunk_label_suspicious", (event) =>
+    handler(event.payload),
+  );
+
+export const onTranscriptChunkRelabeled = (
+  handler: (payload: TranscriptChunkRelabeledEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<TranscriptChunkRelabeledEventPayload>("transcript_chunk_relabeled", (event) =>
     handler(event.payload),
   );
 

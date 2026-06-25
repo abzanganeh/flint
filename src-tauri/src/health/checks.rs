@@ -36,6 +36,7 @@ pub enum HealthCheck {
     SupabaseConnection,
     GlobalHotkey,
     PanicHotkey,
+    EchoCancellation,
 }
 
 /// Outcome of a single health check.
@@ -76,6 +77,7 @@ pub async fn run_health_check(
         check_supabase_connection(supabase_url.as_deref()).await,
         check_global_hotkey(),
         check_panic_hotkey(),
+        check_echo_cancellation(),
     ]
 }
 
@@ -592,6 +594,70 @@ fn command_output_contains(program: &str, args: &[&str], needle: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Echo cancellation availability — used to keep the interviewer's voice from
+/// leaking back into the user's mic when the user is on laptop speakers.
+///
+/// Linux: detect whether PipeWire / PulseAudio has loaded `module-echo-cancel`.
+/// Other platforms ship system-level AEC (Windows audio engine, macOS Core
+/// Audio) so the check passes by default.
+fn check_echo_cancellation() -> HealthCheckResult {
+    #[cfg(target_os = "linux")]
+    {
+        if echo_cancel_module_loaded() {
+            return pass(
+                HealthCheck::EchoCancellation,
+                "PipeWire/PulseAudio echo-cancel module is loaded.",
+            );
+        }
+        warn(
+            HealthCheck::EchoCancellation,
+            "Echo cancellation is not enabled — the interviewer's voice may leak into your mic when using laptop speakers.",
+            "Wear headphones for the cleanest capture, or enable PipeWire's echo-cancel module: \
+             `pactl load-module module-echo-cancel use_master_format=1 \
+             aec_method=webrtc source_name=echo-cancel-source \
+             sink_name=echo-cancel-sink`. \
+             Then set `FLINT_MIC_SOURCE=echo-cancel-source` before starting Flint.",
+        )
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return pass(
+            HealthCheck::EchoCancellation,
+            "macOS Core Audio handles echo cancellation system-side.",
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        return pass(
+            HealthCheck::EchoCancellation,
+            "Windows audio engine handles echo cancellation system-side.",
+        );
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        warn(
+            HealthCheck::EchoCancellation,
+            "Echo cancellation could not be verified on this platform.",
+            "Wear headphones to avoid speaker bleed into the microphone.",
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn echo_cancel_module_loaded() -> bool {
+    let Ok(output) = std::process::Command::new("pactl")
+        .args(["list", "short", "modules"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines().any(|line| line.contains("module-echo-cancel"))
+}
+
 /// Stealth gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
 pub fn run_stealth_self_test() -> Result<(), String> {
     let result = check_stealth_api();
@@ -618,6 +684,16 @@ mod tests {
         let result = check_local_sqlite();
         assert_eq!(result.check, HealthCheck::LocalSqlite);
         assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn echo_cancellation_check_runs_without_panic() {
+        let result = check_echo_cancellation();
+        assert_eq!(result.check, HealthCheck::EchoCancellation);
+        assert!(matches!(
+            result.status,
+            CheckStatus::Pass | CheckStatus::Warn
+        ));
     }
 
     #[test]

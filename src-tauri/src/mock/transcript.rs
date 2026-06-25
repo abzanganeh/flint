@@ -1,81 +1,25 @@
-//! Post-process Whisper mock-interview transcripts before persistence and coaching.
+//! Mock-interview transcript sanitiser.
 //!
-//! Whisper sometimes hallucinates profanity — especially after partial word matches
-//! (e.g. "specifically" → "specific" + expletive). We repair known patterns and
-//! drop isolated profanity when the prepared script contains none.
+//! The actual cleanup logic lives in [`crate::transcription::sanitizer`] so
+//! the Live audio pipeline can reuse it. This module preserves the historical
+//! mock-only API surface as a thin wrapper.
+
+pub use crate::transcription::sanitizer::text_has_profanity;
+use crate::transcription::sanitizer::{sanitize_with_script_hint, validate_segment};
 
 /// Sanitize a mock turn transcript using optional script context.
+///
+/// Mock turns have a known suggested answer ("script hint") so deliberate
+/// profanity in the script is preserved and only hallucinated expletives are
+/// stripped.
 pub fn sanitize_mock_transcript(transcript: &str, script_hint: Option<&str>) -> String {
-    let trimmed = transcript.trim();
-    if trimmed.is_empty() {
-        return transcript.to_string();
-    }
-
-    let script_has_profanity = script_hint.map(text_has_profanity).unwrap_or(false);
-    let mut words: Vec<String> = trimmed.split_whitespace().map(str::to_string).collect();
-
-    repair_specifically_profanity_hallucination(&mut words);
-
-    if !script_has_profanity {
-        words.retain(|w| !is_profanity_word(w));
-    }
-
-    words.join(" ")
+    sanitize_with_script_hint(transcript, script_hint)
 }
 
-/// True when text contains a profanity token (after normalizing punctuation).
-pub fn text_has_profanity(text: &str) -> bool {
-    text.split_whitespace().any(is_profanity_word)
-}
-
-/// Whisper often emits "specific" + profanity when the speaker said "specifically".
-fn repair_specifically_profanity_hallucination(words: &mut Vec<String>) {
-    let mut i = 0;
-    while i < words.len() {
-        if is_specific_stem(&words[i]) && i + 1 < words.len() && is_profanity_word(&words[i + 1]) {
-            words[i] = punctuate_replacement("specifically", &words[i], &words[i + 1]);
-            words.remove(i + 1);
-            continue;
-        }
-        i += 1;
-    }
-}
-
-fn punctuate_replacement(replacement: &str, before: &str, after: &str) -> String {
-    if after.contains('!') || after.contains('?') || before.ends_with('.') || before.ends_with(',')
-    {
-        format!("{replacement},")
-    } else {
-        replacement.to_string()
-    }
-}
-
-fn is_specific_stem(word: &str) -> bool {
-    normalize_word(word) == "specific"
-}
-
-fn normalize_word(word: &str) -> String {
-    word.chars()
-        .filter(|c| c.is_alphanumeric() || *c == '*')
-        .collect::<String>()
-        .to_lowercase()
-}
-
-fn is_profanity_word(word: &str) -> bool {
-    let normalized = normalize_word(word);
-    if normalized.is_empty() {
-        return false;
-    }
-
-    let collapsed = normalized.replace('*', "");
-    if collapsed.contains("fuck") || collapsed == "fck" || collapsed.starts_with("fck") {
-        return true;
-    }
-
-    matches!(
-        collapsed.as_str(),
-        "shit" | "bitch" | "asshole" | "damn" | "cunt" | "bastard"
-    )
+/// Re-exported so callers that already imported it from `mock::transcript`
+/// keep working after the move.
+pub fn segment_is_plausible(text: &str, duration_ms: u32) -> bool {
+    validate_segment(text, duration_ms)
 }
 
 #[cfg(test)]

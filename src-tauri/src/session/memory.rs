@@ -23,16 +23,41 @@ use crate::llm::provider::{CompletionConfig, LLMProvider};
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A single exchange in the conversation.
+///
+/// Each turn carries explicit role-tagged content so the LLM (and the
+/// rolling-summary prompt) can distinguish who said what when context is
+/// compressed (M13 S5).
 #[derive(Debug, Clone)]
 pub struct Turn {
-    /// Raw question / utterance as transcribed.
+    /// Raw question / utterance as transcribed (interviewer voice).
     pub question: String,
     /// The directional response that was shown (empty if none yet).
     pub directional_response: String,
     /// The depth response that was shown (empty if none yet).
     pub depth_response: String,
+    /// What the candidate actually said in reply (transcribed user mic).
+    /// Empty until [`ConversationMemory::record_user_answer`] is called.
+    #[allow(dead_code)] // Wiring of the live user-answer feed lands in a later slice.
+    pub user_answer: String,
     /// Unix epoch milliseconds when the turn was recorded.
     pub created_at_ms: i64,
+}
+
+impl Turn {
+    pub fn new(
+        question: String,
+        directional_response: String,
+        depth_response: String,
+        created_at_ms: i64,
+    ) -> Self {
+        Self {
+            question,
+            directional_response,
+            depth_response,
+            user_answer: String::new(),
+            created_at_ms,
+        }
+    }
 }
 
 /// Budget allocation computed once per LLM call from the provider's context
@@ -253,6 +278,17 @@ impl ConversationMemory {
         }
     }
 
+    /// Record what the candidate said in response to the most recent turn's
+    /// question. The user-answer text is the post-sanitiser, post-quiet-window
+    /// mic transcription — never the raw stream — so TTS bleed and known
+    /// hallucinations cannot pollute the rolling summary (M13 S5).
+    #[allow(dead_code)] // Wired up by the live user-answer feed in a later slice.
+    pub fn record_user_answer(&mut self, text: String) {
+        if let Some(last) = self.turns.last_mut() {
+            last.user_answer = text;
+        }
+    }
+
     /// Build a [`MemoryContext`] that fits within `budget.history_tokens`.
     ///
     /// For large-window providers (≥ 16K tokens) all turns are returned
@@ -340,16 +376,26 @@ impl ConversationMemory {
     }
 
     /// Serialise a slice of turns to plain text for LLM injection.
+    ///
+    /// Role labels are explicit so the compression prompt and downstream
+    /// LLMs cannot conflate interviewer speech with the candidate's reply
+    /// when the rolling summary is built (M13 S5).
     fn serialise_turns(&self, turns: &[Turn]) -> String {
         turns
             .iter()
             .map(|t| {
-                let mut s = format!("Q: {}", t.question);
+                let mut s = format!("Interviewer asked: {}", t.question);
                 if !t.directional_response.is_empty() {
-                    s.push_str(&format!("\nA (brief): {}", t.directional_response));
+                    s.push_str(&format!(
+                        "\nAI suggested (brief): {}",
+                        t.directional_response
+                    ));
                 }
                 if !t.depth_response.is_empty() {
-                    s.push_str(&format!("\nA (full): {}", t.depth_response));
+                    s.push_str(&format!("\nAI suggested (full): {}", t.depth_response));
+                }
+                if !t.user_answer.is_empty() {
+                    s.push_str(&format!("\nCandidate answered: {}", t.user_answer));
                 }
                 s
             })
@@ -409,6 +455,7 @@ mod tests {
             question: q.to_string(),
             directional_response: format!("Brief answer to: {q}"),
             depth_response: format!("Full answer to: {q}"),
+            user_answer: String::new(),
             created_at_ms: now_ms(),
         }
     }
@@ -418,6 +465,7 @@ mod tests {
             question: q.to_string(),
             directional_response: format!("Brief answer to: {q}"),
             depth_response: format!("Full answer to: {q}"),
+            user_answer: String::new(),
             created_at_ms,
         }
     }
@@ -473,6 +521,7 @@ mod tests {
             question: "x".repeat(2000),
             directional_response: "y".repeat(2000),
             depth_response: "z".repeat(2000),
+            user_answer: String::new(),
             created_at_ms: now_ms(),
         };
         mem.push_turn(long_turn.clone());
@@ -495,11 +544,47 @@ mod tests {
             question: "Q1".to_string(),
             directional_response: String::new(),
             depth_response: String::new(),
+            user_answer: String::new(),
             created_at_ms: now_ms(),
         });
         mem.update_last_responses(Some("brief".to_string()), Some("full".to_string()));
         assert_eq!(mem.turns[0].directional_response, "brief");
         assert_eq!(mem.turns[0].depth_response, "full");
+    }
+
+    #[test]
+    fn serialise_turns_uses_explicit_role_labels() {
+        let mut mem = ConversationMemory::new(128_000);
+        mem.push_turn(Turn {
+            question: "Tell me about your last project".to_string(),
+            directional_response: "Stick to one project, lead with impact.".to_string(),
+            depth_response: "I worked on identity at Fisher for three years.".to_string(),
+            user_answer: "I led the IAM migration in 2024.".to_string(),
+            created_at_ms: now_ms(),
+        });
+        let text = mem.serialise_turns(&mem.turns);
+        assert!(text.contains("Interviewer asked: Tell me about your last project"));
+        assert!(text.contains("AI suggested (brief): Stick to one project"));
+        assert!(text.contains("AI suggested (full): I worked on identity"));
+        assert!(text.contains("Candidate answered: I led the IAM migration"));
+    }
+
+    #[test]
+    fn record_user_answer_updates_last_turn() {
+        let mut mem = ConversationMemory::new(4096);
+        mem.push_turn(make_turn("Q1"));
+        mem.record_user_answer("I shipped the migration in Q3.".to_string());
+        assert_eq!(
+            mem.turns.last().unwrap().user_answer,
+            "I shipped the migration in Q3."
+        );
+    }
+
+    #[test]
+    fn record_user_answer_is_safe_with_empty_history() {
+        let mut mem = ConversationMemory::new(4096);
+        mem.record_user_answer("orphan answer".to_string());
+        assert!(mem.turns.is_empty());
     }
 
     #[test]
@@ -529,6 +614,7 @@ mod tests {
             question: "word ".repeat(2000),
             directional_response: "ans ".repeat(2000),
             depth_response: "ans ".repeat(2000),
+            user_answer: String::new(),
             created_at_ms: now_ms(),
         };
         mem.push_turn(huge);
