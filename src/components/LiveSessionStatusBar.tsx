@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { getProviderPriority, triggerResponse } from "../commands";
+import { getProviderPriority, signalQuestionEnded } from "../commands";
 import {
   onDirectionalToken,
   onFailoverTriggered,
@@ -19,6 +19,7 @@ type DetectionPhase = "listening" | "processing" | "detected" | "generating";
 
 export interface LiveSessionStatusBarProps {
   sessionId: string;
+  phoneCallMode?: boolean;
 }
 
 function providerDisplayName(name: string): string {
@@ -33,16 +34,27 @@ function providerDisplayName(name: string): string {
   return labels[name] ?? name;
 }
 
-const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
+interface RollingLine {
+  text: string;
+  /** Wall-clock ms when the chunk arrived — used for the 30s rolling window. */
+  receivedAt: number;
+}
+
+const LiveSessionStatusBar = ({
+  sessionId,
+  phoneCallMode = false,
+}: LiveSessionStatusBarProps) => {
   const [activeProvider, setActiveProvider] = useState("groq");
   const [failoverActive, setFailoverActive] = useState(false);
   const [detectionPhase, setDetectionPhase] = useState<DetectionPhase>("listening");
-  const [systemLines, setSystemLines] = useState<Array<{ text: string; timestamp: number }>>([]);
+  const [systemLines, setSystemLines] = useState<RollingLine[]>([]);
   const [qFlash, setQFlash] = useState(false);
   const [capturedPreview, setCapturedPreview] = useState<string | null>(null);
+  const [qError, setQError] = useState<string | null>(null);
   const processingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const setLastManualQuestion = useUIStore((s) => s.setLastManualQuestion);
+  const pushNotification = useUIStore((s) => s.pushNotification);
 
   useEffect(() => {
     void getProviderPriority()
@@ -65,6 +77,8 @@ const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
       onTurnStarted(({ question }) => {
         setDetectionPhase("detected");
         setCapturedPreview(question);
+        setLastManualQuestion(question);
+        setQError(null);
       }),
       onDirectionalToken(() => {
         setDetectionPhase("generating");
@@ -94,15 +108,16 @@ const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
         clearTimeout(processingTimerRef.current);
       }
     };
-  }, []);
+  }, [setLastManualQuestion]);
 
   const onSystemChunk = useCallback(
     (line: { text: string; speaker: string; timestamp: number }) => {
       if (line.speaker !== "System") return;
-      const cutoff = Date.now() - ROLLING_WINDOW_MS;
+      const receivedAt = Date.now();
+      const cutoff = receivedAt - ROLLING_WINDOW_MS;
       setSystemLines((prev) => {
-        const next = [...prev, { text: line.text, timestamp: line.timestamp || Date.now() }];
-        return next.filter((entry) => (entry.timestamp || Date.now()) >= cutoff);
+        const next = [...prev, { text: line.text, receivedAt }];
+        return next.filter((entry) => entry.receivedAt >= cutoff);
       });
       setDetectionPhase("processing");
       if (processingTimerRef.current) clearTimeout(processingTimerRef.current);
@@ -120,31 +135,25 @@ const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
     [systemLines],
   );
 
+  /** Drain the backend System transcript buffer — authoritative for Q/Ctrl+Q. */
   const fireManualQuestion = useCallback(async () => {
-    const text = rollingText.trim();
-    if (!text) return;
+    setQError(null);
     setQFlash(true);
-    setCapturedPreview(text);
-    setLastManualQuestion(text);
     setDetectionPhase("generating");
     window.setTimeout(() => setQFlash(false), Q_FLASH_MS);
     try {
-      await triggerResponse(text, sessionId);
-    } catch {
+      await signalQuestionEnded(sessionId);
+    } catch (err: unknown) {
+      const message = String(err);
+      setQError(message);
       setDetectionPhase("listening");
+      pushNotification({
+        id: `live-q-error-${Date.now()}`,
+        level: "warn",
+        message,
+      });
     }
-  }, [rollingText, sessionId, setLastManualQuestion]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!event.ctrlKey || event.metaKey || event.altKey) return;
-      if (event.key.toLowerCase() !== "q") return;
-      event.preventDefault();
-      void fireManualQuestion();
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [fireManualQuestion]);
+  }, [sessionId, pushNotification]);
 
   const detectionLabel =
     detectionPhase === "processing"
@@ -153,7 +162,9 @@ const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
         ? "Question detected"
         : detectionPhase === "generating"
           ? "Generating response…"
-          : "Listening…";
+          : phoneCallMode
+            ? "Phone mode — press Q when interviewer finishes"
+            : "Listening…";
 
   const providerDotClass = failoverActive
     ? "live-provider-badge__dot live-provider-badge__dot--amber"
@@ -173,12 +184,18 @@ const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
   return (
     <div className="live-status-bar" data-testid="live-session-status-bar">
       <div className="live-status-bar__transcript">
-        <span className="live-status-bar__transcript-label">Last 30s (interviewer)</span>
+        <span className="live-status-bar__transcript-label">
+          {phoneCallMode ? "Last 30s (interviewer audio)" : "Last 30s (interviewer)"}
+        </span>
         <div className="live-status-bar__transcript-body" data-testid="live-rolling-transcript">
           {rollingText ? (
             rollingText
           ) : (
-            <span className="live-status-bar__transcript-empty">Waiting for interviewer audio…</span>
+            <span className="live-status-bar__transcript-empty">
+              {phoneCallMode
+                ? "Waiting for audio… press Q when the interviewer finishes their question"
+                : "Waiting for interviewer audio…"}
+            </span>
           )}
         </div>
       </div>
@@ -198,11 +215,16 @@ const LiveSessionStatusBar = ({ sessionId }: LiveSessionStatusBarProps) => {
             {capturedPreview}
           </span>
         )}
+        {qError && (
+          <span className="live-q-error" data-testid="live-q-error" style={{ color: "#f59e0b", fontSize: "11px" }}>
+            {qError}
+          </span>
+        )}
         <button
           type="button"
           className={`live-q-button${qFlash ? " live-q-button--flash" : ""}`}
           data-testid="live-q-button"
-          title="Mark question ended (Ctrl+Q)"
+          title="Mark question ended — sends captured interviewer speech to AI (Ctrl+Q)"
           onClick={() => void fireManualQuestion()}
         >
           Q

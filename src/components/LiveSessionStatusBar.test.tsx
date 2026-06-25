@@ -3,18 +3,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import LiveSessionStatusBar from "./LiveSessionStatusBar";
 
-const triggerResponse = vi.fn();
+const signalQuestionEnded = vi.fn();
 const getProviderPriority = vi.fn();
 const setLastManualQuestion = vi.fn();
+const pushNotification = vi.fn();
 
 vi.mock("../commands", () => ({
-  triggerResponse: (...args: unknown[]) => triggerResponse(...args),
+  signalQuestionEnded: (...args: unknown[]) => signalQuestionEnded(...args),
   getProviderPriority: () => getProviderPriority(),
 }));
 
 vi.mock("../store/ui", () => ({
-  useUIStore: (selector: (state: { setLastManualQuestion: typeof setLastManualQuestion }) => unknown) =>
-    selector({ setLastManualQuestion }),
+  useUIStore: (
+    selector: (state: {
+      setLastManualQuestion: typeof setLastManualQuestion;
+      pushNotification: typeof pushNotification;
+    }) => unknown,
+  ) => selector({ setLastManualQuestion, pushNotification }),
 }));
 
 const handlers: Record<string, (payload: unknown) => void> = {};
@@ -40,7 +45,6 @@ vi.mock("../events", () => ({
     handlers.threadStatus = handler;
     return Promise.resolve(() => undefined);
   },
-  onTranscriptionChunk: () => Promise.resolve(() => undefined),
 }));
 
 vi.mock("../hooks/useTranscriptionStream", () => ({
@@ -53,6 +57,7 @@ describe("LiveSessionStatusBar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getProviderPriority.mockResolvedValue(["groq", "deepseek"]);
+    signalQuestionEnded.mockResolvedValue(undefined);
     Object.keys(handlers).forEach((key) => delete handlers[key]);
   });
 
@@ -71,13 +76,14 @@ describe("LiveSessionStatusBar", () => {
     expect(screen.getByTestId("live-provider-badge").textContent).toContain("DeepSeek");
   });
 
-  it("shows rolling transcript from system chunks", async () => {
+  it("shows rolling transcript from system chunks using wall-clock window", async () => {
     render(<LiveSessionStatusBar sessionId="session-1" />);
     await act(async () => {
       handlers.transcription?.({
         text: "Tell me about yourself.",
         speaker: "System",
-        timestamp: Date.now(),
+        // Backend sends session-relative ms — must not break the rolling window.
+        timestamp: 4_200,
       });
     });
     expect(screen.getByTestId("live-rolling-transcript").textContent).toContain(
@@ -85,13 +91,13 @@ describe("LiveSessionStatusBar", () => {
     );
   });
 
-  it("flashes Q button and triggers response on click", async () => {
+  it("flashes Q button and calls signalQuestionEnded on click", async () => {
     render(<LiveSessionStatusBar sessionId="session-1" />);
     await act(async () => {
       handlers.transcription?.({
         text: "Why this role?",
         speaker: "System",
-        timestamp: Date.now(),
+        timestamp: 9_000,
       });
     });
 
@@ -99,8 +105,23 @@ describe("LiveSessionStatusBar", () => {
       fireEvent.click(screen.getByTestId("live-q-button"));
     });
 
-    expect(setLastManualQuestion).toHaveBeenCalledWith("Why this role?");
-    expect(triggerResponse).toHaveBeenCalledWith("Why this role?", "session-1");
+    expect(signalQuestionEnded).toHaveBeenCalledWith("session-1");
     expect(screen.getByTestId("live-q-button").className).toContain("live-q-button--flash");
+  });
+
+  it("surfaces backend errors when signalQuestionEnded fails", async () => {
+    signalQuestionEnded.mockRejectedValue(
+      "No interviewer transcript captured since the last question signal.",
+    );
+    render(<LiveSessionStatusBar sessionId="session-1" />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("live-q-button"));
+    });
+
+    expect(pushNotification).toHaveBeenCalled();
+    expect(screen.getByTestId("live-q-error").textContent).toContain(
+      "No interviewer transcript captured",
+    );
   });
 });

@@ -52,6 +52,14 @@ impl SystemTranscriptBuffer {
         joined
     }
 
+    /// Drop everything in the buffer without returning it. Called after the
+    /// auto-detector confirms a question — the confirmed text has already been
+    /// dispatched, so the next round of detection must start from a clean
+    /// slate or it will keep re-detecting the previously-confirmed text.
+    pub fn clear(&mut self) {
+        self.chunks.clear();
+    }
+
     pub fn accumulated_text(&self) -> String {
         self.chunks.join(" ")
     }
@@ -139,6 +147,16 @@ impl HybridQuestionDetector {
     /// Sync silence tick — confirm a pending candidate when silence threshold met.
     pub(crate) fn check_silence(&mut self, silence_ms: u64) -> Option<ConfirmPlan> {
         self.plan_confirm(silence_ms)
+    }
+
+    /// Reset the detector's snapshot/candidate state after the audio pipeline
+    /// has dispatched a confirmed question and cleared the System transcript
+    /// buffer. Without this the detector keeps comparing new chunks against
+    /// the last-confirmed text and short-circuits early or re-confirms the
+    /// same content as new chunks roll in.
+    pub(crate) fn reset_after_dispatch(&mut self) {
+        self.last_checked_snapshot.clear();
+        self.candidate = None;
     }
 
     fn stage_transcript(&mut self, text: &str, silence_ms: u64) -> Option<ConfirmPlan> {
@@ -334,6 +352,41 @@ mod tests {
         let drained = buf.drain_since_last_signal();
         assert_eq!(drained, "Tell me about yourself.");
         assert!(buf.accumulated_text().is_empty());
+    }
+
+    #[test]
+    fn system_buffer_clear_drops_all_chunks() {
+        let mut buf = SystemTranscriptBuffer::default();
+        buf.append("Hi there");
+        buf.append("how are you today");
+        buf.clear();
+        assert!(buf.accumulated_text().is_empty());
+    }
+
+    #[test]
+    fn reset_after_dispatch_lets_next_question_be_evaluated_fresh() {
+        let failover = mock_failover("YES");
+        let mut detector = HybridQuestionDetector::new(failover, &prompts_dir()).unwrap();
+
+        // Confirm a first question.
+        let plan = detector.ingest_transcript(
+            "tell me about a challenge you faced recently at work",
+            SILENCE_CONFIRM_MS,
+        );
+        assert!(plan.is_some());
+
+        // Without reset, re-feeding the same text would be skipped because the
+        // snapshot still matches. After reset_after_dispatch the detector
+        // forgets the snapshot so a fresh buffer can be evaluated again.
+        detector.reset_after_dispatch();
+        assert!(detector.last_checked_snapshot.is_empty());
+        assert!(detector.candidate.is_none());
+
+        let plan_again = detector.ingest_transcript(
+            "what motivates you in your daily work here",
+            SILENCE_CONFIRM_MS,
+        );
+        assert!(plan_again.is_some());
     }
 
     #[test]

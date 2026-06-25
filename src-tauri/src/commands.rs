@@ -3198,29 +3198,30 @@ pub async fn trigger_response(
     };
 
     let guard = state.live_tasks.lock().await;
-    if let Some(handles) = guard.as_ref() {
-        let detected = DetectedQuestion {
-            text: question_text.clone(),
-            session_id: sid,
-            detected_at: std::time::Instant::now(),
-            source: crate::audio::pipeline::DetectedQuestionSource::UserTriggered,
-        };
-        handles
-            .question_tx
-            .try_send(detected)
-            .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
-        info!(
-            session_id = %sid,
-            question_len = question_text.len(),
-            "manual trigger_response",
-        );
-        #[cfg(debug_assertions)]
-        tracing::debug!(
-            session_id = %sid,
-            question = %question_text,
-            "manual trigger_response (debug-only content)",
-        );
-    }
+    let Some(handles) = guard.as_ref() else {
+        return Err("No active live session handles.".to_string());
+    };
+    let detected = DetectedQuestion {
+        text: question_text.clone(),
+        session_id: sid,
+        detected_at: std::time::Instant::now(),
+        source: crate::audio::pipeline::DetectedQuestionSource::UserTriggered,
+    };
+    handles
+        .question_tx
+        .try_send(detected)
+        .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
+    info!(
+        session_id = %sid,
+        question_len = question_text.len(),
+        "manual trigger_response",
+    );
+    #[cfg(debug_assertions)]
+    tracing::debug!(
+        session_id = %sid,
+        question = %question_text,
+        "manual trigger_response (debug-only content)",
+    );
 
     Ok(())
 }

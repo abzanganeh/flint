@@ -103,7 +103,7 @@ fn looks_like_first_person_statement(text: &str) -> bool {
     static FIRST_PERSON: OnceLock<Regex> = OnceLock::new();
     let re = FIRST_PERSON.get_or_init(|| {
         Regex::new(
-            r"^\s*(i\s|i['']\s*(m|ve|d|ll)\b|my\s|me\s|we\s|in my (last|previous|current) role)\b",
+            r"(?i)^\s*(?:hi|hello)[,.]?\s*(?:this is|i['']?m|my name is|i am)\b|^\s*(?:i\s|i['']\s*(?:m|ve|d|ll)\b|my\s|me\s|we\s|this is|my name is|in my (?:last|previous|current) role)\b",
         )
         .expect("first-person regex compiles")
     });
@@ -165,6 +165,12 @@ mod tests {
     fn short_chunks_skipped() {
         assert!(evaluate("Microphone", "what?").is_none());
         assert!(evaluate("System", "I see.").is_none());
+    }
+
+    #[test]
+    fn self_intro_on_system_is_flagged() {
+        let verdict = evaluate("System", "Hi, this is Ali Barzio speaking.").unwrap();
+        assert_eq!(verdict.suggested_speaker, "Microphone");
     }
 
     #[test]
