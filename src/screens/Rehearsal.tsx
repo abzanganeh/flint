@@ -494,7 +494,7 @@ const Rehearsal = ({
           {/* Overlay panels */}
           <div style={{ flex: 1, overflow: "hidden" }}>
             <OverlayLayout
-              transcript={<TranscriptPanel />}
+              transcript={<TranscriptPanel sessionId={sessionId} />}
               directional={
                 <DirectionalPanel sessionId={sessionId} isGenerating={asking} />
               }
