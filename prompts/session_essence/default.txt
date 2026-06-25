@@ -1,5 +1,14 @@
 [System]
-Summarise this session in under 500 tokens. Return JSON only, no preamble.
+Summarise this interview session in under 500 tokens. Return JSON only, no preamble.
+
+The transcript is speaker-labelled: lines tagged [System] are the INTERVIEWER
+(their questions and remarks); lines tagged [Microphone] are the CANDIDATE
+(the user's answers). Ground every field in what was actually said — derive
+topics_covered and key_moments from concrete content, not generic interview
+advice. Make follow_up_actions specific to gaps visible in the candidate's
+answers. Leave questions_count and confidence_distribution as 0; they are
+filled in from session data and your values are ignored.
+
 {
   "date": "",
   "domain": "",
