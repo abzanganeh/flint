@@ -540,13 +540,18 @@ async fn process_frame(
     let mut speaker = channel_speaker;
     let mut label_source = LABEL_SOURCE_CHANNEL;
 
-    if echo_suppression_enabled {
+    // Dual-stream: channel is usually reliable; heuristics catch bleed.
+    // Phone mode: all audio arrives on System — heuristics are the only way
+    // to distinguish interviewer questions from the user's answers.
+    if echo_suppression_enabled || phone_mode_manual_only {
         if let Some(verdict) = speaker_suspicion::evaluate(channel_speaker, &result.text) {
             match verdict.reason {
                 SuspicionReason::QuestionShapeOnMic => audit.record_suspicion_question_on_mic(),
                 SuspicionReason::FirstPersonOnSystem => {
                     audit.record_suspicion_first_person_on_system();
-                    maybe_warn_mixed_source(app_handle, dedup);
+                    if echo_suppression_enabled {
+                        maybe_warn_mixed_source(app_handle, dedup);
+                    }
                 }
             }
             tracing::info!(

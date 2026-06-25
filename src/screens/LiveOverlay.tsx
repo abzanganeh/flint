@@ -38,6 +38,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   const [error, setError] = useState<string | null>(null);
   const [starting, setStarting] = useState(true);
   const [exiting, setExiting] = useState(false);
+  const [phoneCallMode, setPhoneCallMode] = useState(false);
   const lastManualQuestion = useUIStore((s) => s.lastManualQuestion);
 
   useTokenUsage();
@@ -64,6 +65,9 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       try {
         const snapshot = await getSessionSnapshot().catch(() => null);
         if (!active) return;
+        if (snapshot?.phoneCallMode) {
+          setPhoneCallMode(true);
+        }
         if (snapshot?.state === SessionState.LIVE) {
           setStarting(false);
           return;
@@ -206,6 +210,23 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
         </div>
       </div>
 
+      {phoneCallMode && (
+        <div
+          data-testid="live-phone-mode-banner"
+          style={{
+            padding: "8px 12px",
+            color: "#fbbf24",
+            fontSize: "12px",
+            borderBottom: "1px solid #1e2028",
+            backgroundColor: "#1a1400",
+          }}
+        >
+          Phone interview mode: one audio channel. Labels are best-effort — press{" "}
+          <strong>Q</strong> (or Ctrl+Q) when the <em>interviewer</em> finishes their question,
+          not when you speak. Use headphones in normal mode if you hear echo.
+        </div>
+      )}
+
       {error && (
         <div
           style={{
@@ -232,7 +253,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       </div>
 
       <TokenBudgetIndicator />
-      <LiveSessionStatusBar sessionId={sessionId} />
+      <LiveSessionStatusBar sessionId={sessionId} phoneCallMode={phoneCallMode} />
       <MicQualityBadge />
     </div>
     </PanicRestoreShell>
