@@ -244,7 +244,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
 
       <div style={{ flex: 1, overflow: "hidden" }}>
         <OverlayLayout
-          transcript={<TranscriptPanel />}
+          transcript={<TranscriptPanel sessionId={sessionId} />}
           directional={<DirectionalPanel sessionId={sessionId} />}
           depth={<DepthPanel />}
           clarifying={<ClarifyingPanel />}

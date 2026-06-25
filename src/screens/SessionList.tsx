@@ -77,6 +77,16 @@ function expiryClass(expiresInSecs: number, promoted: boolean): string {
   return "sl-expiry--normal";
 }
 
+function sessionDisplayName(session: SessionSummaryDto): string {
+  if (session.name.trim()) return session.name.trim();
+  const date = new Date(session.createdAt * 1000);
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
 const IN_PROGRESS_STATES = new Set([
   "CONFIGURING",
   "INGESTING",
@@ -113,6 +123,7 @@ export const SessionList: React.FC<Props> = ({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [cloning, setCloning] = useState<string | null>(null);
   const [reopening, setReopening] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<SessionSummaryDto | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -206,17 +217,21 @@ export const SessionList: React.FC<Props> = ({
     [onReopenSession],
   );
 
-  const handleDelete = useCallback(async (id: string) => {
-    setActionInFlight(id + ":delete");
+  const handleDeleteConfirmed = useCallback(async (session: SessionSummaryDto) => {
+    setActionInFlight(session.id + ":delete");
     try {
-      await deleteSession(id);
-      setSessions((prev) => prev.filter((s) => s.id !== id));
+      await deleteSession(session.id);
+      setSessions((prev) => prev.filter((s) => s.id !== session.id));
+      if (selectedId === session.id) {
+        setSelectedId(null);
+      }
+      setPendingDelete(null);
     } catch (e) {
       setError(String(e));
     } finally {
       setActionInFlight(null);
     }
-  }, []);
+  }, [selectedId]);
 
   return (
     <div className="sl-root">
@@ -340,17 +355,70 @@ export const SessionList: React.FC<Props> = ({
                   )}
                   <button
                     className="sl-action-btn sl-action-btn--delete"
-                    onClick={() => handleDelete(session.id)}
+                    onClick={() => setPendingDelete(session)}
                     disabled={busy}
                     type="button"
                   >
-                    {actionInFlight === session.id + ":delete" ? "Deleting…" : "Delete"}
+                    Delete
                   </button>
                 </div>
               </li>
             );
           })}
         </ul>
+
+        {pendingDelete && (
+          <div
+            className="sl-delete-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sl-delete-title"
+            data-testid="session-delete-dialog"
+            onClick={() => setPendingDelete(null)}
+          >
+            <div
+              className="sl-delete-dialog"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 id="sl-delete-title" className="sl-delete-title">
+                Delete session?
+              </h2>
+              <p className="sl-delete-name">{sessionDisplayName(pendingDelete)}</p>
+              <p className="sl-delete-body">
+                This permanently removes the session, question bank, preferred answers,
+                transcripts, and saved context from this device.
+                {pendingDelete.promoted && (
+                  <>
+                    {" "}
+                    This session is pinned — you marked it as important to keep.
+                  </>
+                )}
+              </p>
+              <p className="sl-delete-warning">This cannot be undone.</p>
+              <div className="sl-delete-actions">
+                <button
+                  className="sl-delete-btn sl-delete-btn--cancel"
+                  type="button"
+                  onClick={() => setPendingDelete(null)}
+                  disabled={actionInFlight === pendingDelete.id + ":delete"}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="sl-delete-btn sl-delete-btn--confirm"
+                  type="button"
+                  data-testid="session-delete-confirm"
+                  onClick={() => void handleDeleteConfirmed(pendingDelete)}
+                  disabled={actionInFlight === pendingDelete.id + ":delete"}
+                >
+                  {actionInFlight === pendingDelete.id + ":delete"
+                    ? "Deleting…"
+                    : "Delete permanently"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {sessions.length > 0 && (
           <p className="sl-footer-note">

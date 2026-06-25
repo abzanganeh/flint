@@ -262,3 +262,91 @@
   text-align: center;
   margin-top: 1.5rem;
 }
+
+.sl-delete-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.65);
+}
+
+.sl-delete-dialog {
+  width: 100%;
+  max-width: 28rem;
+  padding: 1.15rem 1.25rem;
+  border-radius: 10px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: #0f1117;
+}
+
+.sl-delete-title {
+  margin: 0 0 0.45rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #f4f4f5;
+}
+
+.sl-delete-name {
+  margin: 0 0 0.75rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #fca5a5;
+}
+
+.sl-delete-body {
+  margin: 0 0 0.5rem;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: #a1a1aa;
+}
+
+.sl-delete-warning {
+  margin: 0 0 1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #f87171;
+}
+
+.sl-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.sl-delete-btn {
+  border-radius: 6px;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: none;
+}
+
+.sl-delete-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.sl-delete-btn--cancel {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: #d4d4d8;
+}
+
+.sl-delete-btn--cancel:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sl-delete-btn--confirm {
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  background: rgba(248, 113, 113, 0.16);
+  color: #fca5a5;
+}
+
+.sl-delete-btn--confirm:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.24);
+}
