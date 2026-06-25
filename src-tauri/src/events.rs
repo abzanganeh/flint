@@ -17,18 +17,6 @@ pub struct TranscriptionChunkPayload {
     pub label_source: String,
 }
 
-/// M13 S4 — emitted when a heuristic detects that a chunk's channel-derived
-/// speaker label probably does not match what was actually said. The frontend
-/// surfaces this as a "Was this you?" prompt that can call
-/// `relabel_transcript_chunk` to override.
-#[derive(Debug, Clone, Serialize)]
-pub struct ChunkLabelSuspiciousPayload {
-    pub chunk_id: String,
-    pub current_speaker: String,
-    pub suggested_speaker: String,
-    pub reason: String,
-}
-
 /// M13 S4 — fired after a successful manual relabel so any UI that already
 /// rendered the chunk can update its speaker badge in place.
 #[derive(Debug, Clone, Serialize)]
@@ -168,13 +156,6 @@ pub fn emit_transcription_chunk<R: Runtime>(
     payload: TranscriptionChunkPayload,
 ) {
     let _ = app.emit("transcription_chunk", payload);
-}
-
-pub fn emit_chunk_label_suspicious<R: Runtime>(
-    app: &AppHandle<R>,
-    payload: ChunkLabelSuspiciousPayload,
-) {
-    let _ = app.emit("chunk_label_suspicious", payload);
 }
 
 pub fn emit_transcript_chunk_relabeled<R: Runtime>(
@@ -389,6 +370,16 @@ pub struct AudioQualityStatusPayload {
     pub level: String,
 }
 
+/// Emitted once per session when the system loopback is detected to be
+/// capturing the user's own microphone (too many first-person utterances on
+/// the System channel). The frontend surfaces an actionable hint (e.g. use
+/// headphones) so speaker separation can recover for the rest of the session.
+#[derive(Debug, Clone, Serialize)]
+pub struct AudioRoutingWarningPayload {
+    pub kind: String,
+    pub message: String,
+}
+
 pub fn emit_calibration_system_complete<R: Runtime>(
     app: &AppHandle<R>,
     payload: CalibrationCompletePayload,
@@ -408,4 +399,11 @@ pub fn emit_audio_quality_status<R: Runtime>(
     payload: AudioQualityStatusPayload,
 ) {
     let _ = app.emit("audio_quality_status", payload);
+}
+
+pub fn emit_audio_routing_warning<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: AudioRoutingWarningPayload,
+) {
+    let _ = app.emit("audio_routing_warning", payload);
 }

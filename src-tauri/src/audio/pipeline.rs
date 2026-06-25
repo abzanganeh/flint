@@ -43,8 +43,8 @@ use crate::audio::capture::{AudioFrame, AudioSource};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunker, WHISPER_MIN_SEGMENT_MS};
 use crate::events::{
-    emit_audio_quality_status, emit_chunk_label_suspicious, emit_thread_status,
-    emit_transcription_chunk, AudioQualityStatusPayload, ChunkLabelSuspiciousPayload,
+    emit_audio_quality_status, emit_audio_routing_warning, emit_thread_status,
+    emit_transcription_chunk, AudioQualityStatusPayload, AudioRoutingWarningPayload,
     ThreadStatusPayload, TranscriptionChunkPayload,
 };
 
@@ -61,6 +61,18 @@ use crate::transcription::speaker_suspicion::{self, SuspicionReason};
 /// pipeline. The suspicion detector and the manual `relabel_transcript_chunk`
 /// command upgrade this to `"heuristic"` or `"user"` respectively.
 const LABEL_SOURCE_CHANNEL: &str = "channel";
+
+/// `label_source` applied when the suspicion detector auto-corrects a chunk's
+/// speaker because its content contradicts the capture channel (e.g. an
+/// interviewer question that landed on the mic, or the user's first-person
+/// speech that bled into the system loopback).
+const LABEL_SOURCE_HEURISTIC: &str = "heuristic";
+
+/// Number of `FirstPersonOnSystem` auto-corrections in a session before we warn
+/// the user that their loopback is swallowing their own microphone. Below this
+/// threshold the occasional bleed is tolerable; above it the System channel is
+/// no longer a reliable proxy for "the interviewer".
+const MIXED_SOURCE_WARN_THRESHOLD: usize = 5;
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -169,6 +181,12 @@ struct CrossChannelDedup {
     /// Whether we have already logged the user-facing "mic loopback bleed"
     /// hint this session. Avoids log spam while still surfacing the warning.
     mic_to_system_warned: bool,
+    /// Count of System-channel chunks auto-corrected to Microphone because they
+    /// were clearly the user's own first-person speech. A high count means the
+    /// loopback is capturing the mic (e.g. laptop speakers without headphones).
+    system_to_mic_relabels: usize,
+    /// Whether the mixed-source warning has already been surfaced this session.
+    mixed_source_warned: bool,
 }
 
 impl CrossChannelDedup {
@@ -506,11 +524,53 @@ async fn process_frame(
         guard.record(source, &result.text, now);
     }
 
-    // ── Step 4b: emit + persist transcript chunk ──────────────────────────
-    let speaker = match source {
+    // ── Step 4b.0: resolve effective speaker (auto-correct mislabels) ──────
+    //
+    // The cpal channel is the default speaker proxy, but it is wrong when the
+    // loopback captures the user's own voice or the mic captures the
+    // interviewer. When the content shape clearly contradicts the channel, we
+    // auto-correct the label so every downstream consumer (persistence, UI,
+    // question detection, summary) sees the speaker that actually spoke.
+    // Phone-call mode collapses both speakers onto one channel, so the
+    // heuristic is meaningless there and only runs in dual-stream mode.
+    let channel_speaker = match source {
         AudioSource::System => "System",
         AudioSource::Microphone => "Microphone",
     };
+    let mut speaker = channel_speaker;
+    let mut label_source = LABEL_SOURCE_CHANNEL;
+
+    if echo_suppression_enabled {
+        if let Some(verdict) = speaker_suspicion::evaluate(channel_speaker, &result.text) {
+            match verdict.reason {
+                SuspicionReason::QuestionShapeOnMic => audit.record_suspicion_question_on_mic(),
+                SuspicionReason::FirstPersonOnSystem => {
+                    audit.record_suspicion_first_person_on_system();
+                    maybe_warn_mixed_source(app_handle, dedup);
+                }
+            }
+            tracing::info!(
+                from = %channel_speaker,
+                to = %verdict.suggested_speaker,
+                reason = %verdict.reason.as_str(),
+                "auto-corrected suspicious speaker label"
+            );
+            speaker = if verdict.suggested_speaker == "System" {
+                "System"
+            } else {
+                "Microphone"
+            };
+            label_source = LABEL_SOURCE_HEURISTIC;
+        }
+    }
+
+    // The speaker that actually spoke drives all routing below.
+    let effective_source = match speaker {
+        "System" => AudioSource::System,
+        _ => AudioSource::Microphone,
+    };
+
+    // ── Step 4b: emit + persist transcript chunk ──────────────────────────
     let timestamp = frame.timestamp.elapsed().as_millis() as i64;
     let chunk_id = Uuid::new_v4();
     emit_transcription_chunk(
@@ -520,7 +580,7 @@ async fn process_frame(
             speaker: speaker.to_string(),
             timestamp,
             chunk_id: chunk_id.to_string(),
-            label_source: LABEL_SOURCE_CHANNEL.to_string(),
+            label_source: label_source.to_string(),
         },
     );
     // Persist every chunk immediately — crash-recovery insurance.
@@ -530,13 +590,15 @@ async fn process_frame(
         speaker: speaker.to_string(),
         text: result.text.clone(),
         timestamp_ms: timestamp,
-        label_source: LABEL_SOURCE_CHANNEL.to_string(),
+        label_source: label_source.to_string(),
     };
     if let Err(e) = persistence.write_transcript_chunk(&chunk) {
         tracing::warn!(error = %e, "transcript chunk persist failed — continuing");
     }
 
     // M13 S6 — record an accepted chunk for the session-end audit summary.
+    // Audit reflects the physical capture channel so the loopback health stats
+    // stay meaningful regardless of relabelling.
     audit.record_chunk(source, result.avg_logprob);
     log_chunk_metric(
         source,
@@ -544,44 +606,13 @@ async fn process_frame(
         result.avg_logprob,
         false,
         None,
-        LABEL_SOURCE_CHANNEL,
+        label_source,
         true,
     );
 
-    // ── Step 4b.1: non-phone-mode label suspicion ─────────────────────────
-    // Phone-call mode collapses both speakers onto one channel so the
-    // heuristic is meaningless there; only run in normal dual-stream mode
-    // (where echo suppression is enabled).
-    if echo_suppression_enabled {
-        if let Some(verdict) = speaker_suspicion::evaluate(speaker, &result.text) {
-            tracing::info!(
-                chunk_id = %chunk_id,
-                speaker = %speaker,
-                suggested = %verdict.suggested_speaker,
-                reason = %verdict.reason.as_str(),
-                "speaker label looks suspicious"
-            );
-            match verdict.reason {
-                SuspicionReason::QuestionShapeOnMic => {
-                    audit.record_suspicion_question_on_mic();
-                }
-                SuspicionReason::FirstPersonOnSystem => {
-                    audit.record_suspicion_first_person_on_system();
-                }
-            }
-            emit_chunk_label_suspicious(
-                app_handle,
-                ChunkLabelSuspiciousPayload {
-                    chunk_id: chunk_id.to_string(),
-                    current_speaker: speaker.to_string(),
-                    suggested_speaker: verdict.suggested_speaker,
-                    reason: verdict.reason.as_str().to_string(),
-                },
-            );
-        }
-    }
-
-    // ── Steps 4c/4d: hybrid question detection on System audio only ───────
+    // ── Steps 4c/4d: hybrid question detection on the interviewer's speech ─
+    // Mic-quality monitoring keys off the PHYSICAL mic channel (it measures
+    // hardware capture quality, not speaker identity).
     if source == AudioSource::Microphone {
         if let Some(logprob) = result.avg_logprob {
             let level = {
@@ -597,6 +628,13 @@ async fn process_frame(
                 );
             }
         }
+    }
+
+    // Only the interviewer's speech feeds question detection. Routing by the
+    // EFFECTIVE speaker means a mislabeled interviewer question on the mic is
+    // still detected, and the user's own speech that bled into the loopback no
+    // longer pollutes the detector.
+    if effective_source != AudioSource::System {
         return Ok(());
     }
 
@@ -626,6 +664,35 @@ async fn process_frame(
     dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
 
     Ok(())
+}
+
+/// Track System->Mic relabels and warn the user once per session when the
+/// loopback is clearly capturing their own microphone. Recovering speaker
+/// separation by hand is impossible mid-session, but headphones fix it
+/// instantly, so the hint is actionable.
+fn maybe_warn_mixed_source(app_handle: &AppHandle, dedup: &SyncMutex<CrossChannelDedup>) {
+    let mut guard = match dedup.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.system_to_mic_relabels += 1;
+    if guard.mixed_source_warned || guard.system_to_mic_relabels < MIXED_SOURCE_WARN_THRESHOLD {
+        return;
+    }
+    guard.mixed_source_warned = true;
+    drop(guard);
+    tracing::warn!(
+        "system loopback is capturing the user's own voice — recommending headphones"
+    );
+    emit_audio_routing_warning(
+        app_handle,
+        AudioRoutingWarningPayload {
+            kind: "loopback_capturing_mic".to_string(),
+            message: "Your microphone is bleeding into the system audio. Use headphones so \
+                      Flint can tell you and the interviewer apart."
+                .to_string(),
+        },
+    );
 }
 
 async fn dispatch_confirm_plan(
