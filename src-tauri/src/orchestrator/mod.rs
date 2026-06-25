@@ -133,6 +133,7 @@ fn persist_thread_response(
     session_id: Uuid,
     response_type: ResponseType,
     text: &str,
+    confidence: f32,
 ) {
     if text.is_empty() {
         return;
@@ -142,7 +143,7 @@ fn persist_thread_response(
         session_id,
         response_type,
         content: text.to_string(),
-        confidence: 0.0,
+        confidence,
     };
     if let Err(e) = persistence.write_response(&r) {
         warn!(
@@ -724,17 +725,22 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     }
 
     // ── 7. Persist responses — crash-recovery insurance ───────────────────
+    // Confidence is a property of the turn (driven by the directional answer's
+    // grounding); both threads are persisted with the same turn confidence so
+    // the post-session summary can build a real distribution.
     persist_thread_response(
         &cfg.persistence,
         cfg.session_id,
         ResponseType::Directional,
         &directional_text,
+        confidence_score,
     );
     persist_thread_response(
         &cfg.persistence,
         cfg.session_id,
         ResponseType::Depth,
         &depth_text,
+        confidence_score,
     );
 
     // ── 7b. Quality-gated Q&A embedding ──────────────────────────────────
