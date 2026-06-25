@@ -8,13 +8,25 @@ import type { Speaker } from "../types";
 const MAX_LINES = 200;
 const AUDIO_GAP_PREFIX = "[audio gap";
 
+/// Consecutive chunks from the same speaker that arrive within this wall-clock
+/// window are merged into a single utterance bubble. Whisper emits one chunk
+/// per VAD segment (often 2-6 words), so without this the panel floods with
+/// dozens of tiny fragments per sentence. The backend `timestamp` is a
+/// relative elapsed value and unreliable for gap detection, so we use arrival
+/// time on the UI side.
+const UTTERANCE_MERGE_WINDOW_MS = 4000;
+
 // ── Types ────────────────────────────────────────────────────────────────────
 
-interface TranscriptLine {
+export interface TranscriptLine {
   id: number;
   text: string;
   speaker: Speaker;
   timestamp: number;
+  /** Wall-clock arrival of the most recent fragment merged into this line. */
+  lastArrivalMs: number;
+  /** True when any merged fragment was auto-corrected by the heuristic. */
+  corrected: boolean;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -23,16 +35,54 @@ function isAudioGap(text: string): boolean {
   return text.startsWith(AUDIO_GAP_PREFIX);
 }
 
-function appendLine(
+function joinFragments(existing: string, addition: string): string {
+  const trimmed = addition.trim();
+  if (trimmed.length === 0) return existing;
+  const needsSpace = existing.length > 0 && !existing.endsWith(" ");
+  return needsSpace ? `${existing} ${trimmed}` : `${existing}${trimmed}`;
+}
+
+export function appendLine(
   prev: TranscriptLine[],
   text: string,
   speaker: Speaker,
   timestamp: number,
+  labelSource: string | undefined,
   nextId: () => number,
 ): TranscriptLine[] {
+  const arrival = Date.now();
+  const corrected = labelSource === "heuristic";
+  const last = prev[prev.length - 1];
+
+  // Merge into the previous bubble when it is the same speaker, neither side is
+  // an audio-gap marker, and the fragment arrived within the merge window.
+  const canMerge =
+    last !== undefined &&
+    last.speaker === speaker &&
+    !isAudioGap(last.text) &&
+    !isAudioGap(text) &&
+    arrival - last.lastArrivalMs <= UTTERANCE_MERGE_WINDOW_MS;
+
+  if (canMerge) {
+    const merged: TranscriptLine = {
+      ...last,
+      text: joinFragments(last.text, text),
+      lastArrivalMs: arrival,
+      corrected: last.corrected || corrected,
+    };
+    return [...prev.slice(0, -1), merged];
+  }
+
   const next = [
     ...prev,
-    { id: nextId(), text, speaker, timestamp },
+    {
+      id: nextId(),
+      text: text.trim(),
+      speaker,
+      timestamp,
+      lastArrivalMs: arrival,
+      corrected,
+    },
   ];
   // Drop oldest lines when cap is reached.
   return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
@@ -50,9 +100,21 @@ const TranscriptPanel = (_props: TranscriptPanelProps) => {
   const nextId = () => ++lineIdRef.current;
 
   const onChunk = useCallback(
-    (line: { text: string; speaker: Speaker; timestamp: number }) => {
+    (line: {
+      text: string;
+      speaker: Speaker;
+      timestamp: number;
+      labelSource?: string;
+    }) => {
       setLines((prev) =>
-        appendLine(prev, line.text, line.speaker, line.timestamp, nextId),
+        appendLine(
+          prev,
+          line.text,
+          line.speaker,
+          line.timestamp,
+          line.labelSource,
+          nextId,
+        ),
       );
     },
     [],
@@ -160,6 +222,20 @@ const TranscriptLineRow = ({ line }: TranscriptLineRowProps) => {
         }}
       >
         {isSystem ? "Interviewer" : "You"}
+        {line.corrected && (
+          <span
+            title="Speaker auto-corrected from the capture channel"
+            style={{
+              marginLeft: 6,
+              color: "#f59e0b",
+              fontWeight: 500,
+              textTransform: "none",
+              letterSpacing: 0,
+            }}
+          >
+            (auto)
+          </span>
+        )}
       </span>
       <span
         style={{
