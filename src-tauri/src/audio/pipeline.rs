@@ -191,8 +191,9 @@ struct CrossChannelDedup {
 
 impl CrossChannelDedup {
     /// Returns the suppression direction iff `text` near-duplicates content
-    /// recently transcribed on the OPPOSITE channel — i.e. this arrival is
-    /// the echo, not the source.
+    /// recently transcribed on the OPPOSITE channel (cross-channel echo) or
+    /// on the SAME channel within the echo window (Whisper VAD producing two
+    /// segments for the same utterance, common with overlapping VAD chunks).
     fn should_suppress(
         &mut self,
         source: AudioSource,
@@ -204,6 +205,24 @@ impl CrossChannelDedup {
             return None;
         }
         self.prune(now);
+
+        // Same-channel near-duplicate (Whisper double-emit on contiguous VAD
+        // segments). Reusing the SystemBleedIntoMic / MicBleedIntoSystem
+        // variants for instrumentation; the suppression effect is the same.
+        let same = match source {
+            AudioSource::System => &self.recent_system,
+            AudioSource::Microphone => &self.recent_mic,
+        };
+        if same
+            .iter()
+            .any(|entry| jaccard(&tokens, &entry.tokens) >= ECHO_JACCARD_THRESHOLD)
+        {
+            return Some(match source {
+                AudioSource::System => SuppressionDirection::MicBleedIntoSystem,
+                AudioSource::Microphone => SuppressionDirection::SystemBleedIntoMic,
+            });
+        }
+
         let opposite = match source {
             AudioSource::Microphone => &self.recent_system,
             AudioSource::System => &self.recent_mic,
@@ -432,7 +451,14 @@ async fn process_frame(
                 let mut guard = hybrid.lock().await;
                 guard.check_silence(silence_ms)
             };
-            dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
+            let dispatched =
+                dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
+            if dispatched {
+                if let Ok(mut buf) = system_buffer.lock() {
+                    buf.clear();
+                }
+                hybrid.lock().await.reset_after_dispatch();
+            }
         }
         return Ok(());
     };
@@ -666,7 +692,19 @@ async fn process_frame(
         let mut guard = hybrid.lock().await;
         guard.ingest_transcript(&accumulated, post_silence_ms)
     };
-    dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
+    let dispatched =
+        dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
+    if dispatched {
+        // The confirmed text has been sent to the orchestrator. Clear the
+        // System transcript buffer and reset the hybrid detector so the next
+        // round of detection starts fresh — otherwise every subsequent chunk
+        // re-runs detection over the already-dispatched text plus the new
+        // fragment, repeatedly firing answers to ever-growing run-on questions.
+        if let Ok(mut buf) = system_buffer.lock() {
+            buf.clear();
+        }
+        hybrid.lock().await.reset_after_dispatch();
+    }
 
     Ok(())
 }
@@ -698,23 +736,32 @@ fn maybe_warn_mixed_source(app_handle: &AppHandle, dedup: &SyncMutex<CrossChanne
     );
 }
 
+/// Returns `true` when a question was actually dispatched to the orchestrator
+/// so the caller knows to drain the System transcript buffer and reset the
+/// hybrid detector. Returns `false` when the plan was `None` or the LLM verify
+/// step rejected the candidate.
 async fn dispatch_confirm_plan(
     plan: Option<ConfirmPlan>,
     hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
     app_handle: &AppHandle,
     question_tx: &mpsc::Sender<DetectedQuestion>,
     session_id: Uuid,
-) -> Result<()> {
+) -> Result<bool> {
     match plan {
-        None => {}
-        Some(ConfirmPlan::Immediate(text)) => send_detected_question(question_tx, session_id, text),
+        None => Ok(false),
+        Some(ConfirmPlan::Immediate(text)) => {
+            send_detected_question(question_tx, session_id, text);
+            Ok(true)
+        }
         Some(ConfirmPlan::WithLlm(text)) => {
             if let Some(q) = finalize_confirmation(hybrid, text, app_handle).await? {
                 send_detected_question(question_tx, session_id, q);
+                Ok(true)
+            } else {
+                Ok(false)
             }
         }
     }
-    Ok(())
 }
 
 /// M13 S6 — emit the per-chunk structured log line per
@@ -856,6 +903,18 @@ mod tests {
                 now + Duration::from_millis(200),
             )
             .is_none());
+    }
+
+    #[test]
+    fn same_channel_near_duplicate_is_suppressed() {
+        let mut dedup = CrossChannelDedup::default();
+        let now = Instant::now();
+        let text = "How are you today and what brings you here";
+        dedup.record(AudioSource::System, text, now);
+        // Whisper VAD double-emit: same channel, same text, within window.
+        assert!(dedup
+            .should_suppress(AudioSource::System, text, now + Duration::from_millis(400))
+            .is_some());
     }
 
     #[test]
