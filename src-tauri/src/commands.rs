@@ -4574,6 +4574,10 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
 }
 
 /// User accepted coach feedback — advance the conductor to the next question.
+///
+/// If the conductor handle is no longer present (e.g. the mock was stopped
+/// concurrently or the app restarted), this is a no-op rather than an error
+/// so the frontend can still proceed to `stop_mock`.
 #[tauri::command]
 pub async fn advance_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
     let session_id = state
@@ -4583,22 +4587,31 @@ pub async fn advance_mock_turn(state: State<'_, AppState>) -> Result<(), String>
         .session_id()
         .ok_or("no active session")?;
 
-    let (transcript, audio_path) = {
+    let result = {
         let guard = state.mock_tasks.lock().await;
-        let handles = guard.as_ref().ok_or("no active mock session")?;
-        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
-        if turn_n == 0 {
-            return Err("No mock question is active.".to_string());
+        match guard.as_ref() {
+            None => {
+                // Conductor already gone — nothing to advance.
+                debug!("advance_mock_turn: mock_tasks handle is gone, skipping conductor signal");
+                return Ok(());
+            }
+            Some(handles) => {
+                let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+                if turn_n == 0 {
+                    return Err("No mock question is active.".to_string());
+                }
+                state
+                    .persistence
+                    .load_mock_turns(session_id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|t| t.turn_n == turn_n)
+                    .map(|row| (row.user_text, row.audio_path))
+                    .ok_or_else(|| "mock turn not found".to_string())?
+            }
         }
-        let row = state
-            .persistence
-            .load_mock_turns(session_id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|t| t.turn_n == turn_n)
-            .ok_or("mock turn not found")?;
-        (row.user_text, row.audio_path)
     };
+    let (transcript, audio_path) = result;
     signal_mock_turn_complete(state.inner(), transcript, audio_path).await;
     Ok(())
 }

@@ -392,7 +392,9 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     setError(null);
     try {
       if (phase === "reviewing") {
-        await advanceMockTurn();
+        // Turn is already reviewed — skip advance and go straight to summary.
+        // advanceMockTurn requires the in-memory conductor handle which may be
+        // gone after a restart; stopMock(true) is sufficient here.
       } else if (
         phase === "answering" ||
         phase === "paused" ||
