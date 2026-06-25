@@ -3632,6 +3632,71 @@ fn summary_unavailable_json() -> String {
     .to_string()
 }
 
+/// Authoritative quantitative session stats derived from persisted data rather
+/// than the LLM's reading of the transcript. The LLM routinely under-counts
+/// (it cannot reliably tell questions from answers in a fragmented transcript),
+/// so these values override whatever the model returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionStats {
+    questions_count: usize,
+    high: usize,
+    medium: usize,
+    low: usize,
+}
+
+/// Derive stats from persisted responses. Each Directional response corresponds
+/// to one answered turn, so its count is the real "questions answered" figure,
+/// and its confidence drives the High/Medium/Low distribution. Buckets match
+/// the live confidence bands: High = green+blue (>=0.55), Medium = amber
+/// (0.35-0.55), Low = amber_low/red (<0.35).
+fn compute_session_stats(responses: &[crate::session::persistence::Response]) -> SessionStats {
+    use crate::session::persistence::ResponseType;
+
+    const HIGH_THRESHOLD: f32 = 0.55;
+    const MEDIUM_THRESHOLD: f32 = 0.35;
+
+    let mut stats = SessionStats::default();
+    for r in responses
+        .iter()
+        .filter(|r| r.response_type == ResponseType::Directional)
+    {
+        stats.questions_count += 1;
+        if r.confidence >= HIGH_THRESHOLD {
+            stats.high += 1;
+        } else if r.confidence >= MEDIUM_THRESHOLD {
+            stats.medium += 1;
+        } else {
+            stats.low += 1;
+        }
+    }
+    stats
+}
+
+/// Overlay authoritative `questions_count` and `confidence_distribution` onto
+/// an LLM-produced summary JSON blob. Returns the blob unchanged if it cannot
+/// be parsed (the caller still has a usable string).
+fn apply_session_stats(summary_json: &str, stats: SessionStats) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(summary_json) else {
+        return summary_json.to_string();
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return summary_json.to_string();
+    };
+    obj.insert(
+        "questions_count".to_string(),
+        serde_json::json!(stats.questions_count),
+    );
+    obj.insert(
+        "confidence_distribution".to_string(),
+        serde_json::json!({
+            "high": stats.high,
+            "medium": stats.medium,
+            "low": stats.low,
+        }),
+    );
+    value.to_string()
+}
+
 /// Generate a structured post-session summary using the `session_essence` prompt.
 ///
 /// Loads the full transcript from SQLite, passes it through the LLM prompt
@@ -3655,19 +3720,24 @@ pub async fn generate_session_summary(
     )
     .map_err(|e| format!("Failed to load session_essence prompt: {e}"))?;
 
-    // Fetch transcript rows from SQLite and build a flat string.
-    let transcript_text = {
+    // Fetch transcript + responses from SQLite. The transcript grounds the
+    // LLM's qualitative narrative; the responses give us the authoritative
+    // question count and confidence distribution.
+    let (transcript_text, stats) = {
         let data = state
             .persistence
             .load_session_data(sid)
             .map_err(|e| e.to_string())?;
         match data {
-            Some(d) => d
-                .transcript_chunks
-                .iter()
-                .map(|c| format!("[{}] {}", c.speaker, c.text))
-                .collect::<Vec<_>>()
-                .join("\n"),
+            Some(d) => {
+                let transcript = d
+                    .transcript_chunks
+                    .iter()
+                    .map(|c| format!("[{}] {}", c.speaker, c.text))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (transcript, compute_session_stats(&d.responses))
+            }
             None => {
                 // Session was already cleared — return an empty summary.
                 return Ok(serde_json::json!({
@@ -3712,7 +3782,8 @@ pub async fn generate_session_summary(
                 error = %e,
                 "post-session summary skipped — no failover stack"
             );
-            return Ok(summary_unavailable_json());
+            // Still surface the real, persisted stats even without narrative.
+            return Ok(apply_session_stats(&summary_unavailable_json(), stats));
         }
     };
 
@@ -3724,16 +3795,19 @@ pub async fn generate_session_summary(
                 error = %e,
                 "post-session summary failed after failover cascade"
             );
-            return Ok(summary_unavailable_json());
+            return Ok(apply_session_stats(&summary_unavailable_json(), stats));
         }
     };
 
     info!(
         session_id = %sid,
         provider = %failover.active_provider_name(),
+        questions = stats.questions_count,
         "post-session summary generated"
     );
-    Ok(summary)
+    // The LLM cannot reliably count Q/A from a fragmented transcript, so the
+    // authoritative stats from persisted responses always win.
+    Ok(apply_session_stats(&summary, stats))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -4574,6 +4648,10 @@ pub async fn end_mock_turn(app: AppHandle, state: State<'_, AppState>) -> Result
 }
 
 /// User accepted coach feedback — advance the conductor to the next question.
+///
+/// If the conductor handle is no longer present (e.g. the mock was stopped
+/// concurrently or the app restarted), this is a no-op rather than an error
+/// so the frontend can still proceed to `stop_mock`.
 #[tauri::command]
 pub async fn advance_mock_turn(state: State<'_, AppState>) -> Result<(), String> {
     let session_id = state
@@ -4583,22 +4661,31 @@ pub async fn advance_mock_turn(state: State<'_, AppState>) -> Result<(), String>
         .session_id()
         .ok_or("no active session")?;
 
-    let (transcript, audio_path) = {
+    let result = {
         let guard = state.mock_tasks.lock().await;
-        let handles = guard.as_ref().ok_or("no active mock session")?;
-        let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
-        if turn_n == 0 {
-            return Err("No mock question is active.".to_string());
+        match guard.as_ref() {
+            None => {
+                // Conductor already gone — nothing to advance.
+                debug!("advance_mock_turn: mock_tasks handle is gone, skipping conductor signal");
+                return Ok(());
+            }
+            Some(handles) => {
+                let turn_n = handles.active_turn_n.load(Ordering::SeqCst);
+                if turn_n == 0 {
+                    return Err("No mock question is active.".to_string());
+                }
+                state
+                    .persistence
+                    .load_mock_turns(session_id)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|t| t.turn_n == turn_n)
+                    .map(|row| (row.user_text, row.audio_path))
+                    .ok_or_else(|| "mock turn not found".to_string())?
+            }
         }
-        let row = state
-            .persistence
-            .load_mock_turns(session_id)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .find(|t| t.turn_n == turn_n)
-            .ok_or("mock turn not found")?;
-        (row.user_text, row.audio_path)
     };
+    let (transcript, audio_path) = result;
     signal_mock_turn_complete(state.inner(), transcript, audio_path).await;
     Ok(())
 }
@@ -5137,7 +5224,21 @@ pub struct MockTurnDto {
 
 #[cfg(test)]
 mod summary_tests {
-    use super::summary_unavailable_json;
+    use super::{
+        apply_session_stats, compute_session_stats, summary_unavailable_json, SessionStats,
+    };
+    use crate::session::persistence::{Response, ResponseType};
+    use uuid::Uuid;
+
+    fn response(rt: ResponseType, confidence: f32) -> Response {
+        Response {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            response_type: rt,
+            content: "x".to_string(),
+            confidence,
+        }
+    }
 
     #[test]
     fn summary_unavailable_json_is_valid_and_non_blocking() {
@@ -5148,5 +5249,60 @@ mod summary_tests {
             .as_str()
             .unwrap()
             .contains("Retry from Past Sessions"));
+    }
+
+    #[test]
+    fn stats_count_directional_responses_only() {
+        let responses = vec![
+            response(ResponseType::Directional, 0.8),
+            response(ResponseType::Depth, 0.8),
+            response(ResponseType::Directional, 0.4),
+            response(ResponseType::Depth, 0.4),
+            response(ResponseType::Directional, 0.1),
+        ];
+        let stats = compute_session_stats(&responses);
+        assert_eq!(stats.questions_count, 3);
+        assert_eq!(stats.high, 1);
+        assert_eq!(stats.medium, 1);
+        assert_eq!(stats.low, 1);
+    }
+
+    #[test]
+    fn stats_bucket_boundaries() {
+        let responses = vec![
+            response(ResponseType::Directional, 0.55), // high (inclusive)
+            response(ResponseType::Directional, 0.35), // medium (inclusive)
+            response(ResponseType::Directional, 0.349), // low
+        ];
+        let stats = compute_session_stats(&responses);
+        assert_eq!(stats.high, 1);
+        assert_eq!(stats.medium, 1);
+        assert_eq!(stats.low, 1);
+    }
+
+    #[test]
+    fn apply_stats_overrides_llm_counts() {
+        let llm = r#"{"questions_count":0,"confidence_distribution":{"high":0,"medium":0,"low":0},"one_line_summary":"x"}"#;
+        let stats = SessionStats {
+            questions_count: 7,
+            high: 4,
+            medium: 2,
+            low: 1,
+        };
+        let merged = apply_session_stats(llm, stats);
+        let parsed: serde_json::Value = serde_json::from_str(&merged).expect("valid JSON");
+        assert_eq!(parsed["questions_count"], 7);
+        assert_eq!(parsed["confidence_distribution"]["high"], 4);
+        assert_eq!(parsed["confidence_distribution"]["medium"], 2);
+        assert_eq!(parsed["confidence_distribution"]["low"], 1);
+        // Narrative field preserved.
+        assert_eq!(parsed["one_line_summary"], "x");
+    }
+
+    #[test]
+    fn apply_stats_returns_input_on_invalid_json() {
+        let garbage = "not json";
+        let merged = apply_session_stats(garbage, SessionStats::default());
+        assert_eq!(merged, garbage);
     }
 }

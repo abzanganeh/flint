@@ -12,14 +12,6 @@ export interface TranscriptionChunkEventPayload {
   label_source?: string;
 }
 
-/** M13 S4 — heuristic-flagged label mismatch on a previously emitted chunk. */
-export interface ChunkLabelSuspiciousEventPayload {
-  chunk_id: string;
-  current_speaker: Speaker;
-  suggested_speaker: Speaker;
-  reason: string;
-}
-
 /** M13 S4 — confirmation of a manual relabel; UI updates the badge in place. */
 export interface TranscriptChunkRelabeledEventPayload {
   chunk_id: string;
@@ -129,10 +121,16 @@ export const onTranscriptionChunk = (
     handler(event.payload),
   );
 
-export const onChunkLabelSuspicious = (
-  handler: (payload: ChunkLabelSuspiciousEventPayload) => void,
+/** Loopback is capturing the user's own mic; surfaced once per session. */
+export interface AudioRoutingWarningEventPayload {
+  kind: string;
+  message: string;
+}
+
+export const onAudioRoutingWarning = (
+  handler: (payload: AudioRoutingWarningEventPayload) => void,
 ): Promise<UnlistenFn> =>
-  listen<ChunkLabelSuspiciousEventPayload>("chunk_label_suspicious", (event) =>
+  listen<AudioRoutingWarningEventPayload>("audio_routing_warning", (event) =>
     handler(event.payload),
   );
 

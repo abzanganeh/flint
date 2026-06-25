@@ -392,7 +392,14 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     setError(null);
     try {
       if (phase === "reviewing") {
-        await advanceMockTurn();
+        // Turn already reviewed — go straight to summary. advanceMockTurn
+        // requires the conductor handle (gone after restart) and is unnecessary
+        // here. Call onComplete() directly; don't rely on mock_ended event
+        // because stop_mock shuts down mic capture before the conductor can
+        // emit it (conductor sees cancelled=true and skips the emit).
+        await stopMock(true);
+        onComplete();
+        return;
       } else if (
         phase === "answering" ||
         phase === "paused" ||

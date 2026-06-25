@@ -13,6 +13,7 @@ import {
   stopSession,
 } from "../commands";
 import { onSessionStateChange } from "../events";
+import { useAudioRoutingWarning } from "../hooks/useAudioRoutingWarning";
 import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
@@ -41,6 +42,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
 
   useTokenUsage();
   useCostCap();
+  useAudioRoutingWarning();
   useOrchestratorStreams();
   useHotkeys(sessionId, lastManualQuestion, !starting);
 

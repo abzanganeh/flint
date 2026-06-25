@@ -7,6 +7,8 @@ export interface TranscriptionLine {
   text: string;
   speaker: Speaker;
   timestamp: number;
+  /** Provenance of the speaker label: "channel" | "heuristic" | "user". */
+  labelSource?: string;
 }
 
 type TranscriptionHandler = (line: TranscriptionLine) => void;
@@ -23,8 +25,8 @@ function dispatchLine(line: TranscriptionLine): void {
 }
 
 async function attachTranscriptionListener(): Promise<() => void> {
-  return onTranscriptionChunk(({ text, speaker, timestamp }) => {
-    dispatchLine({ text, speaker, timestamp });
+  return onTranscriptionChunk(({ text, speaker, timestamp, label_source }) => {
+    dispatchLine({ text, speaker, timestamp, labelSource: label_source });
   });
 }
 
