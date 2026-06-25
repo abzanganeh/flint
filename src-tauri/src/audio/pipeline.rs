@@ -681,9 +681,7 @@ fn maybe_warn_mixed_source(app_handle: &AppHandle, dedup: &SyncMutex<CrossChanne
     }
     guard.mixed_source_warned = true;
     drop(guard);
-    tracing::warn!(
-        "system loopback is capturing the user's own voice — recommending headphones"
-    );
+    tracing::warn!("system loopback is capturing the user's own voice — recommending headphones");
     emit_audio_routing_warning(
         app_handle,
         AudioRoutingWarningPayload {
