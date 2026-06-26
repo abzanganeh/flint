@@ -24,6 +24,8 @@ interface Props {
   onResumeSession?: (sessionId: string, sessionState: string) => void;
   /** Reopen a past session with the same id (fields, digest, question bank). */
   onReopenSession?: (sessionId: string) => void | Promise<void>;
+  /** Open the read-only review screen for a past session's transcript + Q&A. */
+  onReviewSession?: (sessionId: string) => void;
 }
 
 function hasStructuredFields(fields: SessionContextFields): boolean {
@@ -114,6 +116,7 @@ export const SessionList: React.FC<Props> = ({
   activeSessionId,
   onResumeSession,
   onReopenSession,
+  onReviewSession,
 }) => {
   const [sessions, setSessions] = useState<SessionSummaryDto[]>([]);
   const [limits, setLimits] = useState<OpenSessionLimitsDto | null>(null);
@@ -321,6 +324,17 @@ export const SessionList: React.FC<Props> = ({
                       title="Restore this session with all fields and questions"
                     >
                       {reopening === session.id ? "Opening…" : "Open"}
+                    </button>
+                  )}
+                  {isSelected && onReviewSession && (
+                    <button
+                      className="sl-action-btn sl-action-btn--review"
+                      onClick={() => onReviewSession(session.id)}
+                      disabled={busy}
+                      type="button"
+                      title="Read this session's transcript and what was asked/answered"
+                    >
+                      Review
                     </button>
                   )}
                   {isSelected && onStartSimilar && (

@@ -93,6 +93,9 @@ pub struct LiveTaskHandles {
     /// M13 S6 — audio pipeline audit counters. Snapshotted on session end and
     /// written to `~/.flint/metrics.log`.
     pub audit: Arc<crate::audio::audit::AudioAuditCounters>,
+    /// Live audio-flow watchdog. Emits `live_audio_warning` if no chunks are
+    /// captured after going LIVE. Aborted on stop.
+    pub watchdog: JoinHandle<()>,
 }
 
 /// Shared application state for Tauri commands.
