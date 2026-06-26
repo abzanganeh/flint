@@ -40,6 +40,7 @@ import SessionFocusGate from "./screens/SessionFocusGate";
 import MicCalibration from "./screens/MicCalibration";
 import TitleBar, { type NavItem } from "./components/TitleBar";
 import { SessionList } from "./screens/SessionList";
+import { SessionReview } from "./screens/SessionReview";
 import { SessionSummary } from "./screens/SessionSummary";
 import Settings from "./screens/Settings";
 
@@ -58,7 +59,8 @@ type AppScreen =
   | "mock-interview"
   | "mock-summary"
   | "live"
-  | "session-summary";
+  | "session-summary"
+  | "session-review";
 
 // Screens that render inside the standard shell (title bar + top padding).
 // "live" has its own frameless overlay layout.
@@ -76,6 +78,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "mock-interview",
   "mock-summary",
   "session-summary",
+  "session-review",
 ];
 
 interface ShellProps {
@@ -157,6 +160,7 @@ function App() {
   const [resetRehearsalPanels, setResetRehearsalPanels] = useState(false);
   const [forceMicCalibrationRetest, setForceMicCalibrationRetest] = useState(false);
   const [sessionPhoneCallMode, setSessionPhoneCallMode] = useState(false);
+  const [reviewSessionId, setReviewSessionId] = useState<string | null>(null);
   const importInFlightRef = useRef<string | null>(null);
   const queuedTokenRef = useRef<string | null>(null);
   const postSessionSummaryEnabled = useFeatureFlag("post_session_summary", true);
@@ -591,6 +595,21 @@ function App() {
               setScreen("session-design");
             })();
           }}
+          onReviewSession={(id) => {
+            setReviewSessionId(id);
+            setScreen("session-review");
+          }}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "session-review" && reviewSessionId) {
+    return (
+      <Shell nav={nav}>
+        <SessionReview
+          sessionId={reviewSessionId}
+          onBack={() => setScreen("session-list")}
         />
       </Shell>
     );

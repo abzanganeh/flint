@@ -1865,6 +1865,7 @@ async fn abort_local_live_handles(handles: LiveTaskHandles) {
     let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
     handles.pipeline.abort();
     handles.orchestrator.abort();
+    handles.watchdog.abort();
 }
 
 /// Build the failover manager and local LLM provider used by live and rehearsal paths.
@@ -2988,6 +2989,17 @@ pub async fn start_session(
 
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
 
+    // Live audio-flow watchdog: warns the user if no audio is captured after
+    // going LIVE so a mis-routed device never silently records nothing.
+    let watchdog = {
+        let wd_app = app.clone();
+        let wd_audit = Arc::clone(&audit);
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            crate::audio::watchdog::run_audio_watchdog(wd_app, wd_audit, started).await;
+        })
+    };
+
     let handles = LiveTaskHandles {
         stop_tx,
         zeroed_rx,
@@ -2998,6 +3010,7 @@ pub async fn start_session(
         system_transcript_buffer,
         diarizer: Arc::clone(&diarizer),
         audit,
+        watchdog,
     };
 
     // ── 7. State transition READY → LIVE ──────────────────────────────────
@@ -3081,6 +3094,7 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
 
         handles.pipeline.abort();
         handles.orchestrator.abort();
+        handles.watchdog.abort();
 
         // M13 S6 — snapshot the per-session audit counters and append a JSON
         // summary line to ~/.flint/metrics.log before the handles drop.
@@ -3809,6 +3823,103 @@ pub async fn generate_session_summary(
     // The LLM cannot reliably count Q/A from a fragmented transcript, so the
     // authoritative stats from persisted responses always win.
     Ok(apply_session_stats(&summary, stats))
+}
+
+/// One transcript line for the Session Review screen.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewChunkDto {
+    /// `"System"` (interviewer) or `"Microphone"` (you).
+    pub speaker: String,
+    pub text: String,
+    pub timestamp_ms: i64,
+    /// `"channel"` | `"heuristic"` | `"llm"` | `"user"`.
+    pub label_source: String,
+}
+
+/// Read-only review payload for a past session: the full transcript plus
+/// counts of the AI suggestions Flint generated. Lets the user revisit what
+/// was asked and answered without digging through SQLite by hand.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionReviewDto {
+    pub session_id: String,
+    pub state: String,
+    pub transcript: Vec<ReviewChunkDto>,
+    /// Directional turns answered (one per answered question).
+    pub questions_count: usize,
+    pub directional_count: usize,
+    pub depth_count: usize,
+    pub clarifying_count: usize,
+}
+
+/// Pure mapping from persisted recovery data to the review payload. Extracted
+/// so the transcript ordering and response bucketing can be unit tested without
+/// a live `AppState`/SQLite.
+fn build_session_review(
+    session_id: String,
+    data: Option<crate::session::persistence::RecoveryData>,
+) -> SessionReviewDto {
+    use crate::session::persistence::ResponseType;
+
+    let Some(data) = data else {
+        return SessionReviewDto {
+            session_id,
+            state: "UNKNOWN".to_string(),
+            transcript: Vec::new(),
+            questions_count: 0,
+            directional_count: 0,
+            depth_count: 0,
+            clarifying_count: 0,
+        };
+    };
+
+    let mut transcript: Vec<ReviewChunkDto> = data
+        .transcript_chunks
+        .iter()
+        .map(|c| ReviewChunkDto {
+            speaker: c.speaker.clone(),
+            text: c.text.clone(),
+            timestamp_ms: c.timestamp_ms,
+            label_source: c.label_source.clone(),
+        })
+        .collect();
+    transcript.sort_by_key(|c| c.timestamp_ms);
+
+    let stats = compute_session_stats(&data.responses);
+    let count_of = |rt: ResponseType| {
+        data.responses
+            .iter()
+            .filter(|r| r.response_type == rt)
+            .count()
+    };
+
+    SessionReviewDto {
+        session_id,
+        state: format!("{}", data.state),
+        transcript,
+        questions_count: stats.questions_count,
+        directional_count: count_of(ResponseType::Directional),
+        depth_count: count_of(ResponseType::Depth),
+        clarifying_count: count_of(ResponseType::Clarifying),
+    }
+}
+
+/// Load a past session's transcript and response counts for the review screen.
+/// Returns an empty (but valid) payload when the session has no recorded data.
+#[tauri::command]
+pub async fn get_session_review(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<SessionReviewDto, String> {
+    let sid = Uuid::parse_str(&session_id).map_err(|e| format!("invalid session id: {e}"))?;
+
+    let data = state
+        .persistence
+        .load_session_data(sid)
+        .map_err(|e| e.to_string())?;
+
+    Ok(build_session_review(session_id, data))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -5221,6 +5332,82 @@ pub struct MockTurnDto {
     pub coach_json: String,
     pub suggested: String,
     pub score: u8,
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::build_session_review;
+    use crate::session::persistence::{RecoveryData, Response, ResponseType, TranscriptChunk};
+    use crate::session::state::SessionState;
+    use uuid::Uuid;
+
+    fn chunk(sid: Uuid, speaker: &str, text: &str, ts: i64, label: &str) -> TranscriptChunk {
+        TranscriptChunk {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            speaker: speaker.to_string(),
+            text: text.to_string(),
+            timestamp_ms: ts,
+            label_source: label.to_string(),
+        }
+    }
+
+    fn resp(sid: Uuid, rt: ResponseType) -> Response {
+        Response {
+            id: Uuid::new_v4(),
+            session_id: sid,
+            response_type: rt,
+            content: "x".to_string(),
+            confidence: 0.8,
+        }
+    }
+
+    #[test]
+    fn missing_session_yields_empty_payload() {
+        let review = build_session_review("sess-x".to_string(), None);
+        assert_eq!(review.state, "UNKNOWN");
+        assert!(review.transcript.is_empty());
+        assert_eq!(review.questions_count, 0);
+    }
+
+    #[test]
+    fn transcript_is_ordered_by_timestamp() {
+        let sid = Uuid::new_v4();
+        let data = RecoveryData {
+            session_id: sid,
+            state: SessionState::Ended,
+            transcript_chunks: vec![
+                chunk(sid, "System", "second", 200, "channel"),
+                chunk(sid, "Microphone", "first", 100, "channel"),
+            ],
+            responses: vec![],
+        };
+        let review = build_session_review(sid.to_string(), Some(data));
+        assert_eq!(review.transcript.len(), 2);
+        assert_eq!(review.transcript[0].text, "first");
+        assert_eq!(review.transcript[1].text, "second");
+    }
+
+    #[test]
+    fn counts_responses_by_type() {
+        let sid = Uuid::new_v4();
+        let data = RecoveryData {
+            session_id: sid,
+            state: SessionState::Ended,
+            transcript_chunks: vec![],
+            responses: vec![
+                resp(sid, ResponseType::Directional),
+                resp(sid, ResponseType::Directional),
+                resp(sid, ResponseType::Depth),
+                resp(sid, ResponseType::Clarifying),
+            ],
+        };
+        let review = build_session_review(sid.to_string(), Some(data));
+        assert_eq!(review.directional_count, 2);
+        assert_eq!(review.depth_count, 1);
+        assert_eq!(review.clarifying_count, 1);
+        assert_eq!(review.questions_count, 2);
+    }
 }
 
 #[cfg(test)]

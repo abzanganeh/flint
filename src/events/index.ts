@@ -134,6 +134,19 @@ export const onAudioRoutingWarning = (
     handler(event.payload),
   );
 
+export interface LiveAudioWarningEventPayload {
+  /** "no_audio" when nothing is being captured, "ok" when audio resumes. */
+  kind: string;
+  message: string;
+}
+
+export const onLiveAudioWarning = (
+  handler: (payload: LiveAudioWarningEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<LiveAudioWarningEventPayload>("live_audio_warning", (event) =>
+    handler(event.payload),
+  );
+
 export const onTranscriptChunkRelabeled = (
   handler: (payload: TranscriptChunkRelabeledEventPayload) => void,
 ): Promise<UnlistenFn> =>

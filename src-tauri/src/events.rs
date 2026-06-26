@@ -380,6 +380,17 @@ pub struct AudioRoutingWarningPayload {
     pub message: String,
 }
 
+/// Emitted by the live audio-flow watchdog. `kind = "no_audio"` means no
+/// transcript chunks have been accepted within the grace window after going
+/// LIVE — the user is almost certainly mis-routed (wrong loopback/mic device)
+/// and nothing is being recorded. `kind = "ok"` clears a prior warning once
+/// audio starts flowing again.
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveAudioWarningPayload {
+    pub kind: String,
+    pub message: String,
+}
+
 pub fn emit_calibration_system_complete<R: Runtime>(
     app: &AppHandle<R>,
     payload: CalibrationCompletePayload,
@@ -406,4 +417,8 @@ pub fn emit_audio_routing_warning<R: Runtime>(
     payload: AudioRoutingWarningPayload,
 ) {
     let _ = app.emit("audio_routing_warning", payload);
+}
+
+pub fn emit_live_audio_warning<R: Runtime>(app: &AppHandle<R>, payload: LiveAudioWarningPayload) {
+    let _ = app.emit("live_audio_warning", payload);
 }

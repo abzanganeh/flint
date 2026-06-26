@@ -14,6 +14,7 @@ import {
 } from "../commands";
 import { onSessionStateChange } from "../events";
 import { useAudioRoutingWarning } from "../hooks/useAudioRoutingWarning";
+import { useLiveAudioWarning } from "../hooks/useLiveAudioWarning";
 import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
@@ -44,6 +45,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   useTokenUsage();
   useCostCap();
   useAudioRoutingWarning();
+  const audioWarning = useLiveAudioWarning();
   useOrchestratorStreams();
   useHotkeys(sessionId, lastManualQuestion, !starting);
 
@@ -224,6 +226,23 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
           Phone interview mode: one audio channel. Labels are best-effort — press{" "}
           <strong>Q</strong> (or Ctrl+Q) when the <em>interviewer</em> finishes their question,
           not when you speak. Use headphones in normal mode if you hear echo.
+        </div>
+      )}
+
+      {audioWarning && (
+        <div
+          data-testid="live-no-audio-banner"
+          role="alert"
+          style={{
+            padding: "10px 12px",
+            color: "#fca5a5",
+            fontSize: "12px",
+            fontWeight: 600,
+            borderBottom: "1px solid #1e2028",
+            backgroundColor: "#2a0d0d",
+          }}
+        >
+          {audioWarning}
         </div>
       )}
 

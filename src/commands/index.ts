@@ -411,6 +411,27 @@ export const discardCrashedSession = (): Promise<void> =>
 export const generateSessionSummary = (): Promise<string> =>
   invoke<string>("generate_session_summary");
 
+export interface ReviewChunkDto {
+  speaker: "System" | "Microphone";
+  text: string;
+  timestampMs: number;
+  labelSource: string;
+}
+
+export interface SessionReviewDto {
+  sessionId: string;
+  state: string;
+  transcript: ReviewChunkDto[];
+  questionsCount: number;
+  directionalCount: number;
+  depthCount: number;
+  clarifyingCount: number;
+}
+
+/** Load a past session's transcript + AI-suggestion counts for review. */
+export const getSessionReview = (sessionId: string): Promise<SessionReviewDto> =>
+  invoke<SessionReviewDto>("get_session_review", { sessionId });
+
 /** List all sessions stored locally. */
 export const listSessions = (): Promise<SessionSummaryDto[]> =>
   invoke<SessionSummaryDto[]>("list_sessions");
