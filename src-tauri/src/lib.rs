@@ -11,7 +11,7 @@ mod events;
 pub mod flags;
 pub mod gdpr;
 mod global_bank;
-mod health;
+pub mod health;
 mod hotkeys;
 pub mod interfaces;
 mod keychain;
@@ -266,6 +266,8 @@ pub fn run() {
             commands::clear_mic_calibration,
             commands::run_system_audio_calibration,
             commands::run_mic_calibration,
+            commands::get_headphone_gate_status,
+            commands::set_headphone_gate_override,
             // Phase 7.6 — feature flags
             commands::is_feature_enabled,
             commands::refresh_feature_flags,

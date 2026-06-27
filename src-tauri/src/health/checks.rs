@@ -600,7 +600,7 @@ fn command_output_contains(program: &str, args: &[&str], needle: &str) -> bool {
 /// Linux: detect whether PipeWire / PulseAudio has loaded `module-echo-cancel`.
 /// Other platforms ship system-level AEC (Windows audio engine, macOS Core
 /// Audio) so the check passes by default.
-fn check_echo_cancellation() -> HealthCheckResult {
+pub fn check_echo_cancellation() -> HealthCheckResult {
     #[cfg(target_os = "linux")]
     {
         if echo_cancel_module_loaded() {

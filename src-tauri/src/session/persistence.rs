@@ -2319,6 +2319,28 @@ impl SessionPersistence {
             .and_then(|v| v.parse().ok()))
     }
 
+    const HEADPHONE_GATE_OVERRIDE_KEY: &'static str = "headphone_gate_override";
+
+    pub fn get_headphone_gate_override(&self) -> Result<bool> {
+        Ok(self
+            .get_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY)?
+            .as_deref()
+            == Some("1"))
+    }
+
+    pub fn set_headphone_gate_override(&self, enabled: bool) -> Result<()> {
+        if enabled {
+            self.set_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY, "1")?;
+        } else {
+            self.delete_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_headphone_gate_override(&self) -> Result<()> {
+        self.delete_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY)
+    }
+
     /// Delete all persisted data for `session_id`.
     ///
     /// Called after a session is successfully ended and synced, or when the
@@ -3500,6 +3522,16 @@ mod tests {
         assert!(!db.get_mic_calibration_forced(fp).unwrap());
         db.clear_mic_calibration(fp).unwrap();
         assert!(!db.get_mic_calibration_passed(fp).unwrap());
+    }
+
+    #[test]
+    fn headphone_gate_override_round_trip() {
+        let db = new_db();
+        assert!(!db.get_headphone_gate_override().unwrap());
+        db.set_headphone_gate_override(true).unwrap();
+        assert!(db.get_headphone_gate_override().unwrap());
+        db.clear_headphone_gate_override().unwrap();
+        assert!(!db.get_headphone_gate_override().unwrap());
     }
 
     #[test]

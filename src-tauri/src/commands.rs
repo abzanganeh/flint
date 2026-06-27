@@ -20,9 +20,9 @@ use crate::calibration::{
 use crate::digest::extract_digest;
 use crate::dto::{
     AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto,
-    HardwareProfileDto, HealthCheckResultDto, MicCalibrationStatusDto, OpenSessionLimitsDto,
-    SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto,
-    WebSourceDto,
+    HardwareProfileDto, HeadphoneGateStatusDto, HealthCheckResultDto, MicCalibrationStatusDto,
+    OpenSessionLimitsDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
+    SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_calibration_mic_complete, emit_calibration_system_complete, emit_mock_coach_feedback,
@@ -30,7 +30,7 @@ use crate::events::{
     CalibrationCompletePayload, MockCoachFeedbackPayload, MockSuggestedTokenPayload,
     SessionStateChangePayload, TokenUsageUpdatePayload,
 };
-use crate::health::{checks, hardware};
+use crate::health::{checks, hardware, headphone_gate};
 use crate::interfaces::auth::{AuthToken, Plan};
 use crate::interfaces::vector::Chunk;
 use crate::keychain;
@@ -2833,6 +2833,16 @@ pub async fn start_session(
 
     checks::run_stealth_self_test()?;
 
+    let is_phone_call_mode = *state.phone_call_mode.lock().await;
+    let headphone_override = state
+        .persistence
+        .get_headphone_gate_override()
+        .map_err(|e| e.to_string())?;
+    let gate_status = headphone_gate::evaluate(is_phone_call_mode, headphone_override);
+    if gate_status.blocked {
+        return Err(headphone_gate::live_start_error(&gate_status));
+    }
+
     // StrictMode double-mount can fire two concurrent starts; serialize them.
     let _live_start_guard = state.live_start_lock.lock().await;
 
@@ -2888,7 +2898,6 @@ pub async fn start_session(
     // zeroed_tx fires so stop_session can confirm zeroing before emitting ENDED.
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
 
-    let is_phone_call_mode = *state.phone_call_mode.lock().await;
     *state.phone_mode_manual_only.lock().await = is_phone_call_mode;
 
     std::thread::spawn(move || {
@@ -3107,6 +3116,10 @@ pub async fn stop_session(app: AppHandle, state: State<'_, AppState>) -> Result<
     // Clear per-session memory.
     *state.session_memory.lock().await = None;
     *state.phone_mode_manual_only.lock().await = false;
+
+    if let Err(e) = state.persistence.clear_headphone_gate_override() {
+        warn!(error = %e, "failed to clear headphone gate override");
+    }
 
     // Phase 7.4 — zero the cost tracker so the next session starts fresh.
     state.cost_tracker.reset();
@@ -5202,6 +5215,36 @@ pub async fn get_mock_turns(state: State<'_, AppState>) -> Result<Vec<MockTurnDt
             score: t.score,
         })
         .collect())
+}
+
+#[tauri::command]
+pub async fn get_headphone_gate_status(
+    state: State<'_, AppState>,
+) -> Result<HeadphoneGateStatusDto, String> {
+    let phone_call_mode = *state.phone_call_mode.lock().await;
+    let overridden = state
+        .persistence
+        .get_headphone_gate_override()
+        .map_err(|e| e.to_string())?;
+    let status = headphone_gate::evaluate(phone_call_mode, overridden);
+    Ok(HeadphoneGateStatusDto {
+        blocked: status.blocked,
+        overridden: status.overridden,
+        message: status.message,
+        fix_instruction: status.fix_instruction,
+    })
+}
+
+#[tauri::command]
+pub async fn set_headphone_gate_override(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    state
+        .persistence
+        .set_headphone_gate_override(enabled)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

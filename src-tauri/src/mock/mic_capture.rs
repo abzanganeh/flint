@@ -44,6 +44,7 @@ use crate::events::{
     MockUserTranscribedPayload,
 };
 use crate::transcription::engine::WhisperEngine;
+use crate::transcription::rolling_context::RollingTranscriptContext;
 
 use super::audio_writer::TurnAudioWriter;
 use super::turn_phase::{MockMicPhase, TurnSpeechTracker};
@@ -963,15 +964,10 @@ async fn dispatch_chunk<R: Runtime>(
     Some((text, avg_logprob))
 }
 
-/// Keep the rolling context to the last 40 words so Whisper's `initial_prompt`
-/// stays well within its token budget.
+/// Keep rolling context aligned with the live pipeline rolling-context helper.
 fn append_rolling_context(context: &mut String, new_text: &str) {
-    let combined = if context.is_empty() {
-        new_text.to_string()
-    } else {
-        format!("{context} {new_text}")
-    };
-    let words: Vec<&str> = combined.split_whitespace().collect();
-    let keep_from = words.len().saturating_sub(40);
-    *context = words[keep_from..].join(" ");
+    let mut rolling = RollingTranscriptContext::default();
+    rolling.append(context);
+    rolling.append(new_text);
+    *context = rolling.as_str();
 }

@@ -9,7 +9,7 @@
 //! Downsampler::process()              — 480 @ 48kHz → 160 @ 16kHz
 //! VadChunker::process_frame()         — accumulates speech, emits VadChunk on silence gap
 //!     ↓ VadChunk (variable length, 16kHz PCM mono)
-//! WhisperEngine::transcribe()         — Whisper.cpp inference (spawn_blocking)
+//! WhisperEngine::transcribe_with_context() — rolling ~40-word prior per channel
 //!     ↓ TranscriptionResult
 //! emit transcription_chunk            — immediately, before question detection
 //! QuestionDetector::detect()          — System channel only
@@ -54,6 +54,7 @@ use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
     finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
 };
+use crate::transcription::rolling_context::ChannelRollingContexts;
 use crate::transcription::sanitizer::sanitize_live_transcript;
 use crate::transcription::speaker_suspicion::{self, SuspicionReason};
 
@@ -356,6 +357,7 @@ pub async fn run_audio_pipeline(
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
     let dedup = SyncMutex::new(CrossChannelDedup::default());
+    let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
 
     loop {
         // No `biased` — fair scheduling prevents MIC starvation under heavy
@@ -391,6 +393,7 @@ pub async fn run_audio_pipeline(
             &audit,
             echo_suppression_enabled,
             phone_mode_manual_only,
+            &rolling_contexts,
         )
         .await
         {
@@ -422,6 +425,7 @@ async fn process_frame(
     audit: &Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
+    rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -469,10 +473,18 @@ async fn process_frame(
 
     // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
     let chunk_duration_ms = chunk.duration_ms;
+    let rolling_context = {
+        let guard = rolling_contexts
+            .lock()
+            .map_err(|_| anyhow::anyhow!("rolling context mutex poisoned"))?;
+        guard.context_for(source)
+    };
     let whisper = Arc::clone(whisper);
-    let transcription = tokio::task::spawn_blocking(move || whisper.transcribe(&chunk))
-        .await
-        .map_err(|e| anyhow::anyhow!("Whisper task panicked: {e}"))??;
+    let transcription = tokio::task::spawn_blocking(move || {
+        whisper.transcribe_with_context(&chunk, &rolling_context)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("Whisper task panicked: {e}"))??;
 
     let Some(mut result) = transcription else {
         return Ok(()); // silence or hallucination — discarded by engine
@@ -548,6 +560,10 @@ async fn process_frame(
             return Ok(());
         }
         guard.record(source, &result.text, now);
+    }
+
+    if let Ok(mut guard) = rolling_contexts.lock() {
+        guard.append(source, &result.text);
     }
 
     // ── Step 4b.0: resolve effective speaker (auto-correct mislabels) ──────

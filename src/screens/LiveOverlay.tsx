@@ -8,9 +8,12 @@ import PanicRestoreShell from "../components/PanicRestoreShell";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
 import {
+  getHeadphoneGateStatus,
   getSessionSnapshot,
+  setHeadphoneGateOverride,
   startSession,
   stopSession,
+  type HeadphoneGateStatusDto,
 } from "../commands";
 import { onSessionStateChange } from "../events";
 import { useAudioRoutingWarning } from "../hooks/useAudioRoutingWarning";
@@ -40,6 +43,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   const [starting, setStarting] = useState(true);
   const [exiting, setExiting] = useState(false);
   const [phoneCallMode, setPhoneCallMode] = useState(false);
+  const [headphoneGate, setHeadphoneGate] = useState<HeadphoneGateStatusDto | null>(null);
   const lastManualQuestion = useUIStore((s) => s.lastManualQuestion);
 
   useTokenUsage();
@@ -73,6 +77,14 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
         if (snapshot?.state === SessionState.LIVE) {
           setStarting(false);
           return;
+        }
+        if (!snapshot?.phoneCallMode) {
+          const gate = await getHeadphoneGateStatus();
+          if (gate.blocked) {
+            setHeadphoneGate(gate);
+            setStarting(false);
+            return;
+          }
         }
         await startSession(sessionId);
         if (active) setStarting(false);
@@ -127,6 +139,39 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
     void stopSession().catch((e: unknown) => setError(String(e)));
   };
 
+  const handleHeadphoneRetry = async () => {
+    setError(null);
+    setStarting(true);
+    try {
+      const gate = await getHeadphoneGateStatus();
+      if (gate.blocked) {
+        setHeadphoneGate(gate);
+        setStarting(false);
+        return;
+      }
+      setHeadphoneGate(null);
+      await startSession(sessionId);
+      setStarting(false);
+    } catch (e: unknown) {
+      setError(String(e));
+      setStarting(false);
+    }
+  };
+
+  const handleHeadphoneOverride = async () => {
+    setError(null);
+    setStarting(true);
+    try {
+      await setHeadphoneGateOverride(true);
+      setHeadphoneGate(null);
+      await startSession(sessionId);
+      setStarting(false);
+    } catch (e: unknown) {
+      setError(String(e));
+      setStarting(false);
+    }
+  };
+
   const toolbarButtonStyle = {
     padding: "4px 12px",
     fontSize: "11px",
@@ -137,6 +182,48 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
     color: "#9ca3af",
     cursor: "pointer",
   } as const;
+
+  if (headphoneGate?.blocked) {
+    return (
+      <main className="app-loading" data-testid="live-headphone-gate">
+        <h2 style={{ fontSize: "16px", marginBottom: 8 }}>Headphones recommended</h2>
+        <p style={{ maxWidth: 520, marginBottom: 8 }}>{headphoneGate.message}</p>
+        {headphoneGate.fixInstruction && (
+          <p style={{ maxWidth: 520, marginBottom: 16, color: "#9ca3af" }}>
+            {headphoneGate.fixInstruction}
+          </p>
+        )}
+        {error && <p style={{ color: "#ef4444", marginBottom: 12 }}>{error}</p>}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            data-testid="live-headphone-retry"
+            onClick={() => void handleHeadphoneRetry()}
+            style={toolbarButtonStyle}
+          >
+            I switched to headphones — retry
+          </button>
+          <button
+            type="button"
+            data-testid="live-headphone-override"
+            onClick={() => void handleHeadphoneOverride()}
+            style={toolbarButtonStyle}
+          >
+            Continue with speakers anyway
+          </button>
+          <button
+            type="button"
+            data-testid="live-headphone-back"
+            disabled={exiting}
+            onClick={() => void handleReturnToSetup()}
+            style={toolbarButtonStyle}
+          >
+            {exiting ? "Leaving…" : "Back to setup"}
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   if (starting) {
     return (
