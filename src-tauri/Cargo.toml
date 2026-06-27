@@ -92,6 +92,10 @@ name = "audio_pipeline"
 path = "tests/integration/audio_pipeline.rs"
 
 [[test]]
+name = "headphone_gate"
+path = "tests/integration/headphone_gate.rs"
+
+[[test]]
 name = "orchestrator"
 path = "tests/integration/orchestrator.rs"
 

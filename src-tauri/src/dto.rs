@@ -453,6 +453,15 @@ pub struct SessionFocusDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HeadphoneGateStatusDto {
+    pub blocked: bool,
+    pub overridden: bool,
+    pub message: String,
+    pub fix_instruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MicCalibrationStatusDto {
     pub passed_on_device: bool,
     pub device_fingerprint: String,

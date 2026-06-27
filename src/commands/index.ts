@@ -831,6 +831,13 @@ export const getMockTurns = (): Promise<MockTurn[]> =>
 export const readMockAudioDataUrl = (path: string): Promise<string> =>
   invoke<string>("read_mock_audio_data_url", { path });
 
+export interface HeadphoneGateStatusDto {
+  blocked: boolean;
+  overridden: boolean;
+  message: string;
+  fixInstruction: string | null;
+}
+
 export interface MicCalibrationStatusDto {
   passedOnDevice: boolean;
   deviceFingerprint: string;
@@ -848,6 +855,12 @@ export interface CalibrationResultDto {
 
 export const getMicCalibrationStatus = (): Promise<MicCalibrationStatusDto> =>
   invoke<MicCalibrationStatusDto>("get_mic_calibration_status");
+
+export const getHeadphoneGateStatus = (): Promise<HeadphoneGateStatusDto> =>
+  invoke<HeadphoneGateStatusDto>("get_headphone_gate_status");
+
+export const setHeadphoneGateOverride = (enabled: boolean): Promise<void> =>
+  invoke<void>("set_headphone_gate_override", { enabled });
 
 export const markMicCalibrationPassed = (
   werSystem: number,

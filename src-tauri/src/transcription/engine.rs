@@ -27,6 +27,7 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 use crate::audio::capture::AudioSource;
 use crate::audio::vad::VadChunk;
 use crate::health::hardware::HardwareTier;
+use crate::transcription::rolling_context::ROLLING_CONTEXT_WORD_LIMIT;
 use crate::transcription::sanitizer::{
     collapse_repeated_ngrams, is_known_hallucination, validate_segment,
 };
@@ -460,16 +461,20 @@ fn build_context_prompt(session_prompt: &str, rolling_context: &str) -> String {
     if tail.is_empty() {
         return session_prompt.to_string();
     }
-    // Keep last 40 words of rolling context to avoid prompt bloat.
+    // Keep last N words of rolling context to avoid prompt bloat.
     let words: Vec<&str> = tail.split_whitespace().collect();
-    let keep_from = words.len().saturating_sub(40);
+    let keep_from = words.len().saturating_sub(ROLLING_CONTEXT_WORD_LIMIT);
     let tail_trimmed = words[keep_from..].join(" ");
 
     let combined = format!("{session_prompt} | {tail_trimmed}");
     if combined.len() <= 400 {
         combined
     } else {
-        combined[..400].to_string()
+        let mut end = 400.min(combined.len());
+        while !combined.is_char_boundary(end) {
+            end -= 1;
+        }
+        combined[..end].to_string()
     }
 }
 
@@ -649,7 +654,7 @@ mod tests {
             .join(" ");
         let result = build_context_prompt("prompt.", &many_words);
         let tail_part = result.split(" | ").nth(1).unwrap_or("");
-        assert!(tail_part.split_whitespace().count() <= 40);
+        assert!(tail_part.split_whitespace().count() <= ROLLING_CONTEXT_WORD_LIMIT);
     }
 
     #[test]
@@ -657,5 +662,23 @@ mod tests {
         let long = "a".repeat(350);
         let result = build_context_prompt(&long, &long);
         assert!(result.len() <= 400);
+    }
+
+    #[test]
+    fn build_context_prompt_caps_at_400_chars_on_char_boundary() {
+        let session = "prompt.";
+        let rolling = "é".repeat(400);
+        let result = build_context_prompt(session, &rolling);
+        assert!(result.len() <= 400);
+        assert!(std::str::from_utf8(result.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn build_context_prompt_carries_proper_noun_from_rolling_tail() {
+        let session = "IAM interview at Fisher Investors.";
+        let rolling = "We discussed fiduciary fee-only advisory at Fisher Investors";
+        let prompt = build_context_prompt(session, rolling);
+        assert!(prompt.contains("Fisher Investors"));
+        assert!(prompt.contains("IAM interview"));
     }
 }
