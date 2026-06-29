@@ -9,7 +9,21 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: "no-cache-oauth-callback",
+      configureServer(server) {
+        server.middlewares.use((req, res, next) => {
+          if (req.url?.split("?")[0] === "/oauth-callback.html") {
+            res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+            res.setHeader("Pragma", "no-cache");
+          }
+          next();
+        });
+      },
+    },
+  ],
 
   test: {
     environment: "jsdom",

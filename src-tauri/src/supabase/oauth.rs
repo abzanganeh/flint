@@ -13,11 +13,42 @@ use secrecy::SecretString;
 
 use super::auth::SupabaseAuth;
 
-/// OAuth redirect registered with Supabase + Google Cloud console.
+/// OAuth redirect registered with Supabase + Google Cloud console (release).
 pub const OAUTH_REDIRECT_URI: &str = "flint://auth/callback";
 
+/// Dev bridge page — avoids hanging the browser on a raw `flint://` navigation when
+/// the user cancels the OS "Open Flint?" dialog.
+#[cfg(debug_assertions)]
+pub const DEV_OAUTH_BRIDGE_URI: &str = "http://127.0.0.1:1420/oauth-callback.html";
+
+pub fn oauth_redirect_uri() -> String {
+    if let Ok(uri) = std::env::var("FLINT_OAUTH_REDIRECT_URI") {
+        let trimmed = uri.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        return DEV_OAUTH_BRIDGE_URI.to_string();
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        OAUTH_REDIRECT_URI.to_string()
+    }
+}
+
 fn encode_redirect_uri(uri: &str) -> String {
-    uri.replace(':', "%3A").replace('/', "%2F")
+    let mut out = String::with_capacity(uri.len() * 3);
+    for byte in uri.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 /// PKCE pair: `(code_verifier, code_challenge)`.
@@ -184,11 +215,10 @@ fn url_decode(input: &str) -> String {
 impl SupabaseAuth {
     /// Build the browser URL that starts Google OAuth (PKCE).
     pub fn google_authorize_url(&self, code_challenge: &str) -> String {
+        let redirect = encode_redirect_uri(&oauth_redirect_uri());
         format!(
-            "{}/auth/v1/authorize?provider=google&redirect_to={}&code_challenge={}&code_challenge_method=s256",
+            "{}/auth/v1/authorize?provider=google&redirect_to={redirect}&code_challenge={code_challenge}&code_challenge_method=s256",
             self.public_base_url(),
-            encode_redirect_uri(OAUTH_REDIRECT_URI),
-            code_challenge
         )
     }
 }
@@ -250,5 +280,21 @@ mod tests {
         let challenge = code_challenge("test-verifier");
         assert!(!challenge.is_empty());
         assert_eq!(challenge, code_challenge("test-verifier"));
+    }
+
+    #[test]
+    fn encode_redirect_uri_percent_encodes_special_chars() {
+        let encoded = encode_redirect_uri("http://127.0.0.1:1420/oauth-callback.html");
+        assert!(encoded.contains("%3A"));
+        assert!(encoded.contains("%2F"));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn dev_redirect_uses_bridge_page_by_default() {
+        assert_eq!(
+            oauth_redirect_uri(),
+            DEV_OAUTH_BRIDGE_URI.to_string()
+        );
     }
 }

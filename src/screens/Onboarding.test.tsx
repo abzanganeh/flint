@@ -53,4 +53,19 @@ describe("Onboarding Google OAuth", () => {
     expect(startGoogleOAuth).toHaveBeenCalledTimes(1);
     expect(cancelGoogleOAuth).toHaveBeenCalledTimes(1);
   });
+
+  it("retry clears pending OAuth and starts again", async () => {
+    const { startGoogleOAuth, cancelGoogleOAuth } = await import("../commands");
+    render(<Onboarding initialStep="auth" onComplete={() => undefined} />);
+
+    fireEvent.click(screen.getByTestId("google-sign-in-button"));
+    expect(await screen.findByText("Waiting for Google…")).toBeTruthy();
+
+    fireEvent.click(screen.getByTestId("google-sign-in-retry"));
+
+    await vi.waitFor(() => {
+      expect(cancelGoogleOAuth).toHaveBeenCalledTimes(1);
+      expect(startGoogleOAuth).toHaveBeenCalledTimes(2);
+    });
+  });
 });

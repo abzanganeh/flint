@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sign in to Flint</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        background: #0f1117;
+        color: #e2e8f0;
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        box-sizing: border-box;
+      }
+      .card {
+        max-width: 400px;
+        width: 100%;
+        background: #161922;
+        border: 1px solid #2a2f3a;
+        border-radius: 12px;
+        padding: 28px;
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 1.2rem;
+        font-weight: 600;
+      }
+      p {
+        margin: 0 0 12px;
+        line-height: 1.55;
+        color: #94a3b8;
+        font-size: 0.9rem;
+      }
+      .actions {
+        margin-top: 20px;
+      }
+      .btn {
+        width: 100%;
+        padding: 10px 16px;
+        border: none;
+        border-radius: 8px;
+        font-size: 0.95rem;
+        font-weight: 600;
+        cursor: pointer;
+        background: #6366f1;
+        color: white;
+      }
+      .btn:hover {
+        background: #4f46e5;
+      }
+      .spinner {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(255,255,255,0.3);
+        border-top-color: white;
+        border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+        vertical-align: middle;
+        margin-right: 8px;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .dimmed { color: #64748b; }
+    </style>
+  </head>
+  <body data-oauth-callback-version="3">
+    <div class="card">
+      <h1 id="title">Signing in to Flint…</h1>
+      <p id="body"></p>
+      <div class="actions" id="actions" style="display:none">
+        <button type="button" class="btn" id="btn-open">Switch to Flint</button>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var search = window.location.search || "";
+        var hash   = window.location.hash   || "";
+        var tail   = search || (hash.charAt(0) === "#" ? "?" + hash.slice(1) : "");
+
+        var hasError = tail.indexOf("error=") !== -1 || tail.indexOf("error%3D") !== -1;
+        var target   = "flint://auth/callback" + tail;
+
+        var title   = document.getElementById("title");
+        var body    = document.getElementById("body");
+        var actions = document.getElementById("actions");
+        var btn     = document.getElementById("btn-open");
+
+        // ── Error / cancel path ────────────────────────────────────────────
+        // Google cancelled or denied. Forward the error to Flint silently,
+        // then tell the user to switch back. No button needed — the error has
+        // already been delivered and Flint will clear "Waiting for Google…".
+        if (hasError) {
+          title.textContent = "Sign-in cancelled";
+          body.innerHTML =
+            "Flint has been notified. Switch back to the Flint window — " +
+            "you can try again or sign in with email instead.<br><br>" +
+            "<span class='dimmed'>You can close this browser tab when you're done.</span>";
+          window.location.href = target;
+          return;
+        }
+
+        // ── Success path ───────────────────────────────────────────────────
+        // Google auth succeeded. Navigate to flint:// to trigger the OS
+        // "Open Flint?" dialog.
+        var attempts = 0;
+
+        function showWaitingForDialog() {
+          title.textContent = "Almost there";
+          body.innerHTML =
+            "<span class='spinner'></span>" +
+            "Click <strong>Open Flint</strong> in the dialog that just appeared.";
+        }
+
+        function showDialogCancelled() {
+          title.textContent = "Open Flint to finish signing in";
+          body.innerHTML =
+            "The system dialog was dismissed. Click the button below to bring it back, " +
+            "or switch to the Flint window directly.";
+          actions.style.display = "block";
+        }
+
+        function openFlint() {
+          attempts++;
+          showWaitingForDialog();
+          window.location.href = target;
+        }
+
+        btn.addEventListener("click", openFlint);
+
+        // First attempt runs automatically after a short delay so the page
+        // renders before navigating away.
+        setTimeout(openFlint, 400);
+
+        // If focus returns to this page after we navigated, the OS dialog was
+        // likely cancelled. Show the manual retry option.
+        window.addEventListener("focus", function () {
+          if (attempts > 0) {
+            showDialogCancelled();
+          }
+        });
+      })();
+    </script>
+  </body>
+</html>
