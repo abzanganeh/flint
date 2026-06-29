@@ -14,6 +14,7 @@ use secrecy::SecretString;
 use super::auth::SupabaseAuth;
 
 /// OAuth redirect registered with Supabase + Google Cloud console (release).
+#[cfg(not(debug_assertions))]
 pub const OAUTH_REDIRECT_URI: &str = "flint://auth/callback";
 
 /// Dev bridge page — avoids hanging the browser on a raw `flint://` navigation when
@@ -30,7 +31,7 @@ pub fn oauth_redirect_uri() -> String {
     }
     #[cfg(debug_assertions)]
     {
-        return DEV_OAUTH_BRIDGE_URI.to_string();
+        DEV_OAUTH_BRIDGE_URI.to_string()
     }
     #[cfg(not(debug_assertions))]
     {
@@ -292,9 +293,6 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     fn dev_redirect_uses_bridge_page_by_default() {
-        assert_eq!(
-            oauth_redirect_uri(),
-            DEV_OAUTH_BRIDGE_URI.to_string()
-        );
+        assert_eq!(oauth_redirect_uri(), DEV_OAUTH_BRIDGE_URI.to_string());
     }
 }

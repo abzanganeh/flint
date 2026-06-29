@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -23,6 +23,7 @@ const SYSTEM_CALIBRATION_TIMEOUT: Duration = Duration::from_secs(35);
 /// 8 seconds × 16 000 samples/s = 128 000 samples.  Keeps chunks well under
 /// the 30-second Whisper limit while being long enough to capture a complete
 /// calibration sentence.
+#[cfg(not(target_os = "linux"))]
 const CALIB_WINDOW_SAMPLES: usize = 16_000 * 8;
 
 /// Max samples per Whisper decode during mic calibration (~25 s at 16 kHz).
@@ -61,8 +62,7 @@ async fn transcribe_mic_calibration_frames(
         };
 
         for chunk_frame in downsampled.chunks(160) {
-            if let Some(vad_chunk) = chunker.process_frame(chunk_frame, AudioSource::Microphone)
-            {
+            if let Some(vad_chunk) = chunker.process_frame(chunk_frame, AudioSource::Microphone) {
                 speech.extend_from_slice(&vad_chunk.samples);
             }
         }
@@ -112,6 +112,7 @@ fn transcribe_calibration_speech(
 /// Uses VAD for speech detection but enforces a maximum window size so
 /// Whisper.cpp never receives a 30-second monolithic chunk (which its
 /// internal "single timestamp ending" heuristic discards).
+#[cfg(not(target_os = "linux"))]
 async fn transcribe_from_frames(
     whisper: Arc<WhisperEngine>,
     mut frame_rx: mpsc::Receiver<Vec<f32>>,

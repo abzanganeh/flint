@@ -144,7 +144,10 @@ mod tests {
     #[test]
     fn word_recall_counts_reference_tokens_in_hypothesis() {
         let recall = word_recall(SAMPLE_PARAGRAPH, "OAuth OIDC Kerberos LDAP enterprise");
-        assert!(recall > 0.0 && recall < 0.2, "expected low recall, got {recall}");
+        assert!(
+            recall > 0.0 && recall < 0.2,
+            "expected low recall, got {recall}"
+        );
         let recall = word_recall(SAMPLE_PARAGRAPH, SAMPLE_PARAGRAPH);
         assert_eq!(recall, 1.0);
     }

@@ -37,8 +37,8 @@ pub fn score_transcript(reference: &str, transcript: &str, threshold: f32) -> Ca
 pub fn score_mic_calibration(reference: &str, transcript: &str) -> CalibrationScore {
     let wer = word_error_rate(reference, transcript);
     let recall = word_recall(reference, transcript);
-    let passed = wer < MIC_WER_PASS_THRESHOLD
-        || (recall >= 0.70 && wer < MIC_WER_PASS_THRESHOLD * 2.0);
+    let passed =
+        wer < MIC_WER_PASS_THRESHOLD || (recall >= 0.70 && wer < MIC_WER_PASS_THRESHOLD * 2.0);
     CalibrationScore {
         wer,
         passed,
@@ -62,7 +62,7 @@ mod tests {
     fn mocked_mic_transcript_with_typos_may_fail() {
         let reference = load_mic_paragraph_text();
         let hypothesis = "At SecureAuth I led authentication using OAuth OIDC SAML MFA.";
-        let score = score_mic_calibration(&reference, &hypothesis);
+        let score = score_mic_calibration(&reference, hypothesis);
         assert!(!score.passed || score.wer < MIC_WER_PASS_THRESHOLD * 2.0);
     }
 
@@ -70,7 +70,8 @@ mod tests {
     fn mic_calibration_passes_with_high_recall_despite_jargon_wer() {
         let reference = load_mic_paragraph_text();
         // Missing opening sentence but most content present — typical pre-fix failure mode.
-        let hypothesis = "I led the design of an adaptive authentication system using ML based risk \
+        let hypothesis =
+            "I led the design of an adaptive authentication system using ML based risk \
             scoring. The platform supported OAuth and OIDC federation across multi tenant SaaS \
             customers. I integrated step up MFA triggers with identity aware policy enforcement \
             including Kerberos and LDAP for enterprise directories. My most recent work at IdMe24 \
