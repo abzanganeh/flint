@@ -198,6 +198,40 @@ impl WhisperEngine {
         Ok(result.and_then(|r| Self::post_process(r, chunk.duration_ms)))
     }
 
+    /// Greedy decode for mic/system calibration only.
+    ///
+    /// Disables per-token timestamps so whisper.cpp does not apply its
+    /// "single timestamp ending — skip entire chunk" guard, which was
+    /// discarding whole calibration windows and inflating WER.
+    pub fn transcribe_greedy_calibration(
+        &self,
+        chunk: &VadChunk,
+    ) -> Result<Option<TranscriptionResult>> {
+        if chunk.samples.is_empty() {
+            return Ok(None);
+        }
+        let mut state = self
+            .model
+            .create_state()
+            .context("Failed to create Whisper state")?;
+
+        let mut params = build_calibration_greedy_params(&self.initial_prompt);
+        params.set_n_threads(thread_count_for_tier(self.tier));
+
+        state
+            .full(params, &chunk.samples)
+            .context("Whisper inference failed")?;
+
+        let n_segments = state.full_n_segments();
+        if n_segments <= 0 {
+            tracing::debug!(source = ?chunk.source, "calibration greedy produced no segments");
+            return Ok(None);
+        }
+
+        let result = collect_segments(&state, chunk.source, n_segments)?;
+        Ok(result.and_then(|r| Self::post_process(r, chunk.duration_ms)))
+    }
+
     fn decode_chunk_with_prompt(
         &self,
         chunk: &VadChunk,
@@ -262,6 +296,14 @@ fn build_full_params(initial_prompt: &str) -> FullParams<'static, 'static> {
 fn build_greedy_params(initial_prompt: &str) -> FullParams<'static, 'static> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     apply_common_params(&mut params, initial_prompt);
+    params
+}
+
+/// Calibration greedy decode — no token timestamps (avoids chunk discard).
+fn build_calibration_greedy_params(initial_prompt: &str) -> FullParams<'static, 'static> {
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    apply_common_params(&mut params, initial_prompt);
+    params.set_token_timestamps(false);
     params
 }
 
@@ -592,6 +634,12 @@ mod tests {
     #[test]
     fn build_greedy_params_does_not_panic() {
         let params = build_greedy_params(DEFAULT_INITIAL_PROMPT);
+        drop(params);
+    }
+
+    #[test]
+    fn build_calibration_greedy_params_does_not_panic() {
+        let params = build_calibration_greedy_params(DEFAULT_INITIAL_PROMPT);
         drop(params);
     }
 

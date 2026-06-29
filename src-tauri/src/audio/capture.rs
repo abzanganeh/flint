@@ -530,7 +530,7 @@ impl AudioCapture {
 ///      `module-echo-cancel`) by scanning for a device whose name contains
 ///      "echo" or "cancel". Suppresses speaker bleed at the OS level.
 ///   3. System default input device.
-fn find_mic_device(host: &cpal::Host) -> Result<Device> {
+pub(crate) fn find_mic_device(host: &cpal::Host) -> Result<Device> {
     // ── Explicit override ─────────────────────────────────────────────────
     if let Ok(target) = std::env::var("FLINT_MIC_SOURCE") {
         let target = target.trim().to_lowercase();

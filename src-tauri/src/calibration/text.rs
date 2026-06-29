@@ -17,6 +17,16 @@ pub const MIC_PARAGRAPH_TEXT: &str =
 pub const SYSTEM_WER_PASS_THRESHOLD: f32 = 0.20;
 pub const MIC_WER_PASS_THRESHOLD: f32 = 0.25;
 
+/// Cap matches session Whisper initial_prompt budget (§26).
+const CALIBRATION_PROMPT_CHAR_CAP: usize = 220;
+
+pub fn calibration_whisper_prompt(reference: &str) -> String {
+    reference
+        .chars()
+        .take(CALIBRATION_PROMPT_CHAR_CAP)
+        .collect()
+}
+
 pub fn calibration_resources_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/calibration")
 }
@@ -33,11 +43,19 @@ pub fn load_mic_paragraph_text() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{calibration_whisper_prompt, load_mic_paragraph_text, load_system_clip_text};
 
     #[test]
     fn bundled_texts_are_non_empty() {
         assert!(!load_system_clip_text().is_empty());
         assert!(!load_mic_paragraph_text().is_empty());
+    }
+
+    #[test]
+    fn calibration_prompt_is_capped() {
+        let reference = load_mic_paragraph_text();
+        let prompt = calibration_whisper_prompt(&reference);
+        assert!(!prompt.is_empty());
+        assert!(prompt.len() <= 220);
     }
 }

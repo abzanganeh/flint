@@ -296,6 +296,15 @@ impl VadChunker {
         }
     }
 
+    /// Force-end any in-progress speech segment (e.g. calibration timeout).
+    pub fn force_end_segment(&mut self) -> Option<VadChunk> {
+        if self.speech_frames >= MIN_SPEECH_FRAMES {
+            self.finalise_segment()
+        } else {
+            None
+        }
+    }
+
     /// Finalise the current segment.
     ///
     /// Emits a `VadChunk` if the segment meets `MIN_SPEECH_MS`; silently

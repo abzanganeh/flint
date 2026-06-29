@@ -13,9 +13,10 @@ use crate::audio::capture::AudioCapture;
 use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
 use crate::calibration::{
-    device_fingerprint_or_fallback, load_mic_paragraph_text, load_system_clip_text,
-    log_audio_quality_calibration, score_transcript, transcribe_mic_calibration,
-    transcribe_system_calibration, MIC_WER_PASS_THRESHOLD, SYSTEM_WER_PASS_THRESHOLD,
+    calibration_whisper_prompt, device_fingerprint_or_fallback, load_mic_paragraph_text,
+    load_system_clip_text, log_audio_quality_calibration, score_mic_calibration, score_transcript,
+    transcribe_mic_calibration, transcribe_system_calibration, MIC_WER_PASS_THRESHOLD,
+    SYSTEM_WER_PASS_THRESHOLD,
 };
 use crate::digest::extract_digest;
 use crate::dto::{
@@ -224,6 +225,9 @@ pub async fn get_current_user(state: State<'_, AppState>) -> Result<UserDto, Str
 #[tauri::command]
 pub async fn start_google_oauth(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
+
+    // Supersede any in-flight OAuth attempt (stale PKCE verifier + UI waiting state).
+    keychain::clear_oauth_code_verifier();
 
     let (verifier, challenge) = crate::supabase::oauth::generate_pkce_pair();
     keychain::store_oauth_code_verifier(&verifier).map_err(|_| KEYCHAIN_SAVE_ERROR.to_string())?;
@@ -5344,12 +5348,13 @@ pub async fn run_mic_calibration(
     _state: State<'_, AppState>,
 ) -> Result<CalibrationResultDto, String> {
     let profile = hardware::assess_hardware();
-    let whisper = init_whisper_engine(&profile, FALLBACK_WHISPER_INITIAL_PROMPT.into())?;
     let reference = load_mic_paragraph_text();
+    let cal_prompt = calibration_whisper_prompt(&reference);
+    let whisper = init_whisper_engine(&profile, cal_prompt.into())?;
     let transcript = transcribe_mic_calibration(whisper)
         .await
         .map_err(|e| e.to_string())?;
-    let score = score_transcript(&reference, &transcript, MIC_WER_PASS_THRESHOLD);
+    let score = score_mic_calibration(&reference, &transcript);
     emit_calibration_mic_complete(
         &app,
         CalibrationCompletePayload {

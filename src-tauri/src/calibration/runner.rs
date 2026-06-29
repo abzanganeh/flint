@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 
 use crate::audio::capture::{
-    build_resampled_mono_stream, find_system_device, AudioSource, FRAME_SAMPLES,
+    build_resampled_mono_stream, find_mic_device, find_system_device, AudioSource, FRAME_SAMPLES,
 };
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunk, VadChunker};
@@ -24,6 +24,87 @@ const SYSTEM_CALIBRATION_TIMEOUT: Duration = Duration::from_secs(35);
 /// the 30-second Whisper limit while being long enough to capture a complete
 /// calibration sentence.
 const CALIB_WINDOW_SAMPLES: usize = 16_000 * 8;
+
+/// Max samples per Whisper decode during mic calibration (~25 s at 16 kHz).
+/// Stays under Whisper's 30 s limit while avoiding many small windows that
+/// lose context at chunk boundaries.
+const MIC_CALIB_CHUNK_SAMPLES: usize = 16_000 * 25;
+
+/// Collect mic calibration audio, then transcribe in a few large windows.
+async fn transcribe_mic_calibration_frames(
+    whisper: Arc<WhisperEngine>,
+    mut frame_rx: mpsc::Receiver<Vec<f32>>,
+    deadline: Instant,
+) -> Result<String> {
+    let mut rnnoise = Some(RNNoiseProcessor::new()?);
+    let mut downsampler = Downsampler::new()?;
+    let mut chunker = VadChunker::new()?;
+    let mut speech: Vec<f32> = Vec::new();
+
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame = match timeout(remaining, frame_rx.recv()).await {
+            Ok(Some(f)) => f,
+            _ => break,
+        };
+
+        if frame.len() != FRAME_SAMPLES {
+            continue;
+        }
+
+        let mut proc = frame;
+        if let Some(rnn) = rnnoise.as_mut() {
+            let _ = rnn.process_frame(&mut proc);
+        }
+        let Ok(downsampled) = downsampler.process(&proc) else {
+            continue;
+        };
+
+        for chunk_frame in downsampled.chunks(160) {
+            if let Some(vad_chunk) = chunker.process_frame(chunk_frame, AudioSource::Microphone)
+            {
+                speech.extend_from_slice(&vad_chunk.samples);
+            }
+        }
+    }
+
+    if let Some(tail) = chunker.force_end_segment() {
+        speech.extend_from_slice(&tail.samples);
+    }
+
+    transcribe_calibration_speech(whisper, AudioSource::Microphone, &speech)
+}
+
+fn transcribe_calibration_speech(
+    whisper: Arc<WhisperEngine>,
+    source: AudioSource,
+    speech: &[f32],
+) -> Result<String> {
+    if speech.len() < 1_600 {
+        return Ok(String::new());
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    for chunk_samples in speech.chunks(MIC_CALIB_CHUNK_SAMPLES) {
+        if chunk_samples.len() < 1_600 {
+            continue;
+        }
+        let duration_ms = (chunk_samples.len() as u32) / 16;
+        let chunk = VadChunk {
+            samples: chunk_samples.to_vec(),
+            source,
+            duration_ms,
+        };
+        if let Ok(Some(r)) = whisper.transcribe_greedy_calibration(&chunk) {
+            let t = r.text.trim().to_owned();
+            if !t.is_empty() {
+                parts.push(t);
+            }
+        }
+    }
+
+    Ok(parts.join(" "))
+}
 
 /// Collect audio frames, transcribe in fixed 8-second windows using VAD
 /// to determine speech boundaries, and return the joined transcript.
@@ -126,11 +207,9 @@ pub async fn transcribe_mic_calibration(whisper: Arc<WhisperEngine>) -> Result<S
         .map_err(|_| anyhow::anyhow!("calibration mic thread died before ready"))?
         .context("calibration mic stream init")?;
 
-    let transcript = transcribe_from_frames(
+    let transcript = transcribe_mic_calibration_frames(
         whisper,
         frame_rx,
-        AudioSource::Microphone,
-        true,
         Instant::now() + MIC_CALIBRATION_TIMEOUT,
     )
     .await?;
@@ -416,9 +495,11 @@ fn run_mic_thread(
     stop_rx: std::sync::mpsc::Receiver<()>,
 ) -> Result<()> {
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .context("no default input device for mic calibration")?;
+    let device = find_mic_device(&host).context("no input device for mic calibration")?;
+    tracing::info!(
+        device = %device.name().unwrap_or_else(|_| "unknown".into()),
+        "mic calibration: input device selected"
+    );
     let stream = build_resampled_mono_stream(&device, frame_tx)?;
     stream.play()?;
     let _ = ready_tx.send(Ok(()));

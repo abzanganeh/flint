@@ -66,4 +66,62 @@ describe("MicCalibration", () => {
     fireEvent.click(await screen.findByTestId("mic-calibration-skip"));
     await waitFor(() => expect(onComplete).toHaveBeenCalled());
   });
+
+  it("starts mic test after re-test from failed phase", async () => {
+    const {
+      getMicCalibrationStatus,
+      runSystemAudioCalibration,
+      runMicCalibration,
+    } = await import("../commands");
+
+    vi.mocked(getMicCalibrationStatus).mockResolvedValue({
+      passedOnDevice: false,
+      deviceFingerprint: "abc",
+      werSystem: null,
+      werMic: null,
+      forced: false,
+      calibratedAt: null,
+    });
+    vi.mocked(runSystemAudioCalibration).mockResolvedValue({
+      wer: 0.1,
+      passed: true,
+      transcript: "system ok",
+    });
+    vi.mocked(runMicCalibration)
+      .mockResolvedValueOnce({
+        wer: 0.32,
+        passed: false,
+        transcript: "partial read",
+      })
+      .mockResolvedValueOnce({
+        wer: 0.1,
+        passed: true,
+        transcript: "full read",
+      });
+
+    render(<MicCalibration onComplete={vi.fn()} />);
+
+    fireEvent.click(await screen.findByTestId("mic-calibration-run-system"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mic-calibration-run-mic")).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByTestId("mic-calibration-run-mic"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mic-calibration-failed")).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByTestId("mic-calibration-retest"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mic-calibration-run-system")).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByTestId("mic-calibration-run-system"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mic-calibration-run-mic")).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByTestId("mic-calibration-run-mic"));
+    await waitFor(() => expect(runMicCalibration).toHaveBeenCalledTimes(2));
+  });
 });
