@@ -114,14 +114,15 @@
           title.textContent = "Almost there";
           body.innerHTML =
             "<span class='spinner'></span>" +
-            "Click <strong>Open Flint</strong> in the dialog that just appeared.";
+            "Click <strong>Open Flint</strong> in the dialog that just appeared, " +
+            "then close this tab with <strong>Ctrl+W</strong>.";
         }
 
         function showDialogCancelled() {
           title.textContent = "Open Flint to finish signing in";
           body.innerHTML =
-            "The system dialog was dismissed. Click the button below to bring it back, " +
-            "or switch to the Flint window directly.";
+            "The system dialog was dismissed. Click <strong>Switch to Flint</strong> below to bring it back, " +
+            "then close this browser tab with <strong>Ctrl+W</strong>.";
           actions.style.display = "block";
         }
 
