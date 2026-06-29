@@ -19,10 +19,10 @@ interface Props {
 type Phase = "skip-gate" | "system" | "mic" | "failed" | "done";
 
 const FAILURE_RECOMMENDATIONS = [
-  "Use a headset or close-talk microphone",
-  "Move to a quieter room",
-  "Check that the correct mic is selected in Settings → Audio Devices",
-  "If using a Bluetooth headset, switch to wired if possible",
+  "Set your microphone as the system default input (Linux: pavucontrol → Input Devices)",
+  "Start reading immediately when the test begins — you have 45 seconds for the full paragraph",
+  "Speak at a normal interview pace; long pauses count as missing words",
+  "If gain is too low or too high, adjust input volume in your OS mixer (avoid clipping)",
 ];
 
 export default function MicCalibration({ onComplete, forceRetest = false, phoneCallMode = false }: Props) {
@@ -85,6 +85,7 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
       setSystemResult(result);
       // Always move to mic phase — system audio failure is informational only.
       // The user can still calibrate their mic even if loopback doesn't work.
+      setMicReady(false);
       setPhase("mic");
     } catch (e) {
       setError(String(e));
@@ -128,7 +129,15 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
           You&apos;ve already passed the mic check on this device. Is your setup the same?
         </p>
         <div className="mic-calibration-actions">
-          <button type="button" onClick={() => setPhase("system")}>
+          <button
+            type="button"
+            onClick={() => {
+              setPhase("system");
+              setMicReady(false);
+              setSystemResult(null);
+              setMicResult(null);
+            }}
+          >
             Run again
           </button>
           <button
@@ -149,9 +158,11 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
     return (
       <section className="mic-calibration mic-calibration-failed" data-testid="mic-calibration-failed">
         <div className="mic-calibration-warning" role="alert">
-          <strong>Audio quality is too low for reliable transcription.</strong>
+          <strong>Mic check did not meet the accuracy target.</strong>
           <p>
-            Flint cannot guarantee accurate coaching or matching during your interview.
+            Flint heard you, but the read-back did not match the test paragraph closely enough.
+            This is often caused by technical terms (OAuth, Kerberos, etc.) rather than a bad
+            microphone. Live interview answers are usually easier for transcription.
           </p>
         </div>
         {systemFailed && (
@@ -160,9 +171,18 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
           </p>
         )}
         {micFailed && (
-          <p className="mic-calibration-wer">
-            Microphone WER: {(micResult.wer * 100).toFixed(0)}% (threshold 25%)
-          </p>
+          <>
+            <p className="mic-calibration-wer">
+              Microphone WER: {(micResult.wer * 100).toFixed(0)}% (target below 25%, or strong
+              word match)
+            </p>
+            {micResult.transcript.trim() && (
+              <details className="mic-calibration-details" open>
+                <summary>What Flint heard</summary>
+                <blockquote className="mic-calibration-paragraph">{micResult.transcript}</blockquote>
+              </details>
+            )}
+          </>
         )}
         <ul>
           {FAILURE_RECOMMENDATIONS.map((item) => (
@@ -170,7 +190,16 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
           ))}
         </ul>
         <div className="mic-calibration-actions">
-          <button type="button" onClick={() => { setPhase("system"); setSystemResult(null); setMicResult(null); }}>
+          <button
+            type="button"
+            data-testid="mic-calibration-retest"
+            onClick={() => {
+              setPhase("system");
+              setMicReady(false);
+              setSystemResult(null);
+              setMicResult(null);
+            }}
+          >
             Re-test
           </button>
           {systemFailed && !micFailed && (
@@ -303,11 +332,12 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
       <div className="mic-calibration-actions">
         <button
           type="button"
+          data-testid={isSystem ? "mic-calibration-run-system" : "mic-calibration-run-mic"}
           disabled={running}
           onClick={() => {
             if (isSystem) {
               void runSystemPhase();
-            } else if (!micReady) {
+            } else {
               setMicReady(true);
               void runMicPhase();
             }

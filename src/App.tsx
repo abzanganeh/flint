@@ -13,6 +13,7 @@ import {
   reopenSession,
   restoreDraftSession,
   returnToSessionDesign,
+  stopMock,
   stopSession,
   type RecoveryOffer,
   type SessionSnapshotDto,
@@ -176,6 +177,13 @@ function App() {
     setSettingsInitialTab(initialTab);
     setScreen("settings");
   };
+
+  /** Leave mock interview and sync Rust state back to REHEARSING before showing Rehearsal. */
+  const exitMockToRehearsal = useCallback(() => {
+    void stopMock(false)
+      .catch(() => undefined)
+      .finally(() => setScreen("rehearsal"));
+  }, []);
 
   const handleSettingsBack = useCallback(() => {
     let target = settingsReturnScreen;
@@ -735,7 +743,7 @@ function App() {
         <MockInterview
           sessionId={sessionId ?? ""}
           onComplete={() => setScreen("mock-summary")}
-          onAbort={() => setScreen("rehearsal")}
+          onAbort={exitMockToRehearsal}
         />
       </Shell>
     );

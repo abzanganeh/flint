@@ -97,6 +97,18 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const studyModeRef = useRef<MockStudyMode>(studyMode);
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const retryPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const mockSessionActiveRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (mockSessionActiveRef.current) {
+        void stopMock(false).catch(() => undefined);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     paceRef.current = pace;
@@ -251,6 +263,11 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
     setStarting(true);
     try {
       await startMock(pace === "guided", studyMode, shuffleQuestions);
+      if (!mountedRef.current) {
+        await stopMock(false).catch(() => undefined);
+        return;
+      }
+      mockSessionActiveRef.current = true;
       setPhase(pace === "guided" ? "ready" : "waiting");
     } catch (e) {
       setError(String(e));
@@ -381,6 +398,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   };
 
   const resetToPicker = useCallback(() => {
+    mockSessionActiveRef.current = false;
     setPhase("idle");
     setTurn(emptyTurn());
     setRecording(false);
@@ -517,6 +535,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           {phase === "idle" && (
             <button
               type="button"
+              disabled={starting}
               onClick={() => onAbort()}
               style={{
                 background: "none",

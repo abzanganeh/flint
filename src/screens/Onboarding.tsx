@@ -31,7 +31,7 @@ type OnboardingStep = "legal" | "auth";
 type AuthMode = "signup" | "login";
 
 /** Auto-cancel if the browser tab is closed and no deep link arrives. */
-const OAUTH_WAIT_TIMEOUT_MS = 3 * 60 * 1000;
+const OAUTH_WAIT_TIMEOUT_MS = 90 * 1000;
 
 const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
   const [step, setStep] = useState<OnboardingStep>(initialStep);
@@ -152,7 +152,22 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
     });
   };
 
+  const handleRetryGoogleOAuth = () => {
+    void cancelGoogleOAuth()
+      .catch(() => undefined)
+      .finally(() => {
+        clearOAuthWait();
+        void handleGoogleSignIn();
+      });
+  };
+
   const resetAuthFormState = () => {
+    if (oauthPending) {
+      void cancelGoogleOAuth()
+        .catch(() => undefined)
+        .finally(() => clearOAuthWait());
+      return;
+    }
     setError(null);
     clearOAuthWait();
   };
@@ -216,14 +231,31 @@ const Onboarding = ({ onComplete, initialStep }: OnboardingProps) => {
           {oauthPending ? "Waiting for Google…" : "Continue with Google"}
         </button>
         {oauthPending ? (
-          <button
-            type="button"
-            className="btn-oauth-cancel"
-            onClick={handleCancelGoogleOAuth}
-            data-testid="google-sign-in-cancel"
-          >
-            Cancel Google sign-in
-          </button>
+          <>
+            <p className="oauth-wait-hint" data-testid="google-oauth-hint">
+              After you pick an account, choose <strong>Open Flint</strong> in the system dialog.
+              If you cancel that dialog, click <strong>Cancel sign-in</strong> below, close the
+              browser tab, then try again.
+            </p>
+            <div className="oauth-wait-actions">
+              <button
+                type="button"
+                className="btn-oauth-cancel"
+                onClick={handleCancelGoogleOAuth}
+                data-testid="google-sign-in-cancel"
+              >
+                Cancel sign-in
+              </button>
+              <button
+                type="button"
+                className="btn-oauth-retry"
+                onClick={() => void handleRetryGoogleOAuth()}
+                data-testid="google-sign-in-retry"
+              >
+                Try a different account
+              </button>
+            </div>
+          </>
         ) : null}
 
         <div className="auth-divider" aria-hidden="true">

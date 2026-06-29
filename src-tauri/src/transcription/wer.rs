@@ -37,6 +37,38 @@ pub fn word_error_rate(reference: &str, hypothesis: &str) -> f32 {
     distance as f32 / ref_tokens.len() as f32
 }
 
+/// Fraction of reference words present anywhere in the hypothesis (order-free).
+pub fn word_recall(reference: &str, hypothesis: &str) -> f32 {
+    let ref_norm = normalize_for_wer(reference);
+    let ref_tokens: Vec<&str> = ref_norm.split_whitespace().collect();
+    if ref_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let hyp_norm = normalize_for_wer(hypothesis);
+    let hyp_tokens: Vec<&str> = hyp_norm.split_whitespace().collect();
+    if hyp_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let mut hyp_counts = std::collections::HashMap::<&str, usize>::new();
+    for token in &hyp_tokens {
+        *hyp_counts.entry(token).or_insert(0) += 1;
+    }
+
+    let mut matched = 0usize;
+    for token in &ref_tokens {
+        if let Some(count) = hyp_counts.get_mut(token) {
+            if *count > 0 {
+                *count -= 1;
+                matched += 1;
+            }
+        }
+    }
+
+    matched as f32 / ref_tokens.len() as f32
+}
+
 #[allow(clippy::needless_range_loop)]
 fn word_edit_distance(a: &[&str], b: &[&str]) -> usize {
     let m = a.len();
@@ -107,5 +139,16 @@ mod tests {
     fn completely_wrong_transcript_is_high_wer() {
         let wer = word_error_rate(SAMPLE_PARAGRAPH, "hello world foo bar");
         assert!(wer > 0.8, "expected high WER, got {wer}");
+    }
+
+    #[test]
+    fn word_recall_counts_reference_tokens_in_hypothesis() {
+        let recall = word_recall(SAMPLE_PARAGRAPH, "OAuth OIDC Kerberos LDAP enterprise");
+        assert!(
+            recall > 0.0 && recall < 0.2,
+            "expected low recall, got {recall}"
+        );
+        let recall = word_recall(SAMPLE_PARAGRAPH, SAMPLE_PARAGRAPH);
+        assert_eq!(recall, 1.0);
     }
 }
