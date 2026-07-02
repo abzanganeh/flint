@@ -10,7 +10,9 @@
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {},
+  "open_prs": {
+    "flint": "https://github.com/abzanganeh/flint/pull/32"
+  },
   "manual_gate_backlog": [
     {
       "slice": "v1p1-s10-eval-baseline",
