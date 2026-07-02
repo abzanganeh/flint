@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase1",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
-  "current_slice": 13,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-  "current_task_id": "v1p1-s13-hosted-supabase-prep",
+  "current_slice": 14,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+  "current_task_id": "v1p1-s14-stealth-audio-manual-gate",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -19,7 +19,11 @@
     {
       "slice": "v1p1-s12-installer-signing-prep",
       "reason": "Signed/notarized macOS + Authenticode Windows installers require Apple Developer ID and Windows code-signing certs. CI wired in release.yml; secrets + verification checklist in tests/manual-qa/installer-signing-runbook.md."
+    },
+    {
+      "slice": "v1p1-s13-hosted-supabase-prep",
+      "reason": "Cloud Supabase project must be created in dashboard. Migrations verified locally (3/3 clean, RLS on all 9 tables). Runbook: tests/manual-qa/hosted-supabase-runbook.md."
     }
   ],
-  "notes": "Slice 12: release.yml + signing runbook. Next: hosted Supabase prep."
+  "notes": "Slice 13: migrations verified fresh, hosted runbook. Next: stealth/audio manual gate."
 }
