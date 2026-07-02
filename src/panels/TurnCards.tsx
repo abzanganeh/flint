@@ -1,8 +1,8 @@
 /**
- * Shared presentation pieces for per-question answer cards in the
- * Directional and Depth panels. The live answer renders under a question
- * heading; completed turns collapse into <details> cards so the panel stays
- * scannable mid-interview instead of growing into a wall of text.
+ * Shared presentation pieces for per-question answer cards. QuestionHeading
+ * labels the live answer in the Directional and Depth panels; HistoryCard
+ * renders completed turns as collapsible <details> cards in the Context
+ * panel's "Earlier questions" list, keeping history out of the live panels.
  */
 
 export interface QuestionHeadingProps {

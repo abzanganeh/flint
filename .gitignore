@@ -37,9 +37,13 @@ evals/results/*.md
 *.bin
 models/
 
+# Python script artifacts
+scripts/__pycache__/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+*.code-workspace
 .idea
 .DS_Store
 *.suo
