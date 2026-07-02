@@ -1,5 +1,6 @@
 pub mod audio;
 mod auth_session;
+pub mod billing;
 pub mod calibration;
 mod commands;
 pub mod confidence;
@@ -254,6 +255,7 @@ pub fn run() {
             commands::delete_session,
             // Phase 7.4 — cost cap enforcement
             commands::get_cost_status,
+            commands::get_billing_status,
             commands::set_cost_cap,
             commands::lift_cost_suspension,
             commands::reset_cost_tracker,

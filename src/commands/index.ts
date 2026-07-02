@@ -568,6 +568,15 @@ const adaptDeleteAccountReport = (raw: RawDeleteAccountReport): DeleteAccountRep
 export const deleteAccount = async (): Promise<DeleteAccountReport> =>
   adaptDeleteAccountReport(await invoke<RawDeleteAccountReport>("delete_account"));
 
+export interface BillingStatusDto {
+  tier: "free" | "pro";
+  hasByokLlmKey: boolean;
+  meteredBillingEnabled: boolean;
+}
+
+export const getBillingStatus = (): Promise<BillingStatusDto> =>
+  invoke<BillingStatusDto>("get_billing_status");
+
 /**
  * Return a JSON blob of every locally-stored session, transcript, and
  * response. The caller is responsible for writing it to disk (or sharing it

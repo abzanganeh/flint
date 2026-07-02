@@ -2835,6 +2835,9 @@ pub async fn start_session(
         return Err("Complete rehearsal before starting a live session.".to_string());
     }
 
+    let plan = open_session_plan(state.inner()).await;
+    crate::billing::validate_live_session_billing(plan)?;
+
     checks::run_stealth_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
@@ -3991,6 +3994,34 @@ pub async fn demote_session(session_id: String, state: State<'_, AppState>) -> R
         .persistence
         .demote_session(sid)
         .map_err(|e| e.to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// v1 billing — BYOK + flat Pro tier (no metered ledger)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingStatusDto {
+    pub tier: String,
+    pub has_byok_llm_key: bool,
+    pub metered_billing_enabled: bool,
+}
+
+impl From<crate::billing::BillingStatus> for BillingStatusDto {
+    fn from(status: crate::billing::BillingStatus) -> Self {
+        Self {
+            tier: status.tier.as_str().to_string(),
+            has_byok_llm_key: status.has_byok_llm_key,
+            metered_billing_enabled: status.metered_billing_enabled,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_billing_status(state: State<'_, AppState>) -> Result<BillingStatusDto, String> {
+    let plan = evaluation_context(state.inner()).await.plan;
+    Ok(crate::billing::billing_status(plan).into())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

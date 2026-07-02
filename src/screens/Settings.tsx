@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   deleteAccount,
   exportUserData,
+  getBillingStatus,
   getCostStatus,
   getFeatureFlagsSnapshot,
   getSessionFocus,
@@ -16,6 +17,7 @@ import {
   saveSessionFocus,
   setCostCap,
   setPhoneCallMode,
+  type BillingStatusDto,
   type CostStatusDto,
   type DeleteAccountReport,
   type FeatureFlagsSnapshot,
@@ -189,9 +191,16 @@ function AccountTab({
   onRetestMic?: () => void;
 }) {
   const [loggingOut, setLoggingOut] = useState(false);
+  const [billing, setBilling] = useState<BillingStatusDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { zoom, setZoom } = useUiZoom();
   const zoomPercent = Math.round(zoom * 100);
+
+  useEffect(() => {
+    void getBillingStatus()
+      .then(setBilling)
+      .catch((e: unknown) => setError(String(e)));
+  }, []);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -217,6 +226,19 @@ function AccountTab({
         <p className="settings-tab__error" role="alert">
           {error}
         </p>
+      )}
+
+      {billing && (
+        <section className="settings-tab__section" data-testid="billing-status">
+          <h4 className="settings-tab__subheading">Plan</h4>
+          <p className="settings-tab__description">
+            {billing.tier === "pro" ? "Pro" : "Free"} tier — bring-your-own-key
+            billing (no metered credits in v1).
+            {billing.hasByokLlmKey
+              ? " At least one LLM API key is configured."
+              : " Add an LLM API key under API Keys before starting live sessions."}
+          </p>
+        </section>
       )}
 
       <section className="settings-tab__section">
