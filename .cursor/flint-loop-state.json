@@ -2,15 +2,20 @@
   "current_milestone": "v1-closure-phase1",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
-  "current_slice": 10,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9],
-  "current_task_id": "v1p1-s10-eval-baseline",
+  "current_slice": 11,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  "current_task_id": "v1p1-s11-nfr-benchmark",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
   "open_prs": {},
-  "manual_gate_backlog": [],
-  "notes": "Slice 9: speakrs ONNX diarization, SpeakerPicker, model download UI. Next: eval baseline."
+  "manual_gate_backlog": [
+    {
+      "slice": "v1p1-s10-eval-baseline",
+      "reason": "Eval smoke conciseness gate flaky with Ollama judge (80-90% pass on 10-question smoke). Full baseline committed; manual re-run with --update-baseline before prompt merges."
+    }
+  ],
+  "notes": "Slice 10: real eval baseline + skip-win-rate CI smoke. Next: NFR benchmark."
 }
