@@ -1,84 +1,14 @@
-//! Phone-mode speaker diarization via local ONNX (`speakrs`).
-//!
-//! All inference stays on-device — no audio leaves the machine for diarization.
+//! Unix diarization backend — local ONNX via `speakrs`.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
 use speakrs::{ExecutionMode, ModelBundle, ModelManager, OwnedDiarizationPipeline};
 use tracing::{info, warn};
 
-/// Label assigned by diarization or the user picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SpeakerRole {
-    Interviewer,
-    User,
-    Unknown,
-}
-
-/// One diarized speech segment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DiarizedSegment {
-    pub speaker_id: u8,
-    pub start_ms: u64,
-    pub end_ms: u64,
-    pub sample_text: String,
-}
-
-/// Runtime diarization state for phone-call sessions.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub enum DiarizerStatus {
-    Unavailable,
-    /// Models not downloaded — user should use Ctrl+Q.
-    #[default]
-    ModelsMissing,
-    /// Diarization running but speakers not yet assigned.
-    AwaitingAssignment {
-        segments: Vec<DiarizedSegment>,
-    },
-    /// User picked which speaker is the interviewer.
-    Assigned {
-        interviewer_id: u8,
-        user_id: u8,
-        segments: Vec<DiarizedSegment>,
-    },
-    /// Could not separate voices — Ctrl+Q only.
-    Failed,
-}
-
-impl DiarizerStatus {
-    pub fn role_for_speaker(&self, speaker_id: u8) -> SpeakerRole {
-        match self {
-            Self::Assigned {
-                interviewer_id,
-                user_id,
-                ..
-            } if speaker_id == *interviewer_id => SpeakerRole::Interviewer,
-            Self::Assigned {
-                interviewer_id: _,
-                user_id,
-                ..
-            } if speaker_id == *user_id => SpeakerRole::User,
-            _ => SpeakerRole::Unknown,
-        }
-    }
-
-    pub fn needs_speaker_picker(&self) -> bool {
-        matches!(self, Self::AwaitingAssignment { .. })
-    }
-
-    pub fn segments_for_ui(&self) -> Vec<DiarizedSegment> {
-        match self {
-            Self::AwaitingAssignment { segments } => segments.clone(),
-            Self::Assigned { segments, .. } => segments.clone(),
-            _ => Vec::new(),
-        }
-    }
-}
+use super::types::{
+    parse_speaker_id, DiarizedSegment, DiarizerStatus, SpeakerRole, DIARIZER_BATCH_INTERVAL,
+};
 
 enum DiarizerPipeline {
     Missing,
@@ -86,7 +16,6 @@ enum DiarizerPipeline {
     Failed,
 }
 
-/// Rolling-window diarization manager (`speakrs` ONNX, on-device only).
 pub struct DiarizerManager {
     pipeline: DiarizerPipeline,
     status: DiarizerStatus,
@@ -142,7 +71,6 @@ impl DiarizerManager {
         matches!(self.pipeline, DiarizerPipeline::Ready(_))
     }
 
-    /// Append 16 kHz mono PCM and run a rolling diarization batch when due.
     pub fn ingest_pcm(&mut self, samples: &[f32], sample_rate: u32) {
         if sample_rate != 16_000 {
             return;
@@ -203,7 +131,6 @@ impl DiarizerManager {
         }
     }
 
-    /// When speakers are assigned, map transcript offset to interviewer/user role.
     pub fn role_at_offset_ms(&self, offset_ms: u64) -> Option<SpeakerRole> {
         let DiarizerStatus::Assigned { segments, .. } = &self.status else {
             return None;
@@ -308,15 +235,8 @@ impl DiarizerManager {
     }
 }
 
-pub const DIARIZER_BATCH_INTERVAL: Duration = Duration::from_secs(2);
-
 pub fn speakrs_models_dir() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".flint")
-        .join("models")
-        .join("speakrs")
+    super::types::flint_models_base()
 }
 
 pub fn models_downloaded() -> bool {
@@ -358,18 +278,10 @@ fn write_model_dir_marker(base: &Path, snapshot: &Path) -> Result<(), String> {
     .map_err(|e| format!("write model_dir marker: {e}"))
 }
 
-fn parse_speaker_id(label: &str) -> u8 {
-    label
-        .rsplit('_')
-        .next()
-        .and_then(|n| n.parse::<u16>().ok())
-        .map(|n| n.min(u8::MAX as u16) as u8)
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::diarizer::types::parse_speaker_id;
 
     #[test]
     fn assign_interviewer_from_awaiting_segments() {
