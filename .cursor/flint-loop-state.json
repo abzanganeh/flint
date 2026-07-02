@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase1",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
-  "current_slice": 11,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-  "current_task_id": "v1p1-s11-nfr-benchmark",
+  "current_slice": 12,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+  "current_task_id": "v1p1-s12-installer-signing-prep",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -17,5 +17,5 @@
       "reason": "Eval smoke conciseness gate flaky with Ollama judge (80-90% pass on 10-question smoke). Full baseline committed; manual re-run with --update-baseline before prompt merges."
     }
   ],
-  "notes": "Slice 10: real eval baseline + skip-win-rate CI smoke. Next: NFR benchmark."
+  "notes": "Slice 11: bench_gate all green locally (RAG P95 0.43ms, TTFT P95 51ms). Next: installer signing prep."
 }
