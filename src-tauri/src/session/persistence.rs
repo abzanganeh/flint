@@ -2420,7 +2420,32 @@ impl SessionPersistence {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
 
         let mut stmt = conn
-            .prepare(
+            .prepare("SELECT id FROM sessions ORDER BY created_at ASC")
+            .context("prepare export session ids")?;
+
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .context("query export session ids")?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .context("read export session ids")?;
+
+        ids.into_iter()
+            .map(|id| Self::load_session_export(&conn, &id))
+            .collect()
+    }
+
+    /// Export one session with transcripts, responses, and state transitions.
+    pub fn export_session(&self, session_id: Uuid) -> Result<SessionExport> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        Self::load_session_export(&conn, &session_id.to_string())
+    }
+
+    fn load_session_export(
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Result<SessionExport> {
+        let row = conn
+            .query_row(
                 "SELECT id, state, created_at, expires_at, promoted, name,
                         session_type, domain, COALESCE(context_text, ''),
                         COALESCE(job_description, ''), COALESCE(profile, ''),
@@ -2428,85 +2453,74 @@ impl SessionPersistence {
                         COALESCE(role_expectations, ''), COALESCE(technical_prep, ''),
                         COALESCE(strategy_notes, '')
                  FROM sessions
-                 ORDER BY created_at ASC",
+                 WHERE id = ?1",
+                [session_id],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, String>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, String>(10)?,
+                        r.get::<_, String>(11)?,
+                        r.get::<_, String>(12)?,
+                        r.get::<_, String>(13)?,
+                        r.get::<_, String>(14)?,
+                        r.get::<_, String>(15)?,
+                    ))
+                },
             )
-            .context("prepare export sessions")?;
+            .optional()
+            .context("query session for export")?
+            .ok_or_else(|| anyhow::anyhow!("Session not found"))?;
 
-        let session_rows = stmt
-            .query_map([], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, i64>(2)?,
-                    r.get::<_, i64>(3)?,
-                    r.get::<_, i64>(4)?,
-                    r.get::<_, String>(5)?,
-                    r.get::<_, String>(6)?,
-                    r.get::<_, String>(7)?,
-                    r.get::<_, String>(8)?,
-                    r.get::<_, String>(9)?,
-                    r.get::<_, String>(10)?,
-                    r.get::<_, String>(11)?,
-                    r.get::<_, String>(12)?,
-                    r.get::<_, String>(13)?,
-                    r.get::<_, String>(14)?,
-                    r.get::<_, String>(15)?,
-                ))
-            })
-            .context("query sessions for export")?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .context("read sessions rows for export")?;
+        let (
+            id,
+            state,
+            created_at,
+            expires_at,
+            promoted,
+            name,
+            session_type,
+            domain,
+            ctx,
+            jd,
+            profile,
+            co,
+            lp,
+            re,
+            tp,
+            sn,
+        ) = row;
+        let sid = Uuid::parse_str(&id).context("parse session uuid for export")?;
 
-        let mut exports = Vec::with_capacity(session_rows.len());
-        for row in session_rows {
-            let (
-                id,
-                state,
-                created_at,
-                expires_at,
-                promoted,
-                name,
-                session_type,
-                domain,
-                ctx,
-                jd,
-                profile,
-                co,
-                lp,
-                re,
-                tp,
-                sn,
-            ) = row;
-            let sid = Uuid::parse_str(&id).context("parse session uuid for export")?;
-
-            let transcripts = Self::select_transcripts_for_export(&conn, &id)?;
-            let responses = Self::select_responses_for_export(&conn, &id)?;
-            let transitions = Self::select_transitions_for_export(&conn, &id)?;
-
-            exports.push(SessionExport {
-                id: sid,
-                state,
-                created_at,
-                expires_at,
-                promoted: promoted != 0,
-                name,
-                session_type,
-                domain,
-                context_text: ctx,
-                job_description: jd,
-                profile,
-                company_overview: co,
-                leadership_principles: lp,
-                role_expectations: re,
-                technical_prep: tp,
-                strategy_notes: sn,
-                transcript_chunks: transcripts,
-                responses,
-                state_transitions: transitions,
-            });
-        }
-
-        Ok(exports)
+        Ok(SessionExport {
+            id: sid,
+            state,
+            created_at,
+            expires_at,
+            promoted: promoted != 0,
+            name,
+            session_type,
+            domain,
+            context_text: ctx,
+            job_description: jd,
+            profile,
+            company_overview: co,
+            leadership_principles: lp,
+            role_expectations: re,
+            technical_prep: tp,
+            strategy_notes: sn,
+            transcript_chunks: Self::select_transcripts_for_export(conn, &id)?,
+            responses: Self::select_responses_for_export(conn, &id)?,
+            state_transitions: Self::select_transitions_for_export(conn, &id)?,
+        })
     }
 
     fn select_transcripts_for_export(
@@ -3678,6 +3692,10 @@ mod tests {
         assert_eq!(session.responses.len(), 1);
         // Both the create (IDLE) and explicit CONFIGURING write should be present.
         assert!(!session.state_transitions.is_empty());
+
+        let single = db.export_session(sid).unwrap();
+        assert_eq!(single.id, sid);
+        assert_eq!(single.transcript_chunks.len(), 1);
     }
 
     // ── Mock interview (Phase 8) ─────────────────────────────────────────────

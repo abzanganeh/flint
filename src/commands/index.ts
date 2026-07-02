@@ -575,6 +575,35 @@ export const deleteAccount = async (): Promise<DeleteAccountReport> =>
  */
 export const exportUserData = (): Promise<string> => invoke<string>("export_user_data");
 
+export type SessionExportFormat = "json" | "text" | "pdf";
+
+export interface SessionExportFileDto {
+  filename: string;
+  mimeType: string;
+  encoding: "utf8" | "base64";
+  data: string;
+}
+
+export const exportSession = (
+  sessionId: string,
+  format: SessionExportFormat,
+): Promise<SessionExportFileDto> =>
+  invoke<SessionExportFileDto>("export_session", { sessionId, format });
+
+export function downloadSessionExport(file: SessionExportFileDto): void {
+  const bytes =
+    file.encoding === "base64"
+      ? Uint8Array.from(atob(file.data), (c) => c.charCodeAt(0))
+      : new TextEncoder().encode(file.data);
+  const blob = new Blob([bytes], { type: file.mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = file.filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
 // ── Phase 7.6 — Feature flags ────────────────────────────────────────────────
 
 export type FlagsOrigin = "remote" | "cache" | "defaults";

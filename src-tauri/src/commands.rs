@@ -4198,6 +4198,65 @@ pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, Stri
     serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportFileDto {
+    pub filename: String,
+    pub mime_type: String,
+    pub encoding: String,
+    pub data: String,
+}
+
+/// Export one session as JSON, plain text, or PDF (base64).
+#[tauri::command]
+pub async fn export_session(
+    session_id: String,
+    format: String,
+    state: State<'_, AppState>,
+) -> Result<SessionExportFileDto, String> {
+    use base64::Engine;
+    use uuid::Uuid;
+
+    use crate::session::export_format::{
+        export_filename, format_session_json, format_session_pdf, format_session_text,
+        SessionExportFormat,
+    };
+
+    let sid = Uuid::parse_str(&session_id).map_err(|_| "Invalid session id".to_string())?;
+    let export = state
+        .persistence
+        .export_session(sid)
+        .map_err(|e| e.to_string())?;
+    let export_format = SessionExportFormat::parse(&format).map_err(|e| e.to_string())?;
+
+    match export_format {
+        SessionExportFormat::Json => {
+            let data = format_session_json(&export).map_err(|e| e.to_string())?;
+            Ok(SessionExportFileDto {
+                filename: export_filename(&export, export_format),
+                mime_type: "application/json".to_string(),
+                encoding: "utf8".to_string(),
+                data,
+            })
+        }
+        SessionExportFormat::Text => Ok(SessionExportFileDto {
+            filename: export_filename(&export, export_format),
+            mime_type: "text/plain".to_string(),
+            encoding: "utf8".to_string(),
+            data: format_session_text(&export),
+        }),
+        SessionExportFormat::Pdf => {
+            let bytes = format_session_pdf(&export).map_err(|e| e.to_string())?;
+            Ok(SessionExportFileDto {
+                filename: export_filename(&export, export_format),
+                mime_type: "application/pdf".to_string(),
+                encoding: "base64".to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+        }
+    }
+}
+
 /// Copy text to the OS clipboard (native path — reliable in the Tauri WebView).
 #[tauri::command]
 pub fn copy_text_to_clipboard(text: String) -> Result<(), String> {

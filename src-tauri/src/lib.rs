@@ -260,6 +260,7 @@ pub fn run() {
             // Phase 7.5 — GDPR right-to-deletion + right-to-export
             commands::delete_account,
             commands::export_user_data,
+            commands::export_session,
             commands::copy_text_to_clipboard,
             // M8 — input quality / mic calibration
             commands::get_mic_calibration_status,
