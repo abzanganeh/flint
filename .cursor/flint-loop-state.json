@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase1",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
-  "current_slice": 15,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-  "current_task_id": "v1p1-s15-docs-pass",
+  "current_slice": 16,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+  "current_task_id": "v1p1-s16-pr-ci",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -29,5 +29,5 @@
       "reason": "BlackHole/WASAPI/OBS/Wayland hotkey validation needs real hardware per platform. Known Wayland unfocused hotkey limitation (P2, M3_LINUX_FINDINGS) — no v1 code fix. Runbook: tests/manual-qa/stealth-audio-validation-runbook.md."
     }
   ],
-  "notes": "Slice 14: stealth/audio runbook parked. Next: local docs pass (gitignored, never commit)."
+  "notes": "Slice 15: local docs updated (gitignored, not committed). Next: PR + CI + merge."
 }
