@@ -37,7 +37,9 @@ pub enum DiarizerStatus {
     #[default]
     ModelsMissing,
     /// Diarization running but speakers not yet assigned.
-    AwaitingAssignment { segments: Vec<DiarizedSegment> },
+    AwaitingAssignment {
+        segments: Vec<DiarizedSegment>,
+    },
     /// User picked which speaker is the interviewer.
     Assigned {
         interviewer_id: u8,
@@ -176,9 +178,9 @@ impl DiarizerManager {
 
         self.last_batch_at = Instant::now();
 
-        let window_start_ms = self.session_offset_ms.saturating_sub(
-            ((window.len() as u64) * 1000) / sample_rate as u64,
-        );
+        let window_start_ms = self
+            .session_offset_ms
+            .saturating_sub(((window.len() as u64) * 1000) / sample_rate as u64);
 
         match pipeline.run(&window) {
             Ok(result) => self.apply_diarization_result(&result.segments, window_start_ms),
@@ -191,10 +193,7 @@ impl DiarizerManager {
     }
 
     pub fn note_transcript(&mut self, speaker_id: u8, text: &str) {
-        let entry = self
-            .sample_text_by_speaker
-            .entry(speaker_id)
-            .or_default();
+        let entry = self.sample_text_by_speaker.entry(speaker_id).or_default();
         if !entry.is_empty() {
             entry.push(' ');
         }
@@ -223,7 +222,10 @@ impl DiarizerManager {
     pub fn allows_auto_question_detection_at(&self, offset_ms: u64) -> bool {
         match &self.status {
             DiarizerStatus::Assigned { .. } => {
-                matches!(self.role_at_offset_ms(offset_ms), Some(SpeakerRole::Interviewer))
+                matches!(
+                    self.role_at_offset_ms(offset_ms),
+                    Some(SpeakerRole::Interviewer)
+                )
             }
             _ => false,
         }
@@ -244,22 +246,16 @@ impl DiarizerManager {
                 };
                 Ok(())
             }
-            DiarizerStatus::ModelsMissing => Err(
-                "Speaker models not installed. Use Ctrl+Q to mark question boundaries.".into(),
-            ),
+            DiarizerStatus::ModelsMissing => {
+                Err("Speaker models not installed. Use Ctrl+Q to mark question boundaries.".into())
+            }
             DiarizerStatus::Failed => Err("Speaker separation unavailable. Use Ctrl+Q.".into()),
             DiarizerStatus::Assigned { .. } => Ok(()),
-            DiarizerStatus::Unavailable => {
-                Err("Diarization not active for this session.".into())
-            }
+            DiarizerStatus::Unavailable => Err("Diarization not active for this session.".into()),
         }
     }
 
-    fn apply_diarization_result(
-        &mut self,
-        segments: &[speakrs::Segment],
-        window_start_ms: u64,
-    ) {
+    fn apply_diarization_result(&mut self, segments: &[speakrs::Segment], window_start_ms: u64) {
         if segments.is_empty() {
             return;
         }
@@ -303,9 +299,7 @@ impl DiarizerManager {
             return;
         }
 
-        self.status = DiarizerStatus::AwaitingAssignment {
-            segments: diarized,
-        };
+        self.status = DiarizerStatus::AwaitingAssignment { segments: diarized };
     }
 
     #[cfg(test)]
@@ -395,10 +389,7 @@ mod tests {
             },
         ]);
         mgr.assign_interviewer(0).unwrap();
-        assert_eq!(
-            mgr.status().role_for_speaker(0),
-            SpeakerRole::Interviewer
-        );
+        assert_eq!(mgr.status().role_for_speaker(0), SpeakerRole::Interviewer);
         assert_eq!(mgr.status().role_for_speaker(1), SpeakerRole::User);
     }
 
@@ -428,10 +419,7 @@ mod tests {
             },
         ]);
         mgr.assign_interviewer(0).unwrap();
-        assert_eq!(
-            mgr.role_at_offset_ms(500),
-            Some(SpeakerRole::Interviewer)
-        );
+        assert_eq!(mgr.role_at_offset_ms(500), Some(SpeakerRole::Interviewer));
         assert_eq!(mgr.role_at_offset_ms(3000), Some(SpeakerRole::User));
     }
 

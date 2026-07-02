@@ -2440,10 +2440,7 @@ impl SessionPersistence {
         Self::load_session_export(&conn, &session_id.to_string())
     }
 
-    fn load_session_export(
-        conn: &rusqlite::Connection,
-        session_id: &str,
-    ) -> Result<SessionExport> {
+    fn load_session_export(conn: &rusqlite::Connection, session_id: &str) -> Result<SessionExport> {
         let row = conn
             .query_row(
                 "SELECT id, state, created_at, expires_at, promoted, name,

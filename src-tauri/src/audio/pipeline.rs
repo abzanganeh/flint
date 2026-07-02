@@ -636,9 +636,7 @@ async fn process_frame(
             if let Ok(mut guard) = d.lock() {
                 if let Some(role) = guard.role_at_offset_ms(timestamp as u64) {
                     effective_source = match role {
-                        crate::audio::diarizer::SpeakerRole::Interviewer => {
-                            AudioSource::System
-                        }
+                        crate::audio::diarizer::SpeakerRole::Interviewer => AudioSource::System,
                         crate::audio::diarizer::SpeakerRole::User => AudioSource::Microphone,
                         crate::audio::diarizer::SpeakerRole::Unknown => effective_source,
                     };

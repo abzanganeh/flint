@@ -3409,14 +3409,19 @@ pub struct DiarizationStatusDto {
 }
 
 #[tauri::command]
-pub async fn get_diarization_status(state: State<'_, AppState>) -> Result<DiarizationStatusDto, String> {
+pub async fn get_diarization_status(
+    state: State<'_, AppState>,
+) -> Result<DiarizationStatusDto, String> {
     let guard = state.live_tasks.lock().await;
     if let Some(handles) = guard.as_ref() {
         let diarizer = handles
             .diarizer
             .lock()
             .map_err(|_| "Diarizer lock poisoned.".to_string())?;
-        return Ok(diarization_status_to_dto(diarizer.status(), diarizer.models_ready()));
+        return Ok(diarization_status_to_dto(
+            diarizer.status(),
+            diarizer.models_ready(),
+        ));
     }
     Ok(DiarizationStatusDto {
         state: if crate::audio::diarizer::models_downloaded() {

@@ -30,7 +30,9 @@ impl SessionExportFormat {
             "json" => Ok(Self::Json),
             "text" | "txt" => Ok(Self::Text),
             "pdf" => Ok(Self::Pdf),
-            other => anyhow::bail!("Unsupported export format '{other}' — expected json, text, or pdf"),
+            other => {
+                anyhow::bail!("Unsupported export format '{other}' — expected json, text, or pdf")
+            }
         }
     }
 }
@@ -201,8 +203,12 @@ fn slugify(name: &str) -> String {
 }
 
 fn render_pdf_bytes(title: &str, body: &str) -> Result<Vec<u8>> {
-    let (doc, first_page, first_layer) =
-        PdfDocument::new(title, Mm(PDF_PAGE_WIDTH_MM), Mm(PDF_PAGE_HEIGHT_MM), "Layer 1");
+    let (doc, first_page, first_layer) = PdfDocument::new(
+        title,
+        Mm(PDF_PAGE_WIDTH_MM),
+        Mm(PDF_PAGE_HEIGHT_MM),
+        "Layer 1",
+    );
     let font = doc
         .add_builtin_font(BuiltinFont::Helvetica)
         .context("load PDF built-in font")?;
@@ -220,26 +226,24 @@ fn render_pdf_bytes(title: &str, body: &str) -> Result<Vec<u8>> {
                 layer = next_layer;
                 y = PDF_TOP_MM;
             }
-            doc.get_page(page)
-                .get_layer(layer)
-                .use_text(
-                    sanitize_pdf_text(&wrapped),
-                    PDF_FONT_SIZE,
-                    Mm(PDF_LEFT_MARGIN_MM),
-                    Mm(y),
-                    &font,
-                );
+            doc.get_page(page).get_layer(layer).use_text(
+                sanitize_pdf_text(&wrapped),
+                PDF_FONT_SIZE,
+                Mm(PDF_LEFT_MARGIN_MM),
+                Mm(y),
+                &font,
+            );
             y -= PDF_LINE_HEIGHT_MM;
         }
     }
 
     let mut buffer = BufWriter::new(Cursor::new(Vec::new()));
-    doc.save(&mut buffer)
-        .context("write PDF export bytes")?;
+    doc.save(&mut buffer).context("write PDF export bytes")?;
     buffer.flush().context("flush PDF export bytes")?;
-    Ok(buffer.into_inner().map_err(|_| {
-        anyhow::anyhow!("PDF export buffer unavailable after flush")
-    })?.into_inner())
+    Ok(buffer
+        .into_inner()
+        .map_err(|_| anyhow::anyhow!("PDF export buffer unavailable after flush"))?
+        .into_inner())
 }
 
 fn wrap_line(line: &str, max_chars: usize) -> Vec<String> {
@@ -253,17 +257,20 @@ fn wrap_line(line: &str, max_chars: usize) -> Vec<String> {
         let end = (start + max_chars).min(chars.len());
         let mut break_at = end;
         if end < chars.len() {
-            if let Some(space) = chars[start..end]
-                .iter()
-                .rposition(|c| c.is_whitespace())
-            {
+            if let Some(space) = chars[start..end].iter().rposition(|c| c.is_whitespace()) {
                 break_at = start + space;
             }
         }
         if break_at <= start {
             break_at = end;
         }
-        out.push(chars[start..break_at].iter().collect::<String>().trim().to_string());
+        out.push(
+            chars[start..break_at]
+                .iter()
+                .collect::<String>()
+                .trim()
+                .to_string(),
+        );
         start = if break_at < chars.len() && chars[break_at].is_whitespace() {
             break_at + 1
         } else {
@@ -279,13 +286,7 @@ fn wrap_line(line: &str, max_chars: usize) -> Vec<String> {
 fn sanitize_pdf_text(input: &str) -> String {
     input
         .chars()
-        .map(|c| {
-            if c.is_ascii() {
-                c
-            } else {
-                '?'
-            }
-        })
+        .map(|c| if c.is_ascii() { c } else { '?' })
         .collect()
 }
 
@@ -294,9 +295,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::session::persistence::{
-        ResponseExport, SessionExport, TranscriptChunkExport,
-    };
+    use crate::session::persistence::{ResponseExport, SessionExport, TranscriptChunkExport};
 
     fn sample_session() -> SessionExport {
         SessionExport {
