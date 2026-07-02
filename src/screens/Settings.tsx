@@ -4,24 +4,28 @@ import {
   deleteAccount,
   exportUserData,
   getCostStatus,
+  getFeatureFlagsSnapshot,
   getSessionFocus,
   getSessionSnapshot,
+  isFeatureEnabled,
   liftCostSuspension,
   listQuestionBankTags,
   logout,
+  refreshFeatureFlags,
   resetCostTracker,
   saveSessionFocus,
   setCostCap,
   setPhoneCallMode,
   type CostStatusDto,
   type DeleteAccountReport,
+  type FeatureFlagsSnapshot,
   type SessionFocusDto,
 } from "../commands";
 import { useUiZoom } from "../hooks/useUiZoom";
 import { UI_ZOOM_DEFAULT, UI_ZOOM_MAX, UI_ZOOM_MIN } from "../lib/uiZoomPreference";
 import ProviderSettings from "./ProviderSettings";
 
-type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus";
+type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus" | "features";
 
 interface Props {
   onBack?: () => void;
@@ -591,6 +595,106 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
   );
 }
 
+// ── Feature Flags Tab ─────────────────────────────────────────────────────────
+
+function FeatureFlagsTab() {
+  const [snapshot, setSnapshot] = useState<FeatureFlagsSnapshot | null>(null);
+  const [enabledForUser, setEnabledForUser] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await getFeatureFlagsSnapshot();
+      setSnapshot(next);
+      const resolved = await Promise.all(
+        next.flags.map(async (flag) => [flag.name, await isFeatureEnabled(flag.name)] as const),
+      );
+      setEnabledForUser(Object.fromEntries(resolved));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      await refreshFeatureFlags();
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <div className="settings-tab">
+      <h3 className="settings-tab__heading">Feature flags</h3>
+      <p className="settings-tab__description">
+        Read-only view of rollout flags for your account. Flint refreshes flags at
+        launch; use sync when support asks you to pull the latest configuration.
+      </p>
+
+      {error && (
+        <p className="settings-tab__error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {loading && <p className="settings-tab__description">Loading flags…</p>}
+
+      {!loading && snapshot && (
+        <>
+          <p className="settings-tab__description" data-testid="feature-flags-source">
+            Source: {snapshot.origin} · updated {snapshot.fetchedAt}
+          </p>
+          <table className="settings-tab__table" data-testid="feature-flags-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>For you</th>
+                <th>Rollout</th>
+                <th>GA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {snapshot.flags.map((flag) => (
+                <tr key={flag.name}>
+                  <td>{flag.name}</td>
+                  <td>{enabledForUser[flag.name] ? "On" : "Off"}</td>
+                  <td>{flag.rollout_percentage}%</td>
+                  <td>{flag.ga ? "Yes" : "No"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <button
+        className="settings-tab__btn"
+        type="button"
+        disabled={refreshing || loading}
+        data-testid="feature-flags-refresh"
+        onClick={() => void handleRefresh()}
+      >
+        {refreshing ? "Syncing…" : "Sync flags"}
+      </button>
+    </div>
+  );
+}
+
 // ── Settings screen ───────────────────────────────────────────────────────────
 
 const TAB_LABELS: Record<Tab, string> = {
@@ -599,6 +703,7 @@ const TAB_LABELS: Record<Tab, string> = {
   "api-keys": "API Keys",
   "usage-cap": "Usage Cap",
   privacy: "Privacy",
+  features: "Features",
 };
 
 export default function Settings({
@@ -643,6 +748,7 @@ export default function Settings({
         )}
         {activeTab === "session-focus" && <SessionFocusTab sessionId={sessionId} />}
         {activeTab === "privacy" && <PrivacyTab />}
+        {activeTab === "features" && <FeatureFlagsTab />}
       </div>
     </div>
   );
