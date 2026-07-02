@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase1",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
-  "current_slice": 14,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
-  "current_task_id": "v1p1-s14-stealth-audio-manual-gate",
+  "current_slice": 15,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "current_task_id": "v1p1-s15-docs-pass",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -23,7 +23,11 @@
     {
       "slice": "v1p1-s13-hosted-supabase-prep",
       "reason": "Cloud Supabase project must be created in dashboard. Migrations verified locally (3/3 clean, RLS on all 9 tables). Runbook: tests/manual-qa/hosted-supabase-runbook.md."
+    },
+    {
+      "slice": "v1p1-s14-stealth-audio-manual-gate",
+      "reason": "BlackHole/WASAPI/OBS/Wayland hotkey validation needs real hardware per platform. Known Wayland unfocused hotkey limitation (P2, M3_LINUX_FINDINGS) — no v1 code fix. Runbook: tests/manual-qa/stealth-audio-validation-runbook.md."
     }
   ],
-  "notes": "Slice 13: migrations verified fresh, hosted runbook. Next: stealth/audio manual gate."
+  "notes": "Slice 14: stealth/audio runbook parked. Next: local docs pass (gitignored, never commit)."
 }
