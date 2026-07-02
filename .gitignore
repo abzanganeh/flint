@@ -43,7 +43,9 @@ scripts/__pycache__/
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-*.code-workspace
+# Only the loop-engineering scratch workspace — never a blanket *.code-workspace
+# rule, since that also matches the live multi-root workspace file Cursor has open.
+.cursor/skills/flint-loop-engineering/tasks/*.code-workspace
 .idea
 .DS_Store
 *.suo
