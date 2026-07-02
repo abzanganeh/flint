@@ -1,15 +1,16 @@
 {
-  "current_milestone": "m11-mock-coach-quality",
+  "current_milestone": "v1-closure-phase1",
   "milestone_status": "in_progress",
-  "milestone_branch": { "flint": "feature/m11-mock-coach-quality" },
-  "current_slice": 8,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7],
-  "current_task_id": "m11-pr-ci",
+  "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
+  "current_slice": 10,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+  "current_task_id": "v1p1-s10-eval-baseline",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
   "open_prs": {},
-  "notes": "All 7 slices implemented. PR + CI pending."
+  "manual_gate_backlog": [],
+  "notes": "Slice 9: speakrs ONNX diarization, SpeakerPicker, model download UI. Next: eval baseline."
 }

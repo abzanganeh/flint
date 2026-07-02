@@ -2,9 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   deleteAccount,
+  downloadDiarizationModels,
   exportUserData,
   getBillingStatus,
   getCostStatus,
+  getDiarizationStatus,
   getFeatureFlagsSnapshot,
   getSessionFocus,
   getSessionSnapshot,
@@ -445,6 +447,8 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [phoneCallMode, setPhoneCallModeState] = useState(false);
+  const [diarizationModelsReady, setDiarizationModelsReady] = useState<boolean | null>(null);
+  const [downloadingDiarizationModels, setDownloadingDiarizationModels] = useState(false);
 
   const load = useCallback(async () => {
     if (!sessionId) {
@@ -453,14 +457,16 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     }
     setLoading(true);
     try {
-      const [f, t, snapshot] = await Promise.all([
+      const [f, t, snapshot, diarization] = await Promise.all([
         getSessionFocus(sessionId),
         listQuestionBankTags(sessionId),
         getSessionSnapshot(),
+        getDiarizationStatus().catch(() => null),
       ]);
       setFocus(f);
       setTags(t);
       setPhoneCallModeState(snapshot.phoneCallMode ?? false);
+      setDiarizationModelsReady(diarization?.modelsReady ?? false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -519,6 +525,20 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     } catch (e) {
       setError(String(e));
       setPhoneCallModeState(!enabled);
+    }
+  };
+
+  const handleDownloadDiarizationModels = async () => {
+    setDownloadingDiarizationModels(true);
+    setError(null);
+    try {
+      await downloadDiarizationModels();
+      const status = await getDiarizationStatus();
+      setDiarizationModelsReady(status.modelsReady);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDownloadingDiarizationModels(false);
     }
   };
 
@@ -605,6 +625,29 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
             : "Flint listens via system audio loopback (Zoom, Meet, or browser calls)."}
         </span>
       </label>
+
+      <section className="settings-tab__field" data-testid="diarization-models-section">
+        <span className="settings-tab__label">Speaker separation models</span>
+        <p className="settings-tab__hint">
+          Phone interview mode uses on-device ONNX models (~200MB) to separate interviewer and
+          candidate voices. Audio never leaves your machine for diarization.
+        </p>
+        {diarizationModelsReady ? (
+          <p className="settings-tab__success" data-testid="diarization-models-ready">
+            Models installed.
+          </p>
+        ) : (
+          <button
+            type="button"
+            className="settings-tab__btn"
+            data-testid="download-diarization-models"
+            disabled={downloadingDiarizationModels}
+            onClick={() => void handleDownloadDiarizationModels()}
+          >
+            {downloadingDiarizationModels ? "Downloading…" : "Download speaker models"}
+          </button>
+        )}
+      </section>
 
       <button
         className="settings-tab__btn"

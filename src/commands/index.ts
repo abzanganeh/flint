@@ -117,6 +117,25 @@ export const signalQuestionEnded = (sessionId: string): Promise<void> =>
 export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
   invoke<void>("assign_speaker", { sessionId, speakerId });
 
+export interface DiarizedSegmentDto {
+  speakerId: number;
+  startMs: number;
+  endMs: number;
+  sampleText: string;
+}
+
+export interface DiarizationStatusDto {
+  state: string;
+  modelsReady: boolean;
+  segments: DiarizedSegmentDto[];
+}
+
+export const getDiarizationStatus = (): Promise<DiarizationStatusDto> =>
+  invoke<DiarizationStatusDto>("get_diarization_status");
+
+export const downloadDiarizationModels = (): Promise<void> =>
+  invoke<void>("download_diarization_models");
+
 /** M13 S4 — manual speaker override for a previously emitted chunk. */
 export const relabelTranscriptChunk = (
   chunkId: string,

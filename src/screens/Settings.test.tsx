@@ -6,6 +6,7 @@ import Settings from "./Settings";
 vi.mock("../commands", () => ({
   deleteAccount: vi.fn(),
   exportUserData: vi.fn(),
+  getBillingStatus: vi.fn(),
   getCostStatus: vi.fn(),
   getFeatureFlagsSnapshot: vi.fn(),
   getSessionFocus: vi.fn(),

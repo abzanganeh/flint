@@ -70,6 +70,7 @@ arboard = "3"
 hound = "3"
 regex = "1.12.4"
 printpdf = "0.7"
+speakrs = { version = "0.4", features = ["online"] }
 
 [target."cfg(any(target_os = \"macos\", windows, target_os = \"linux\"))".dependencies]
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }

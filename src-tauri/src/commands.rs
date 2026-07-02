@@ -2987,6 +2987,8 @@ pub async fn start_session(
 
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
+    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
         sid,
@@ -3001,9 +3003,12 @@ pub async fn start_session(
         Arc::clone(&audit),
         !is_phone_call_mode,
         is_phone_call_mode,
+        if is_phone_call_mode {
+            Some(Arc::clone(&diarizer))
+        } else {
+            None
+        },
     ));
-
-    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
 
     // Live audio-flow watchdog: warns the user if no audio is captured after
     // going LIVE so a mis-routed device never silently records nothing.
@@ -3393,6 +3398,62 @@ pub async fn assign_speaker(
         .lock()
         .map_err(|_| "Diarizer lock poisoned.".to_string())?;
     diarizer.assign_interviewer(speaker_id)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizationStatusDto {
+    pub state: String,
+    pub models_ready: bool,
+    pub segments: Vec<crate::audio::diarizer::DiarizedSegment>,
+}
+
+#[tauri::command]
+pub async fn get_diarization_status(state: State<'_, AppState>) -> Result<DiarizationStatusDto, String> {
+    let guard = state.live_tasks.lock().await;
+    if let Some(handles) = guard.as_ref() {
+        let diarizer = handles
+            .diarizer
+            .lock()
+            .map_err(|_| "Diarizer lock poisoned.".to_string())?;
+        return Ok(diarization_status_to_dto(diarizer.status(), diarizer.models_ready()));
+    }
+    Ok(DiarizationStatusDto {
+        state: if crate::audio::diarizer::models_downloaded() {
+            "idle".to_string()
+        } else {
+            "models_missing".to_string()
+        },
+        models_ready: crate::audio::diarizer::models_downloaded(),
+        segments: vec![],
+    })
+}
+
+fn diarization_status_to_dto(
+    status: &crate::audio::diarizer::DiarizerStatus,
+    models_ready: bool,
+) -> DiarizationStatusDto {
+    use crate::audio::diarizer::DiarizerStatus;
+    let state = match status {
+        DiarizerStatus::Unavailable => "unavailable",
+        DiarizerStatus::ModelsMissing => "models_missing",
+        DiarizerStatus::AwaitingAssignment { .. } => "awaiting_assignment",
+        DiarizerStatus::Assigned { .. } => "assigned",
+        DiarizerStatus::Failed => "failed",
+    };
+    DiarizationStatusDto {
+        state: state.to_string(),
+        models_ready,
+        segments: status.segments_for_ui(),
+    }
+}
+
+#[tauri::command]
+pub async fn download_diarization_models() -> Result<(), String> {
+    tokio::task::spawn_blocking(crate::audio::diarizer::download_models)
+        .await
+        .map_err(|e| format!("download task failed: {e}"))?
+        .map(|_| ())
 }
 
 /// Cancel any running inference — valid from LIVE or REHEARSING.

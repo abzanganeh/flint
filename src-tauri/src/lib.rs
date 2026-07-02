@@ -234,6 +234,8 @@ pub fn run() {
             commands::signal_question_ended,
             commands::relabel_transcript_chunk,
             commands::assign_speaker,
+            commands::get_diarization_status,
+            commands::download_diarization_models,
             commands::cancel_inference,
             commands::panic_hide_overlay,
             commands::switch_provider,

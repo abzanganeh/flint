@@ -49,6 +49,7 @@ use crate::events::{
 };
 
 use crate::audio::audit::{AudioAuditCounters, SuppressionReason};
+use crate::audio::diarizer::DiarizerManager;
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
@@ -353,6 +354,7 @@ pub async fn run_audio_pipeline(
     audit: Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
+    diarizer: Option<Arc<SyncMutex<DiarizerManager>>>,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
@@ -393,6 +395,7 @@ pub async fn run_audio_pipeline(
             &audit,
             echo_suppression_enabled,
             phone_mode_manual_only,
+            &diarizer,
             &rolling_contexts,
         )
         .await
@@ -425,6 +428,7 @@ async fn process_frame(
     audit: &Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
+    diarizer: &Option<Arc<SyncMutex<DiarizerManager>>>,
     rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
 ) -> Result<()> {
     let source = frame.source;
@@ -441,6 +445,14 @@ async fn process_frame(
 
     // ── Step 2: Downsample 48kHz → 16kHz ─────────────────────────────────
     let downsampled = proc.downsampler.process(&frame.samples)?;
+
+    if phone_mode_manual_only {
+        if let Some(d) = diarizer {
+            if let Ok(mut guard) = d.lock() {
+                guard.ingest_pcm(&downsampled, 16_000);
+            }
+        }
+    }
 
     // ── Step 3: VAD ───────────────────────────────────────────────────────
     let silence_ms = if source == AudioSource::System {
@@ -612,13 +624,56 @@ async fn process_frame(
     }
 
     // The speaker that actually spoke drives all routing below.
-    let effective_source = match speaker {
+    let mut effective_source = match speaker {
         "System" => AudioSource::System,
         _ => AudioSource::Microphone,
     };
 
-    // ── Step 4b: emit + persist transcript chunk ──────────────────────────
     let timestamp = frame.timestamp.elapsed().as_millis() as i64;
+
+    if phone_mode_manual_only {
+        if let Some(d) = diarizer {
+            if let Ok(mut guard) = d.lock() {
+                if let Some(role) = guard.role_at_offset_ms(timestamp as u64) {
+                    effective_source = match role {
+                        crate::audio::diarizer::SpeakerRole::Interviewer => {
+                            AudioSource::System
+                        }
+                        crate::audio::diarizer::SpeakerRole::User => AudioSource::Microphone,
+                        crate::audio::diarizer::SpeakerRole::Unknown => effective_source,
+                    };
+                    let speaker_id = match role {
+                        crate::audio::diarizer::SpeakerRole::Interviewer => {
+                            if let crate::audio::diarizer::DiarizerStatus::Assigned {
+                                interviewer_id,
+                                ..
+                            } = guard.status()
+                            {
+                                *interviewer_id
+                            } else {
+                                0
+                            }
+                        }
+                        crate::audio::diarizer::SpeakerRole::User => {
+                            if let crate::audio::diarizer::DiarizerStatus::Assigned {
+                                user_id,
+                                ..
+                            } = guard.status()
+                            {
+                                *user_id
+                            } else {
+                                1
+                            }
+                        }
+                        crate::audio::diarizer::SpeakerRole::Unknown => 0,
+                    };
+                    guard.note_transcript(speaker_id, &result.text);
+                }
+            }
+        }
+    }
+
+    // ── Step 4b: emit + persist transcript chunk ──────────────────────────
     let chunk_id = Uuid::new_v4();
     emit_transcription_chunk(
         app_handle,
@@ -693,7 +748,14 @@ async fn process_frame(
     }
 
     if phone_mode_manual_only {
-        return Ok(());
+        let allow_auto = diarizer
+            .as_ref()
+            .and_then(|d| d.lock().ok())
+            .map(|g| g.allows_auto_question_detection_at(timestamp as u64))
+            .unwrap_or(false);
+        if !allow_auto {
+            return Ok(());
+        }
     }
 
     let accumulated = {
