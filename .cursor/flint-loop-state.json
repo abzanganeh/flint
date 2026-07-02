@@ -1,11 +1,11 @@
 {
   "current_milestone": "v1-closure-phase1",
-  "milestone_status": "in_progress",
+  "milestone_status": "awaiting_merge",
   "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
   "current_slice": 16,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-  "current_task_id": "v1p1-s16-pr-ci",
-  "loop_stopped": false,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+  "current_task_id": "v1p1-s16-pr-merge",
+  "loop_stopped": true,
   "ci_fix_attempts": 3,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
@@ -31,5 +31,5 @@
       "reason": "BlackHole/WASAPI/OBS/Wayland hotkey validation needs real hardware per platform. Known Wayland unfocused hotkey limitation (P2, M3_LINUX_FINDINGS) — no v1 code fix. Runbook: tests/manual-qa/stealth-audio-validation-runbook.md."
     }
   ],
-  "notes": "Slice 15: local docs updated (gitignored, not committed). Next: PR + CI + merge."
+  "notes": "Slice 16 complete — all 11 PR #32 checks green (Windows pass 25m44s after diarizer stub). PR mergeable; awaiting user approval to merge to main."
 }
