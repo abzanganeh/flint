@@ -6,6 +6,7 @@ pub mod confidence;
 pub mod cost;
 pub mod deep_link;
 pub mod digest;
+pub mod entitlement;
 mod dto;
 mod events;
 pub mod flags;

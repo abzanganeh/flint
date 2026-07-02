@@ -42,6 +42,20 @@ impl MockAuth {
         }
     }
 
+    pub fn with_logged_in_plan(plan: Plan) -> Self {
+        Self {
+            inner: Mutex::new(MockAuthState {
+                user: User {
+                    id: Uuid::parse_str(FIXTURE_USER_ID).expect("valid fixture uuid"),
+                    email: "fixture@flint.dev".to_string(),
+                    plan,
+                },
+                logged_in: true,
+                refresh_issued: 0,
+            }),
+        }
+    }
+
     fn fixture_token() -> AuthToken {
         AuthToken {
             access_token: SecretString::new("mock-access-token".into()),
