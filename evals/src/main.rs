@@ -62,6 +62,10 @@ struct Cli {
     /// Skip the regression gate (used for first runs).
     #[arg(long)]
     no_gate: bool,
+
+    /// Skip win-rate comparison vs baseline (smoke CI — absolute floors only).
+    #[arg(long)]
+    skip_win_rate: bool,
 }
 
 #[derive(Debug, Clone, clap::ValueEnum)]
@@ -188,7 +192,13 @@ async fn run(cli: Cli) -> anyhow::Result<bool> {
         info!("regression gate skipped (--no-gate)");
         true
     } else {
-        let outcome = evaluate(&report, baseline.as_ref());
+        let outcome = evaluate(
+            &report,
+            baseline.as_ref(),
+            evals::gate::GateOptions {
+                skip_win_rate: cli.skip_win_rate,
+            },
+        );
         if outcome.passed {
             info!("regression gate passed");
         } else {

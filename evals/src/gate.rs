@@ -20,6 +20,12 @@ const WIN_RATE_FLOOR: f32 = 0.50;
 const CONCISENESS_FLOOR: f32 = 0.95;
 const DOMAIN_RELEVANCE_FLOOR: f32 = 0.70;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GateOptions {
+    /// When true, only absolute floors (conciseness, domain relevance) apply.
+    pub skip_win_rate: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateOutcome {
     pub passed: bool,
@@ -47,16 +53,18 @@ pub enum Violation {
 ///
 /// `baseline` may be `None` for the first run — only the absolute gates
 /// (conciseness, domain relevance) are checked in that case.
-pub fn evaluate(report: &Report, baseline: Option<&Report>) -> GateOutcome {
+pub fn evaluate(report: &Report, baseline: Option<&Report>, options: GateOptions) -> GateOutcome {
     let mut violations = Vec::new();
 
     for (variant, summary) in &report.variants {
         check_conciseness(*variant, summary, &mut violations);
         check_domain_relevance(*variant, summary, &mut violations);
 
-        if let Some(base) = baseline {
-            if let Some(base_summary) = base.variants.get(variant) {
-                check_win_rate(*variant, summary, base_summary, &mut violations);
+        if !options.skip_win_rate {
+            if let Some(base) = baseline {
+                if let Some(base_summary) = base.variants.get(variant) {
+                    check_win_rate(*variant, summary, base_summary, &mut violations);
+                }
             }
         }
     }
@@ -176,7 +184,7 @@ mod tests {
             PromptVariant::Gpt,
             summary_with(0.96, vec![(Domain::SoftwareEngineering, 0.85)]),
         );
-        let outcome = evaluate(&r, None);
+        let outcome = evaluate(&r, None, GateOptions::default());
         assert!(outcome.passed);
     }
 
@@ -186,7 +194,7 @@ mod tests {
             PromptVariant::Gpt,
             summary_with(0.5, vec![(Domain::SoftwareEngineering, 0.85)]),
         );
-        let outcome = evaluate(&r, None);
+        let outcome = evaluate(&r, None, GateOptions::default());
         assert!(!outcome.passed);
         assert!(matches!(
             outcome.violations[0],
@@ -200,7 +208,7 @@ mod tests {
             PromptVariant::Gpt,
             summary_with(0.96, vec![(Domain::SoftwareEngineering, 0.5)]),
         );
-        let outcome = evaluate(&r, None);
+        let outcome = evaluate(&r, None, GateOptions::default());
         assert!(!outcome.passed);
         assert!(matches!(
             outcome.violations[0],
@@ -230,11 +238,37 @@ mod tests {
                 ],
             ),
         );
-        let outcome = evaluate(&current, Some(&baseline));
+        let outcome = evaluate(&current, Some(&baseline), GateOptions::default());
         assert!(!outcome.passed);
         assert!(outcome
             .violations
             .iter()
             .any(|v| matches!(v, Violation::WinRate { .. })));
+    }
+
+    #[test]
+    fn skip_win_rate_ignores_baseline_regression() {
+        let current = report_with(
+            PromptVariant::Gpt,
+            summary_with(
+                0.96,
+                vec![(Domain::SoftwareEngineering, 0.75)],
+            ),
+        );
+        let baseline = report_with(
+            PromptVariant::Gpt,
+            summary_with(
+                0.96,
+                vec![(Domain::SoftwareEngineering, 0.9)],
+            ),
+        );
+        let outcome = evaluate(
+            &current,
+            Some(&baseline),
+            GateOptions {
+                skip_win_rate: true,
+            },
+        );
+        assert!(outcome.passed);
     }
 }

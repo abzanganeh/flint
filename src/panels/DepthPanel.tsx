@@ -2,14 +2,14 @@ import { useState } from "react";
 
 import { copyTextToClipboard } from "../commands";
 import { useUIStore } from "../store/ui";
-import { HistoryCard, QuestionHeading } from "./TurnCards";
+import { QuestionHeading } from "./TurnCards";
 
 export interface DepthPanelProps {
   isGenerating?: boolean;
 }
 
 const DepthPanel = ({ isGenerating = false }: DepthPanelProps) => {
-  const { streamingBuffers, depthPrePrepared, currentQuestion, turnHistory } =
+  const { streamingBuffers, depthPrePrepared, currentQuestion } =
     useUIStore();
   const pushNotification = useUIStore((s) => s.pushNotification);
   const [copied, setCopied] = useState(false);
@@ -126,33 +126,6 @@ const DepthPanel = ({ isGenerating = false }: DepthPanelProps) => {
           >
             {text}
           </p>
-        )}
-
-        {turnHistory.length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <div
-              style={{
-                color: "#4b5563",
-                fontSize: "10px",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-                borderTop: "1px solid #1e2028",
-                paddingTop: 8,
-                marginBottom: 6,
-              }}
-            >
-              Earlier questions
-            </div>
-            {turnHistory.map((card) =>
-              card.depth.length > 0 ? (
-                <HistoryCard
-                  key={card.id}
-                  question={card.question}
-                  answer={card.depth}
-                />
-              ) : null,
-            )}
-          </div>
         )}
       </div>
 

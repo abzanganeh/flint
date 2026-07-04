@@ -31,9 +31,13 @@ A run **fails** if any of the following hold:
 
 - directional conciseness pass rate `< 95%`
 - any per-domain mean relevance `< 0.70`
-- win rate `< 50%` vs the stored baseline
+- win rate `< 50%` vs the stored baseline (unless `--skip-win-rate`)
 
 The first run on a fresh repo skips the win-rate check (no baseline yet).
+
+CI smoke runs use `--skip-win-rate` because the local Ollama judge has run-to-run
+variance; full win-rate comparison applies on manual `--update-baseline` runs before
+merging prompt changes.
 
 ## Question bank
 

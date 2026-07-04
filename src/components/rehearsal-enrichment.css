@@ -1136,6 +1136,22 @@
 .settings-tab__error { color: #f87171; font-size: 13px; margin: 0 0 12px; }
 .settings-tab__success { color: #4ade80; font-size: 13px; margin: 0 0 12px; }
 .settings-tab__hint { font-size: 13px; color: #71717a; margin: 0 0 16px; line-height: 1.5; }
+.settings-tab__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+.settings-tab__table th,
+.settings-tab__table td {
+  border: 1px solid #3f3f46;
+  padding: 8px 10px;
+  text-align: left;
+}
+.settings-tab__table th {
+  color: #a1a1aa;
+  font-weight: 600;
+}
 .settings-tab__field { display: block; margin-bottom: 16px; }
 .settings-tab__chip {
   padding: 6px 12px;

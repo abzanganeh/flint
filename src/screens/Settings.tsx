@@ -2,26 +2,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   deleteAccount,
+  downloadDiarizationModels,
   exportUserData,
+  getBillingStatus,
   getCostStatus,
+  getDiarizationStatus,
+  getFeatureFlagsSnapshot,
   getSessionFocus,
   getSessionSnapshot,
+  isFeatureEnabled,
   liftCostSuspension,
   listQuestionBankTags,
   logout,
+  refreshFeatureFlags,
   resetCostTracker,
   saveSessionFocus,
   setCostCap,
   setPhoneCallMode,
+  type BillingStatusDto,
   type CostStatusDto,
   type DeleteAccountReport,
+  type FeatureFlagsSnapshot,
   type SessionFocusDto,
 } from "../commands";
 import { useUiZoom } from "../hooks/useUiZoom";
 import { UI_ZOOM_DEFAULT, UI_ZOOM_MAX, UI_ZOOM_MIN } from "../lib/uiZoomPreference";
 import ProviderSettings from "./ProviderSettings";
 
-type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus";
+type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus" | "features";
 
 interface Props {
   onBack?: () => void;
@@ -185,9 +193,16 @@ function AccountTab({
   onRetestMic?: () => void;
 }) {
   const [loggingOut, setLoggingOut] = useState(false);
+  const [billing, setBilling] = useState<BillingStatusDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const { zoom, setZoom } = useUiZoom();
   const zoomPercent = Math.round(zoom * 100);
+
+  useEffect(() => {
+    void getBillingStatus()
+      .then(setBilling)
+      .catch((e: unknown) => setError(String(e)));
+  }, []);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -213,6 +228,19 @@ function AccountTab({
         <p className="settings-tab__error" role="alert">
           {error}
         </p>
+      )}
+
+      {billing && (
+        <section className="settings-tab__section" data-testid="billing-status">
+          <h4 className="settings-tab__subheading">Plan</h4>
+          <p className="settings-tab__description">
+            {billing.tier === "pro" ? "Pro" : "Free"} tier — bring-your-own-key
+            billing (no metered credits in v1).
+            {billing.hasByokLlmKey
+              ? " At least one LLM API key is configured."
+              : " Add an LLM API key under API Keys before starting live sessions."}
+          </p>
+        </section>
       )}
 
       <section className="settings-tab__section">
@@ -419,6 +447,8 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [phoneCallMode, setPhoneCallModeState] = useState(false);
+  const [diarizationModelsReady, setDiarizationModelsReady] = useState<boolean | null>(null);
+  const [downloadingDiarizationModels, setDownloadingDiarizationModels] = useState(false);
 
   const load = useCallback(async () => {
     if (!sessionId) {
@@ -427,14 +457,16 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     }
     setLoading(true);
     try {
-      const [f, t, snapshot] = await Promise.all([
+      const [f, t, snapshot, diarization] = await Promise.all([
         getSessionFocus(sessionId),
         listQuestionBankTags(sessionId),
         getSessionSnapshot(),
+        getDiarizationStatus().catch(() => null),
       ]);
       setFocus(f);
       setTags(t);
       setPhoneCallModeState(snapshot.phoneCallMode ?? false);
+      setDiarizationModelsReady(diarization?.modelsReady ?? false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -493,6 +525,20 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     } catch (e) {
       setError(String(e));
       setPhoneCallModeState(!enabled);
+    }
+  };
+
+  const handleDownloadDiarizationModels = async () => {
+    setDownloadingDiarizationModels(true);
+    setError(null);
+    try {
+      await downloadDiarizationModels();
+      const status = await getDiarizationStatus();
+      setDiarizationModelsReady(status.modelsReady);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDownloadingDiarizationModels(false);
     }
   };
 
@@ -580,12 +626,135 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
         </span>
       </label>
 
+      <section className="settings-tab__field" data-testid="diarization-models-section">
+        <span className="settings-tab__label">Speaker separation models</span>
+        <p className="settings-tab__hint">
+          Phone interview mode uses on-device ONNX models (~200MB) to separate interviewer and
+          candidate voices. Audio never leaves your machine for diarization.
+        </p>
+        {diarizationModelsReady ? (
+          <p className="settings-tab__success" data-testid="diarization-models-ready">
+            Models installed.
+          </p>
+        ) : (
+          <button
+            type="button"
+            className="settings-tab__btn"
+            data-testid="download-diarization-models"
+            disabled={downloadingDiarizationModels}
+            onClick={() => void handleDownloadDiarizationModels()}
+          >
+            {downloadingDiarizationModels ? "Downloading…" : "Download speaker models"}
+          </button>
+        )}
+      </section>
+
       <button
         className="settings-tab__btn"
         disabled={saving}
         onClick={() => void handleSave()}
       >
         {saving ? "Saving…" : "Save session focus"}
+      </button>
+    </div>
+  );
+}
+
+// ── Feature Flags Tab ─────────────────────────────────────────────────────────
+
+function FeatureFlagsTab() {
+  const [snapshot, setSnapshot] = useState<FeatureFlagsSnapshot | null>(null);
+  const [enabledForUser, setEnabledForUser] = useState<Record<string, boolean>>({});
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await getFeatureFlagsSnapshot();
+      setSnapshot(next);
+      const resolved = await Promise.all(
+        next.flags.map(async (flag) => [flag.name, await isFeatureEnabled(flag.name)] as const),
+      );
+      setEnabledForUser(Object.fromEntries(resolved));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      await refreshFeatureFlags();
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  return (
+    <div className="settings-tab">
+      <h3 className="settings-tab__heading">Feature flags</h3>
+      <p className="settings-tab__description">
+        Read-only view of rollout flags for your account. Flint refreshes flags at
+        launch; use sync when support asks you to pull the latest configuration.
+      </p>
+
+      {error && (
+        <p className="settings-tab__error" role="alert">
+          {error}
+        </p>
+      )}
+
+      {loading && <p className="settings-tab__description">Loading flags…</p>}
+
+      {!loading && snapshot && (
+        <>
+          <p className="settings-tab__description" data-testid="feature-flags-source">
+            Source: {snapshot.origin} · updated {snapshot.fetchedAt}
+          </p>
+          <table className="settings-tab__table" data-testid="feature-flags-table">
+            <thead>
+              <tr>
+                <th>Flag</th>
+                <th>For you</th>
+                <th>Rollout</th>
+                <th>GA</th>
+              </tr>
+            </thead>
+            <tbody>
+              {snapshot.flags.map((flag) => (
+                <tr key={flag.name}>
+                  <td>{flag.name}</td>
+                  <td>{enabledForUser[flag.name] ? "On" : "Off"}</td>
+                  <td>{flag.rollout_percentage}%</td>
+                  <td>{flag.ga ? "Yes" : "No"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
+      )}
+
+      <button
+        className="settings-tab__btn"
+        type="button"
+        disabled={refreshing || loading}
+        data-testid="feature-flags-refresh"
+        onClick={() => void handleRefresh()}
+      >
+        {refreshing ? "Syncing…" : "Sync flags"}
       </button>
     </div>
   );
@@ -599,6 +768,7 @@ const TAB_LABELS: Record<Tab, string> = {
   "api-keys": "API Keys",
   "usage-cap": "Usage Cap",
   privacy: "Privacy",
+  features: "Features",
 };
 
 export default function Settings({
@@ -643,6 +813,7 @@ export default function Settings({
         )}
         {activeTab === "session-focus" && <SessionFocusTab sessionId={sessionId} />}
         {activeTab === "privacy" && <PrivacyTab />}
+        {activeTab === "features" && <FeatureFlagsTab />}
       </div>
     </div>
   );

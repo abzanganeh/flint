@@ -1,5 +1,6 @@
 import { useRagChunks } from "../hooks/useRagChunks";
 import { useUIStore } from "../store/ui";
+import { HistoryCard } from "./TurnCards";
 
 export interface ContextPanelProps {
   sessionId: string;
@@ -7,7 +8,7 @@ export interface ContextPanelProps {
 
 const ContextPanel = ({ sessionId }: ContextPanelProps) => {
   useRagChunks(sessionId);
-  const { ragChunks, digestSummary } = useUIStore();
+  const { ragChunks, digestSummary, turnHistory } = useUIStore();
 
   return (
     <div
@@ -76,6 +77,40 @@ const ContextPanel = ({ sessionId }: ContextPanelProps) => {
           ragChunks.map((chunk, i) => (
             <ChunkRow key={i} text={chunk.text} score={chunk.score} />
           ))
+        )}
+
+        {turnHistory.length > 0 && (
+          <div style={{ padding: "8px 12px 0" }}>
+            <div
+              style={{
+                color: "#4b5563",
+                fontSize: "10px",
+                letterSpacing: "0.08em",
+                textTransform: "uppercase",
+                borderTop: "1px solid #1e2028",
+                paddingTop: 8,
+                marginBottom: 6,
+              }}
+            >
+              Earlier questions
+            </div>
+            {turnHistory.map((card) => (
+              <div key={card.id}>
+                {card.directional.length > 0 && (
+                  <HistoryCard
+                    question={card.question}
+                    answer={card.directional}
+                  />
+                )}
+                {card.depth.length > 0 && (
+                  <HistoryCard
+                    question={card.question}
+                    answer={card.depth}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
         )}
       </div>
     </div>

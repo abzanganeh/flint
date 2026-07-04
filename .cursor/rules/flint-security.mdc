@@ -55,4 +55,4 @@ Raw audio, LLM API keys in plaintext, video/screen capture, location data, third
 - Local SQLite can be read by other processes on the user's machine — accepted, local-first desktop app.
 - Screen capture exclusion is OS-dependent and cannot be 100% guaranteed — accepted via legal consent flow.
 - LLM provider inference is done on third-party infrastructure — user accepts when connecting credentials.
-- TLS without certificate pinning in v1 — pinning added in v2.
+- TLS without certificate pinning — **accepted risk for v1 and beyond.** All outbound HTTPS uses the OS trust store (reqwest/rustls). Pinning is not planned; document incidents via normal TLS hygiene and provider rotation instead.

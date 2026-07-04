@@ -5,14 +5,17 @@ import LiveSessionStatusBar from "../components/LiveSessionStatusBar";
 import OverlayLayout from "../components/OverlayLayout";
 import MicQualityBadge from "../components/MicQualityBadge";
 import PanicRestoreShell from "../components/PanicRestoreShell";
+import SpeakerPicker from "../components/SpeakerPicker";
 import TokenBudgetIndicator from "../components/TokenBudgetIndicator";
 import WaylandCaptureHint from "../components/WaylandCaptureHint";
 import {
+  getDiarizationStatus,
   getHeadphoneGateStatus,
   getSessionSnapshot,
   setHeadphoneGateOverride,
   startSession,
   stopSession,
+  type DiarizationStatusDto,
   type HeadphoneGateStatusDto,
 } from "../commands";
 import { onSessionStateChange } from "../events";
@@ -44,6 +47,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   const [exiting, setExiting] = useState(false);
   const [phoneCallMode, setPhoneCallMode] = useState(false);
   const [headphoneGate, setHeadphoneGate] = useState<HeadphoneGateStatusDto | null>(null);
+  const [diarizationStatus, setDiarizationStatus] = useState<DiarizationStatusDto | null>(null);
   const lastManualQuestion = useUIStore((s) => s.lastManualQuestion);
 
   useTokenUsage();
@@ -103,6 +107,35 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       window.clearTimeout(timeoutId);
     };
   }, [sessionId]);
+
+  useEffect(() => {
+    if (!phoneCallMode || starting) {
+      return;
+    }
+
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const status = await getDiarizationStatus();
+        if (active) {
+          setDiarizationStatus(status);
+        }
+      } catch {
+        // Non-fatal — Ctrl+Q still works.
+      }
+    };
+
+    void poll();
+    const intervalId = window.setInterval(() => {
+      void poll();
+    }, 2000);
+
+    return () => {
+      active = false;
+      window.clearInterval(intervalId);
+    };
+  }, [phoneCallMode, starting]);
 
   useEffect(() => {
     let active = true;
@@ -314,6 +347,54 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
           <strong>Q</strong> (or Ctrl+Q) when the <em>interviewer</em> finishes their question,
           not when you speak. Use headphones in normal mode if you hear echo.
         </div>
+      )}
+
+      {phoneCallMode && diarizationStatus?.state === "models_missing" && (
+        <div
+          data-testid="live-diarization-models-missing"
+          style={{
+            padding: "8px 12px",
+            color: "#fcd34d",
+            fontSize: "12px",
+            borderBottom: "1px solid #1e2028",
+            backgroundColor: "#1a1400",
+          }}
+        >
+          Speaker separation models are not installed. Download them in Settings → Session Focus,
+          or press <strong>Ctrl+Q</strong> to mark question boundaries manually.
+        </div>
+      )}
+
+      {phoneCallMode && diarizationStatus?.state === "failed" && (
+        <div
+          data-testid="live-diarization-failed"
+          role="alert"
+          style={{
+            padding: "8px 12px",
+            color: "#fca5a5",
+            fontSize: "12px",
+            borderBottom: "1px solid #1e2028",
+            backgroundColor: "#2a0d0d",
+          }}
+        >
+          Speaker separation could not distinguish voices. Use <strong>Ctrl+Q</strong> when the
+          interviewer finishes a question.
+        </div>
+      )}
+
+      {phoneCallMode && diarizationStatus?.state === "awaiting_assignment" && (
+        <SpeakerPicker
+          sessionId={sessionId}
+          segments={diarizationStatus.segments.map((seg) => ({
+            speakerId: seg.speakerId,
+            sampleText: seg.sampleText,
+          }))}
+          onAssigned={() => {
+            void getDiarizationStatus()
+              .then(setDiarizationStatus)
+              .catch(() => undefined);
+          }}
+        />
       )}
 
       {audioWarning && (

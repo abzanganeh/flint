@@ -1,17 +1,8 @@
 name: Coverage
 
-# Phase 7.1 — lib coverage gate via cargo-llvm-cov.
-# State machine has dedicated 100% transition tests; this job enforces a
-# repo-wide floor so coverage regressions fail PRs.
+# HTML coverage report (manual). Blocking module/repo floors run on every PR in ci.yml.
 
 on:
-  pull_request:
-    paths:
-      - "src-tauri/src/**"
-      - "src-tauri/tests/**"
-      - "src-tauri/Cargo.toml"
-      - "src-tauri/Cargo.lock"
-      - ".github/workflows/coverage.yml"
   workflow_dispatch:
 
 concurrency:
@@ -20,7 +11,7 @@ concurrency:
 
 jobs:
   llvm-cov:
-    name: cargo llvm-cov (module + repo floors)
+    name: cargo llvm-cov (HTML report)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -51,7 +42,7 @@ jobs:
           restore-keys: |
             coverage-${{ runner.os }}-
 
-      - name: Enforce module coverage gates (Phase 7.1)
+      - name: Enforce module coverage gates (flint-testing.mdc)
         run: ./scripts/check-coverage-gates.sh
 
       - name: Upload HTML report

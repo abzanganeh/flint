@@ -2835,6 +2835,9 @@ pub async fn start_session(
         return Err("Complete rehearsal before starting a live session.".to_string());
     }
 
+    let plan = open_session_plan(state.inner()).await;
+    crate::billing::validate_live_session_billing(plan)?;
+
     checks::run_stealth_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
@@ -2984,6 +2987,8 @@ pub async fn start_session(
 
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
+    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
         sid,
@@ -2998,9 +3003,12 @@ pub async fn start_session(
         Arc::clone(&audit),
         !is_phone_call_mode,
         is_phone_call_mode,
+        if is_phone_call_mode {
+            Some(Arc::clone(&diarizer))
+        } else {
+            None
+        },
     ));
-
-    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
 
     // Live audio-flow watchdog: warns the user if no audio is captured after
     // going LIVE so a mis-routed device never silently records nothing.
@@ -3390,6 +3398,67 @@ pub async fn assign_speaker(
         .lock()
         .map_err(|_| "Diarizer lock poisoned.".to_string())?;
     diarizer.assign_interviewer(speaker_id)
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiarizationStatusDto {
+    pub state: String,
+    pub models_ready: bool,
+    pub segments: Vec<crate::audio::diarizer::DiarizedSegment>,
+}
+
+#[tauri::command]
+pub async fn get_diarization_status(
+    state: State<'_, AppState>,
+) -> Result<DiarizationStatusDto, String> {
+    let guard = state.live_tasks.lock().await;
+    if let Some(handles) = guard.as_ref() {
+        let diarizer = handles
+            .diarizer
+            .lock()
+            .map_err(|_| "Diarizer lock poisoned.".to_string())?;
+        return Ok(diarization_status_to_dto(
+            diarizer.status(),
+            diarizer.models_ready(),
+        ));
+    }
+    Ok(DiarizationStatusDto {
+        state: if crate::audio::diarizer::models_downloaded() {
+            "idle".to_string()
+        } else {
+            "models_missing".to_string()
+        },
+        models_ready: crate::audio::diarizer::models_downloaded(),
+        segments: vec![],
+    })
+}
+
+fn diarization_status_to_dto(
+    status: &crate::audio::diarizer::DiarizerStatus,
+    models_ready: bool,
+) -> DiarizationStatusDto {
+    use crate::audio::diarizer::DiarizerStatus;
+    let state = match status {
+        DiarizerStatus::Unavailable => "unavailable",
+        DiarizerStatus::ModelsMissing => "models_missing",
+        DiarizerStatus::AwaitingAssignment { .. } => "awaiting_assignment",
+        DiarizerStatus::Assigned { .. } => "assigned",
+        DiarizerStatus::Failed => "failed",
+    };
+    DiarizationStatusDto {
+        state: state.to_string(),
+        models_ready,
+        segments: status.segments_for_ui(),
+    }
+}
+
+#[tauri::command]
+pub async fn download_diarization_models() -> Result<(), String> {
+    tokio::task::spawn_blocking(crate::audio::diarizer::download_models)
+        .await
+        .map_err(|e| format!("download task failed: {e}"))?
+        .map(|_| ())
 }
 
 /// Cancel any running inference — valid from LIVE or REHEARSING.
@@ -3994,6 +4063,34 @@ pub async fn demote_session(session_id: String, state: State<'_, AppState>) -> R
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// v1 billing — BYOK + flat Pro tier (no metered ledger)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BillingStatusDto {
+    pub tier: String,
+    pub has_byok_llm_key: bool,
+    pub metered_billing_enabled: bool,
+}
+
+impl From<crate::billing::BillingStatus> for BillingStatusDto {
+    fn from(status: crate::billing::BillingStatus) -> Self {
+        Self {
+            tier: status.tier.as_str().to_string(),
+            has_byok_llm_key: status.has_byok_llm_key,
+            metered_billing_enabled: status.metered_billing_enabled,
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_billing_status(state: State<'_, AppState>) -> Result<BillingStatusDto, String> {
+    let plan = evaluation_context(state.inner()).await.plan;
+    Ok(crate::billing::billing_status(plan).into())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // 7.4 — Cost cap enforcement
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -4196,6 +4293,65 @@ pub async fn delete_account(
 pub async fn export_user_data(state: State<'_, AppState>) -> Result<String, String> {
     let export = crate::gdpr::export_user_data(&state.persistence).map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&export).map_err(|e| format!("Could not serialise export: {e}"))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionExportFileDto {
+    pub filename: String,
+    pub mime_type: String,
+    pub encoding: String,
+    pub data: String,
+}
+
+/// Export one session as JSON, plain text, or PDF (base64).
+#[tauri::command]
+pub async fn export_session(
+    session_id: String,
+    format: String,
+    state: State<'_, AppState>,
+) -> Result<SessionExportFileDto, String> {
+    use base64::Engine;
+    use uuid::Uuid;
+
+    use crate::session::export_format::{
+        export_filename, format_session_json, format_session_pdf, format_session_text,
+        SessionExportFormat,
+    };
+
+    let sid = Uuid::parse_str(&session_id).map_err(|_| "Invalid session id".to_string())?;
+    let export = state
+        .persistence
+        .export_session(sid)
+        .map_err(|e| e.to_string())?;
+    let export_format = SessionExportFormat::parse(&format).map_err(|e| e.to_string())?;
+
+    match export_format {
+        SessionExportFormat::Json => {
+            let data = format_session_json(&export).map_err(|e| e.to_string())?;
+            Ok(SessionExportFileDto {
+                filename: export_filename(&export, export_format),
+                mime_type: "application/json".to_string(),
+                encoding: "utf8".to_string(),
+                data,
+            })
+        }
+        SessionExportFormat::Text => Ok(SessionExportFileDto {
+            filename: export_filename(&export, export_format),
+            mime_type: "text/plain".to_string(),
+            encoding: "utf8".to_string(),
+            data: format_session_text(&export),
+        }),
+        SessionExportFormat::Pdf => {
+            let bytes = format_session_pdf(&export).map_err(|e| e.to_string())?;
+            Ok(SessionExportFileDto {
+                filename: export_filename(&export, export_format),
+                mime_type: "application/pdf".to_string(),
+                encoding: "base64".to_string(),
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+        }
+    }
 }
 
 /// Copy text to the OS clipboard (native path — reliable in the Tauri WebView).

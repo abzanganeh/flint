@@ -117,6 +117,25 @@ export const signalQuestionEnded = (sessionId: string): Promise<void> =>
 export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
   invoke<void>("assign_speaker", { sessionId, speakerId });
 
+export interface DiarizedSegmentDto {
+  speakerId: number;
+  startMs: number;
+  endMs: number;
+  sampleText: string;
+}
+
+export interface DiarizationStatusDto {
+  state: string;
+  modelsReady: boolean;
+  segments: DiarizedSegmentDto[];
+}
+
+export const getDiarizationStatus = (): Promise<DiarizationStatusDto> =>
+  invoke<DiarizationStatusDto>("get_diarization_status");
+
+export const downloadDiarizationModels = (): Promise<void> =>
+  invoke<void>("download_diarization_models");
+
 /** M13 S4 — manual speaker override for a previously emitted chunk. */
 export const relabelTranscriptChunk = (
   chunkId: string,
@@ -568,12 +587,50 @@ const adaptDeleteAccountReport = (raw: RawDeleteAccountReport): DeleteAccountRep
 export const deleteAccount = async (): Promise<DeleteAccountReport> =>
   adaptDeleteAccountReport(await invoke<RawDeleteAccountReport>("delete_account"));
 
+export interface BillingStatusDto {
+  tier: "free" | "pro";
+  hasByokLlmKey: boolean;
+  meteredBillingEnabled: boolean;
+}
+
+export const getBillingStatus = (): Promise<BillingStatusDto> =>
+  invoke<BillingStatusDto>("get_billing_status");
+
 /**
  * Return a JSON blob of every locally-stored session, transcript, and
  * response. The caller is responsible for writing it to disk (or sharing it
  * via the system share sheet).
  */
 export const exportUserData = (): Promise<string> => invoke<string>("export_user_data");
+
+export type SessionExportFormat = "json" | "text" | "pdf";
+
+export interface SessionExportFileDto {
+  filename: string;
+  mimeType: string;
+  encoding: "utf8" | "base64";
+  data: string;
+}
+
+export const exportSession = (
+  sessionId: string,
+  format: SessionExportFormat,
+): Promise<SessionExportFileDto> =>
+  invoke<SessionExportFileDto>("export_session", { sessionId, format });
+
+export function downloadSessionExport(file: SessionExportFileDto): void {
+  const bytes =
+    file.encoding === "base64"
+      ? Uint8Array.from(atob(file.data), (c) => c.charCodeAt(0))
+      : new TextEncoder().encode(file.data);
+  const blob = new Blob([bytes], { type: file.mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = file.filename;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
 
 // ── Phase 7.6 — Feature flags ────────────────────────────────────────────────
 
