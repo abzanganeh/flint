@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { getSessionReview, type ReviewChunkDto, type SessionReviewDto } from "../commands";
+import {
+  downloadSessionExport,
+  exportSession,
+  getSessionReview,
+  type ReviewChunkDto,
+  type SessionExportFormat,
+  type SessionReviewDto,
+} from "../commands";
 
 interface Props {
   sessionId: string;
@@ -44,6 +51,8 @@ export function SessionReview({ sessionId, onBack }: Props) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [exporting, setExporting] = useState<SessionExportFormat | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -84,6 +93,21 @@ export function SessionReview({ sessionId, onBack }: Props) {
       .catch(() => undefined);
   };
 
+  const handleExport = (format: SessionExportFormat) => {
+    setExporting(format);
+    setExportError(null);
+    void exportSession(sessionId, format)
+      .then((file) => {
+        downloadSessionExport(file);
+      })
+      .catch((e: unknown) => {
+        setExportError(String(e));
+      })
+      .finally(() => {
+        setExporting(null);
+      });
+  };
+
   return (
     <main className="sr-root" data-testid="session-review" style={rootStyle}>
       <header style={headerStyle}>
@@ -91,15 +115,50 @@ export function SessionReview({ sessionId, onBack }: Props) {
           ← Back
         </button>
         <h1 style={{ fontSize: 18, margin: 0 }}>Session review</h1>
-        <button
-          type="button"
-          onClick={handleCopy}
-          disabled={utterances.length === 0}
-          style={copyBtnStyle}
-        >
-          {copied ? "Copied" : "Copy transcript"}
-        </button>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+          <button
+            type="button"
+            onClick={handleCopy}
+            disabled={utterances.length === 0}
+            style={copyBtnStyle}
+          >
+            {copied ? "Copied" : "Copy transcript"}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport("text")}
+            disabled={exporting !== null}
+            style={copyBtnStyle}
+            data-testid="export-session-text"
+          >
+            {exporting === "text" ? "Exporting…" : "Export text"}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport("pdf")}
+            disabled={exporting !== null}
+            style={copyBtnStyle}
+            data-testid="export-session-pdf"
+          >
+            {exporting === "pdf" ? "Exporting…" : "Export PDF"}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleExport("json")}
+            disabled={exporting !== null}
+            style={copyBtnStyle}
+            data-testid="export-session-json"
+          >
+            {exporting === "json" ? "Exporting…" : "Export JSON"}
+          </button>
+        </div>
       </header>
+
+      {exportError && (
+        <p style={{ ...mutedStyle, color: "#ef4444" }} data-testid="session-review-export-error">
+          {exportError}
+        </p>
+      )}
 
       {loading && <p style={mutedStyle}>Loading transcript…</p>}
 

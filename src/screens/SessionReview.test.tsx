@@ -6,6 +6,8 @@ import type { ReviewChunkDto, SessionReviewDto } from "../commands";
 
 vi.mock("../commands", () => ({
   getSessionReview: vi.fn(),
+  exportSession: vi.fn(),
+  downloadSessionExport: vi.fn(),
 }));
 
 const chunk = (

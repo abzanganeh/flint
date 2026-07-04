@@ -1,0 +1,150 @@
+name: Release
+
+# Builds signed installers when signing secrets are configured; otherwise
+# produces unsigned artifacts for smoke validation. Actual signing requires
+# manual gate — see tests/manual-qa/installer-signing-runbook.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Git tag to build (e.g. v0.1.0). Leave empty to build HEAD."
+        required: false
+        type: string
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build (${{ matrix.label }})
+    permissions:
+      contents: write
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            runner: macos-14
+            install: macos
+            args: --target aarch64-apple-darwin
+          - label: windows-x86_64
+            runner: windows-latest
+            install: windows
+            args: ""
+          - label: linux-x86_64
+            runner: ubuntu-22.04
+            install: linux
+            args: ""
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Install platform deps (Linux)
+        if: matrix.install == 'linux'
+        run: |
+          ./scripts/install-linux-deps.sh
+          echo "LIBCLANG_PATH=$(llvm-config --libdir)" >> "$GITHUB_ENV"
+
+      - name: Install platform deps (macOS)
+        if: matrix.install == 'macos'
+        run: ./scripts/install-macos-deps.sh
+
+      - name: Install platform deps (Windows)
+        if: matrix.install == 'windows'
+        shell: pwsh
+        run: ./scripts/install-windows-deps.ps1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Import Apple signing certificate
+        if: matrix.install == 'macos'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No APPLE_CERTIFICATE — unsigned macOS build"
+            exit 0
+          fi
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p actions build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p actions build.keychain
+          security import certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
+          rm -f certificate.p12
+
+      - name: Import Windows signing certificate
+        if: matrix.install == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Host "No WINDOWS_CERTIFICATE — unsigned Windows build"
+            exit 0
+          }
+          New-Item -ItemType Directory -Path certificate -Force | Out-Null
+          Set-Content -Path certificate/tempCert.txt -Value $env:WINDOWS_CERTIFICATE
+          certutil -decode certificate/tempCert.txt certificate/certificate.pfx
+          Remove-Item certificate/tempCert.txt
+          Import-PfxCertificate `
+            -FilePath certificate/certificate.pfx `
+            -CertStoreLocation Cert:\CurrentUser\My `
+            -Password (ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText)
+
+      - uses: tauri-apps/tauri-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # macOS — optional; tauri-action signs + notarizes when all are set
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Authenticode — optional
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "Flint ${{ inputs.tag || github.ref_name }}"
+          releaseBody: |
+            Desktop installers for Flint.
+
+            macOS builds are notarized when Apple signing secrets are configured.
+            Windows builds are Authenticode-signed when `WINDOWS_CERTIFICATE` is set.
+            See `tests/manual-qa/installer-signing-runbook.md` for secret setup.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
+
+      - name: Upload unsigned fallback artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-bundles-${{ matrix.label }}
+          path: |
+            src-tauri/target/release/bundle/
+          retention-days: 14
+          if-no-files-found: ignore

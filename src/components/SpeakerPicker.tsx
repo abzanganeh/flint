@@ -1,13 +1,14 @@
 import { assignSpeaker } from "../commands";
 
 export interface SpeakerPickerProps {
+  sessionId: string;
   segments: Array<{ speakerId: number; sampleText: string }>;
   onAssigned: () => void;
 }
 
-export function SpeakerPicker({ segments, onAssigned }: SpeakerPickerProps) {
+export function SpeakerPicker({ sessionId, segments, onAssigned }: SpeakerPickerProps) {
   const handlePick = (speakerId: number) => {
-    void assignSpeaker(speakerId)
+    void assignSpeaker(sessionId, speakerId)
       .then(() => onAssigned())
       .catch(() => undefined);
   };

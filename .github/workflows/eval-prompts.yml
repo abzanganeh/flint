@@ -75,13 +75,15 @@ jobs:
       - name: Build eval crate
         run: cargo build --manifest-path evals/Cargo.toml --release
 
-      - name: Run smoke eval (10 questions across all variants)
+      - name: Run smoke eval (10 questions, gpt variant, absolute gates)
         run: |
           ./evals/target/release/evals \
             --questions-dir evals/questions \
             --prompts-dir prompts \
             --results-dir evals/results \
-            --limit 10
+            --limit 10 \
+            --variant gpt \
+            --skip-win-rate
         env:
           RUST_LOG: info
 

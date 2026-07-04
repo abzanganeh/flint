@@ -1,15 +1,35 @@
 {
-  "current_milestone": "m11-mock-coach-quality",
-  "milestone_status": "in_progress",
-  "milestone_branch": { "flint": "feature/m11-mock-coach-quality" },
-  "current_slice": 8,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7],
-  "current_task_id": "m11-pr-ci",
-  "loop_stopped": false,
-  "ci_fix_attempts": 0,
+  "current_milestone": "v1-closure-phase1",
+  "milestone_status": "awaiting_merge",
+  "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
+  "current_slice": 16,
+  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+  "current_task_id": "v1p1-s16-pr-merge",
+  "loop_stopped": true,
+  "ci_fix_attempts": 3,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {},
-  "notes": "All 7 slices implemented. PR + CI pending."
+  "open_prs": {
+    "flint": "https://github.com/abzanganeh/flint/pull/32"
+  },
+  "manual_gate_backlog": [
+    {
+      "slice": "v1p1-s10-eval-baseline",
+      "reason": "Eval smoke conciseness gate flaky with Ollama judge (80-90% pass on 10-question smoke). Full baseline committed; manual re-run with --update-baseline before prompt merges."
+    },
+    {
+      "slice": "v1p1-s12-installer-signing-prep",
+      "reason": "Signed/notarized macOS + Authenticode Windows installers require Apple Developer ID and Windows code-signing certs. CI wired in release.yml; secrets + verification checklist in tests/manual-qa/installer-signing-runbook.md."
+    },
+    {
+      "slice": "v1p1-s13-hosted-supabase-prep",
+      "reason": "Cloud Supabase project must be created in dashboard. Migrations verified locally (3/3 clean, RLS on all 9 tables). Runbook: tests/manual-qa/hosted-supabase-runbook.md."
+    },
+    {
+      "slice": "v1p1-s14-stealth-audio-manual-gate",
+      "reason": "BlackHole/WASAPI/OBS/Wayland hotkey validation needs real hardware per platform. Known Wayland unfocused hotkey limitation (P2, M3_LINUX_FINDINGS) — no v1 code fix. Runbook: tests/manual-qa/stealth-audio-validation-runbook.md."
+    }
+  ],
+  "notes": "Slice 16 complete — all 11 PR #32 checks green (Windows pass 25m44s after diarizer stub). PR mergeable; awaiting user approval to merge to main."
 }

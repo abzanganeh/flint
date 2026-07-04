@@ -1,5 +1,6 @@
 pub mod audio;
 mod auth_session;
+pub mod billing;
 pub mod calibration;
 mod commands;
 pub mod confidence;
@@ -7,6 +8,7 @@ pub mod cost;
 pub mod deep_link;
 pub mod digest;
 mod dto;
+pub mod entitlement;
 mod events;
 pub mod flags;
 pub mod gdpr;
@@ -232,6 +234,8 @@ pub fn run() {
             commands::signal_question_ended,
             commands::relabel_transcript_chunk,
             commands::assign_speaker,
+            commands::get_diarization_status,
+            commands::download_diarization_models,
             commands::cancel_inference,
             commands::panic_hide_overlay,
             commands::switch_provider,
@@ -253,12 +257,14 @@ pub fn run() {
             commands::delete_session,
             // Phase 7.4 — cost cap enforcement
             commands::get_cost_status,
+            commands::get_billing_status,
             commands::set_cost_cap,
             commands::lift_cost_suspension,
             commands::reset_cost_tracker,
             // Phase 7.5 — GDPR right-to-deletion + right-to-export
             commands::delete_account,
             commands::export_user_data,
+            commands::export_session,
             commands::copy_text_to_clipboard,
             // M8 — input quality / mic calibration
             commands::get_mic_calibration_status,

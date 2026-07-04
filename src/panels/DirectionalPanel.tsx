@@ -3,7 +3,7 @@ import { useState } from "react";
 import { copyTextToClipboard, rephraseResponse } from "../commands";
 import { useUIStore } from "../store/ui";
 import type { ConfidenceLevel } from "../types";
-import { HistoryCard, QuestionHeading } from "./TurnCards";
+import { QuestionHeading } from "./TurnCards";
 
 const clearBuffersForNewTurn = (): void => {
   const store = useUIStore.getState();
@@ -43,7 +43,6 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
     answerNowMode,
     lastManualQuestion,
     currentQuestion,
-    turnHistory,
   } = useUIStore();
 
   const text = streamingBuffers.directional;
@@ -168,33 +167,6 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
         ) : (
           <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
             {text}
-          </div>
-        )}
-
-        {turnHistory.length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <div
-              style={{
-                color: "#4b5563",
-                fontSize: "10px",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-                borderTop: "1px solid #1e2028",
-                paddingTop: 8,
-                marginBottom: 6,
-              }}
-            >
-              Earlier questions
-            </div>
-            {turnHistory.map((card) =>
-              card.directional.length > 0 ? (
-                <HistoryCard
-                  key={card.id}
-                  question={card.question}
-                  answer={card.directional}
-                />
-              ) : null,
-            )}
           </div>
         )}
       </div>
