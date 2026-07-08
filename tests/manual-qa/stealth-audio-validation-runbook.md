@@ -4,6 +4,28 @@ These checks require real hardware and OS-specific audio/screen-capture stacks.
 They cannot be fully automated in CI. Do **not** mark ROADMAP items 22/24 closed
 until each scenario has an explicit pass/fail recorded here or in linked QA notes.
 
+## 2026-07-04 root-cause fix: system audio silently duplicated mic audio
+
+On Linux, cpal's ALSA host can enumerate a native `"pipewire"` PCM plugin
+*before* the `"pulse"` PCM plugin. `find_system_device()` used to accept
+whichever of the two it found first. The native `pipewire` plugin does not
+honour the `PULSE_SOURCE` env var Flint sets to target the sink monitor — it
+just opens PipeWire's default *capture* node, which is the same node the
+microphone stream opens. Result: System and Mic captured identical audio
+(every utterance duplicated on both channels, real loopback/interviewer
+audio never appeared), and no manual `pactl`/Bluetooth-profile fix could
+change that, because the actual bug was upstream of all of it.
+
+Fixed in `audio/capture.rs` (pulse-first device selection): explicitly prefer `"pulse"` over `"pipewire"`,
+and fail fast (`AudioCapture::start`) if system and mic ever resolve to the
+literal same device name. Added a new `system_audio_isolation` Health Check
+(`health/checks.rs`) that runs the exact same resolution logic and **blocks
+`start_session`** before Live if it would collide — this is now caught in
+Health Check / Rehearsal, not discovered live via garbled transcripts. No
+manual pactl/env var configuration should be required for this class of bug
+going forward; if `system_audio_isolation` ever fails, the fix instruction
+tells the user to install `pipewire-pulse`, not to hand-edit sources.
+
 ## Known limitations (no code fix in v1)
 
 Documented in `tests/manual-qa/M3_LINUX_FINDINGS.md`:
@@ -26,10 +48,10 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 
 | # | Scenario | Pass criteria | Result |
 | --- | --- | --- | --- |
-| L1 | HealthCheck | `stealth_api`, `system_audio_loopback`, `microphone_access`, `global_hotkey` all pass/warn acceptably | ☐ |
-| L2 | System audio loopback | Zoom/Meet/browser audio transcribed on System channel (see `m13-live-pipeline-checklist.md` §A) | ☐ |
-| L3 | Hotkeys **with focus** | Ctrl+Q / panic hide work while overlay focused | ☐ |
-| L4 | Hotkeys **without focus** | Record pass/fail — expected fail on Wayland until portal work lands | ☐ |
+| L1 | HealthCheck | `stealth_api`, `system_audio_loopback`, `microphone_access`, `global_hotkey`, `system_audio_isolation` all pass/warn acceptably | ☐ |
+| L2 | System audio loopback | Play YouTube/browser audio — must appear on **System** channel only (not Mic). Zoom/Meet also valid (see `m13-live-pipeline-checklist.md` §A). **Do not mark PASS without device evidence.** | ☐ — retest after pulse-first fix (see root-cause section above) |
+| L3 | Hotkeys **with focus** | Ctrl+Q / panic hide work while overlay focused | ☑ PASS 2026-07-04 — Ctrl+Alt+Space re-ask (Rehearsal), Ctrl+Alt+Shift+Space panic hide (Live); refocus OK |
+| L4 | Hotkeys **without focus** | Record pass/fail — expected fail on Wayland until portal work lands | ☑ FAIL (accepted P2) 2026-07-04 — no re-ask/panic unfocused; chords work again after refocus |
 | L5 | OBS / screen capture | Start OBS full-display capture; note whether Flint overlay is visible (document outcome) | ☐ |
 
 ### macOS
