@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase2",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-phase2-hardening" },
-  "current_slice": 4,
-  "completed_slices": [0, 1, 2, 3],
-  "current_task_id": "v1p2-s4-dev-clean-ux",
+  "current_slice": 7,
+  "completed_slices": [0, 1, 2, 3, 4, 5, 6],
+  "current_task_id": "v1p2-s7-consolidated-review",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -68,5 +68,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 3 complete — Linux/Wayland hotkey fallbacks + global-shortcut capabilities + Rehearsal Ctrl+Enter doc listener; commands.rs OAuth WIP left unstaged."
+  "notes": "Slice 6 complete — local docs pass (ROADMAP, system design §12/§14/§16.2/§29/Linux loopback, STRATEGY_B). docs/ gitignored, never staged. Next: slice 7 consolidated review."
 }
