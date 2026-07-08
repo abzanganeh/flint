@@ -50,8 +50,8 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 | --- | --- | --- | --- |
 | L1 | HealthCheck | `stealth_api`, `system_audio_loopback`, `microphone_access`, `global_hotkey`, `system_audio_isolation` all pass/warn acceptably | ☐ |
 | L2 | System audio loopback | Play YouTube/browser audio — must appear on **System** channel only (not Mic). Zoom/Meet also valid (see `m13-live-pipeline-checklist.md` §A). **Do not mark PASS without device evidence.** | ☐ — retest after pulse-first fix (see root-cause section above) |
-| L3 | Hotkeys **with focus** | Ctrl+Q / panic hide work while overlay focused | ☑ PASS 2026-07-04 — Ctrl+Alt+Space re-ask (Rehearsal), Ctrl+Alt+Shift+Space panic hide (Live); refocus OK |
-| L4 | Hotkeys **without focus** | Record pass/fail — expected fail on Wayland until portal work lands | ☑ FAIL (accepted P2) 2026-07-04 — no re-ask/panic unfocused; chords work again after refocus |
+| L3 | Hotkeys **with focus** | Ctrl+Alt+Space re-ask and Ctrl+Alt+Shift+Space panic hide work while Flint/overlay focused; Linux fallbacks (Ctrl+Shift+Space, F8 dev) documented in slice 3 | ☐ — retest after slice 3 hotkey fallbacks land |
+| L4 | Hotkeys **without focus** | Record pass/fail — expected fail on Wayland until portal work lands | ☐ — document outcome; accepted P2 if fail |
 | L5 | OBS / screen capture | Start OBS full-display capture; note whether Flint overlay is visible (document outcome) | ☐ |
 
 ### macOS

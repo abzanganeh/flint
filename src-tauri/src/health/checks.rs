@@ -515,8 +515,8 @@ fn check_global_hotkey() -> HealthCheckResult {
     if is_wayland_session() {
         return warn(
             HealthCheck::GlobalHotkey,
-            "Wayland session — Ctrl+Alt+Space works while Flint is focused; true global capture requires a desktop shortcut or X11.",
-            "On GNOME/KDE: Settings → Keyboard → Custom Shortcuts to run a Flint trigger command, or use the in-app Ask button. While testing, click the Flint window first, then press Ctrl+Alt+Space.",
+            "Wayland session — Ctrl+Alt+Space is often blocked by the compositor.",
+            "With Flint focused, use Ctrl+Shift+Space (Linux fallback), F8 (dev), or Ctrl+Enter in Rehearsal. Ctrl+Alt+Space may work on X11/macOS/Windows.",
         );
     }
     warn(
