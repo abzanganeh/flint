@@ -13,6 +13,9 @@ use crate::keychain;
 use crate::llm::stack;
 use crate::supabase::resolve_supabase_config;
 
+#[cfg(target_os = "linux")]
+use cpal::traits::DeviceTrait;
+
 const OLLAMA_HEALTH_URL: &str = "http://localhost:11434/api/tags";
 const OLLAMA_TIMEOUT_SECS: u64 = 2;
 const SUPABASE_HEALTH_TIMEOUT_SECS: u64 = 5;
@@ -37,6 +40,7 @@ pub enum HealthCheck {
     GlobalHotkey,
     PanicHotkey,
     EchoCancellation,
+    SystemAudioIsolation,
 }
 
 /// Outcome of a single health check.
@@ -78,6 +82,7 @@ pub async fn run_health_check(
         check_global_hotkey(),
         check_panic_hotkey(),
         check_echo_cancellation(),
+        check_system_audio_isolation(),
     ]
 }
 
@@ -658,6 +663,73 @@ fn echo_cancel_module_loaded() -> bool {
     text.lines().any(|line| line.contains("module-echo-cancel"))
 }
 
+/// Runs the SAME device-resolution logic used by `AudioCapture::start` and
+/// verifies system audio (loopback) and microphone will NOT resolve to the
+/// same ALSA device before a live session starts.
+///
+/// This exists because the previous approach — resolve devices only when
+/// `start_session` runs — let a broken loopback (system audio silently
+/// duplicating the microphone) surface only mid-interview as garbled,
+/// duplicated transcript lines. Catching it here, in Health Check /
+/// Rehearsal, means the user gets an actionable fix before going live
+/// instead of during it.
+pub fn check_system_audio_isolation() -> HealthCheckResult {
+    #[cfg(target_os = "linux")]
+    {
+        let host = cpal::default_host();
+        let sys_dev = match crate::audio::capture::find_system_device(&host) {
+            Ok(d) => d,
+            Err(e) => {
+                return warn(
+                    HealthCheck::SystemAudioIsolation,
+                    "Could not resolve a system audio (loopback) device.",
+                    format!(
+                        "{e} This will block starting a live session until resolved."
+                    ),
+                );
+            }
+        };
+        let mic_dev = match crate::audio::capture::find_mic_device(&host) {
+            Ok(d) => d,
+            Err(e) => {
+                return warn(
+                    HealthCheck::SystemAudioIsolation,
+                    "Could not resolve a microphone device.",
+                    e.to_string(),
+                );
+            }
+        };
+        let sys_name = sys_dev.name().unwrap_or_default();
+        let mic_name = mic_dev.name().unwrap_or_default();
+        if sys_name == mic_name {
+            return fail(
+                HealthCheck::SystemAudioIsolation,
+                "System audio and microphone resolve to the same device — live \
+                 sessions would duplicate every utterance on both channels and \
+                 never capture real interviewer audio.",
+                "Install pipewire-pulse (provides the ALSA \"pulse\" plugin: \
+                 `sudo apt install pipewire-pulse`), then restart Flint. This is \
+                 required for system-audio loopback to work independently of \
+                 the microphone.",
+            );
+        }
+        pass(
+            HealthCheck::SystemAudioIsolation,
+            format!(
+                "System audio ({sys_name}) and microphone ({mic_name}) resolve to \
+                 different devices."
+            ),
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        pass(
+            HealthCheck::SystemAudioIsolation,
+            "System audio and microphone use separate OS-level devices on this platform.",
+        )
+    }
+}
+
 /// Stealth gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
 pub fn run_stealth_self_test() -> Result<(), String> {
     let result = check_stealth_api();
@@ -694,6 +766,18 @@ mod tests {
             result.status,
             CheckStatus::Pass | CheckStatus::Warn
         ));
+    }
+
+    #[test]
+    fn system_audio_isolation_check_runs_without_panic() {
+        let result = check_system_audio_isolation();
+        assert_eq!(result.check, HealthCheck::SystemAudioIsolation);
+        // On CI/dev machines without any audio devices this can legitimately
+        // Warn (no devices found) or Fail (collision) — it must never panic
+        // and must always carry a fix instruction when it doesn't pass.
+        if result.status != CheckStatus::Pass {
+            assert!(result.fix_instruction.is_some());
+        }
     }
 
     #[test]

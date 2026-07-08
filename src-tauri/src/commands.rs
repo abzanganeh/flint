@@ -2841,6 +2841,20 @@ pub async fn start_session(
     checks::run_stealth_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
+
+    // Phone-call mode uses a single mic stream (no loopback), so the
+    // isolation gate below only applies to dual-stream (non-phone) sessions.
+    if !is_phone_call_mode {
+        let isolation = checks::check_system_audio_isolation();
+        if isolation.status == checks::CheckStatus::Fail {
+            let hint = isolation
+                .fix_instruction
+                .as_deref()
+                .unwrap_or("Fix system audio routing before going live.");
+            return Err(format!("{} {}", isolation.message, hint));
+        }
+    }
+
     let headphone_override = state
         .persistence
         .get_headphone_gate_override()

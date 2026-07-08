@@ -21,7 +21,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use rubato::{FftFixedOut, Resampler};
 use tokio::sync::mpsc;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -359,6 +359,24 @@ impl AudioCapture {
 
         // ── Microphone ────────────────────────────────────────────────────
         let mic_dev = find_mic_device(&host)?;
+
+        // Defense in depth: if system and mic resolved to the literal same
+        // ALSA device, they will capture identical audio — every utterance
+        // duplicates on both channels and true loopback (interviewer audio)
+        // never appears. Fail loudly here instead of starting a session that
+        // silently produces garbage transcripts the user has to debug live.
+        let sys_name = sys_dev.name().unwrap_or_default();
+        let mic_name = mic_dev.name().unwrap_or_default();
+        if sys_name == mic_name {
+            return Err(anyhow!(
+                "System audio and microphone both resolved to the same device \
+                 ({sys_name}) — loopback capture is not actually isolated from \
+                 the microphone. Install pipewire-pulse (provides the ALSA \
+                 \"pulse\" plugin) so system audio can route through your \
+                 default sink's monitor, then restart Flint."
+            ));
+        }
+
         let (mic_cfg, mic_rate) =
             select_stream_config(&mic_dev).context("Failed to select microphone stream config")?;
         let mic_state = Arc::new(Mutex::new(
@@ -709,15 +727,35 @@ pub(crate) fn find_system_device(host: &cpal::Host) -> Result<Device> {
     for dev in &devs {
         let name = dev.name().unwrap_or_default().to_lowercase();
         if name.contains("monitor") || name.contains("loopback") {
+            info!(device = %name, "system audio: using named monitor/loopback device");
             return Ok(dev.clone());
         }
     }
 
-    // PipeWire exposes sink monitors through the ALSA pulse/pipewire plugins.
-    for dev in devs {
-        let name = dev.name().unwrap_or_default().to_lowercase();
-        if name == "pipewire" || name == "pulse" {
-            return Ok(dev);
+    // The ALSA "pulse" plugin is a genuine libpulse client and reliably
+    // honours the `PULSE_SOURCE` env var set above, routing capture to the
+    // sink's `.monitor` source. The native "pipewire" ALSA plugin does NOT
+    // read `PULSE_SOURCE` — it opens PipeWire's default capture node, which
+    // is the SAME node the microphone stream opens. If "pipewire" is picked
+    // here, system and mic silently capture identical audio (duplicate
+    // transcripts, no real loopback). "pulse" must be tried first.
+    for target in ["pulse", "pipewire"] {
+        for dev in &devs {
+            let name = dev.name().unwrap_or_default().to_lowercase();
+            if name == target {
+                if target == "pipewire" {
+                    warn!(
+                        device = %name,
+                        "system audio: falling back to \"pipewire\" ALSA plugin — \
+                         this does not honour PULSE_SOURCE and may duplicate mic audio \
+                         instead of capturing real loopback. Install pipewire-pulse \
+                         (provides the \"pulse\" ALSA plugin) for reliable loopback."
+                    );
+                } else {
+                    info!(device = %name, "system audio: using \"pulse\" ALSA plugin (honours PULSE_SOURCE)");
+                }
+                return Ok(dev.clone());
+            }
         }
     }
 
