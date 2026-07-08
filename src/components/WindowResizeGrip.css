@@ -3,24 +3,30 @@
   right: 0;
   bottom: 0;
   z-index: 10000;
-  width: 18px;
-  height: 18px;
-  padding: 0;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
+  box-sizing: border-box;
   border: none;
-  border-radius: 0;
+  border-radius: 4px 0 0 0;
   background: transparent;
   color: #52525b;
   cursor: nwse-resize;
   display: flex;
   align-items: flex-end;
   justify-content: flex-end;
-  opacity: 0.55;
-  transition: opacity 0.12s, color 0.12s;
+  opacity: 0.65;
+  transition: opacity 0.12s, color 0.12s, background-color 0.12s;
 }
 
 .window-resize-grip:hover {
   opacity: 1;
   color: #a1a1aa;
+  background: rgba(30, 32, 40, 0.85);
+}
+
+.window-resize-grip:active {
+  background: rgba(45, 48, 58, 0.95);
 }
 
 .window-resize-grip__icon {

@@ -66,7 +66,15 @@ npm install
 npm run tauri dev
 ```
 
-On Linux dev, the WebView loads **`http://127.0.0.1:1420`** (not `localhost`) to avoid IPv6 connection issues. If the window shows “Connection refused”, stop stale `flint`/`vite` processes and restart `npm run tauri dev`.
+**Clean restart** (kills stale processes, loads `.env`, optional PipeWire cleanup):
+
+```bash
+npm run dev:clean
+# or: ./scripts/dev-clean.sh
+# verbose audio logs: ./scripts/dev-clean.sh --verbose
+```
+
+On Linux dev, the WebView loads **`http://127.0.0.1:1420`** (not `localhost`) to avoid IPv6 connection issues. If the window shows “Connection refused”, run `npm run dev:clean` or stop stale `flint`/`vite` processes and restart.
 
 ### Window and display
 

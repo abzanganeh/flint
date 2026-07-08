@@ -25,8 +25,8 @@ export default function WindowResizeGrip() {
     >
       <svg
         className="window-resize-grip__icon"
-        width="12"
-        height="12"
+        width="16"
+        height="16"
         viewBox="0 0 12 12"
         aria-hidden
       >
