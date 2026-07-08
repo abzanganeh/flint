@@ -23,7 +23,7 @@ import {
   type SessionContextFields,
 } from "../commands";
 import { useCostCap } from "../hooks/useCostCap";
-import { useHotkeys } from "../hooks/useHotkeys";
+import { useHotkeys, isRehearsalSubmitChord } from "../hooks/useHotkeys";
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useRagChunks } from "../hooks/useRagChunks";
 import { useTokenUsage } from "../hooks/useTokenUsage";
@@ -226,10 +226,10 @@ const Rehearsal = ({
     lastAskedQuestion.trim() !== "" &&
     question.trim() === lastAskedQuestion.trim();
 
-  const handleSubmit = async () => {
+  const handleSubmit = useCallback(async () => {
     if (!question.trim() || asking) return;
     await fireQuestion(question.trim());
-  };
+  }, [asking, fireQuestion, question]);
 
   const handleBankAsk = useCallback(
     (q: string) => {
@@ -258,12 +258,26 @@ const Rehearsal = ({
     onComplete();
   };
 
-  const handleQuestionKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+  // Wayland/WebKit often omits modifier flags on the target element; capture at
+  // document. Refs keep the listener stable (no rebind on every keystroke).
+  const askingRef = useRef(asking);
+  const questionRef = useRef(question);
+  askingRef.current = asking;
+  questionRef.current = question;
+  useEffect(() => {
+    const onDocKeyDown = (e: KeyboardEvent) => {
+      if (askingRef.current) return;
+      if (!isRehearsalSubmitChord(e)) return;
+      const root = document.querySelector('[data-testid="rehearsal-screen"]');
+      if (!root?.contains(e.target as Node)) return;
+      const q = questionRef.current.trim();
+      if (!q) return;
       e.preventDefault();
-      void handleSubmit();
-    }
-  };
+      void fireQuestion(q);
+    };
+    document.addEventListener("keydown", onDocKeyDown, true);
+    return () => document.removeEventListener("keydown", onDocKeyDown, true);
+  }, [fireQuestion]);
 
   return (
     <PanicRestoreShell>
@@ -316,7 +330,11 @@ const Rehearsal = ({
             />
           </div>
           <span style={{ color: "#6b7280", fontSize: "11px" }}>
-            — Ask → tailor your answer → save for Live. Ctrl+Enter to ask.
+            — Ask → tailor your answer → save for Live. Ctrl+Enter to ask
+            {typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent)
+              ? " · Ctrl+Shift+Space or F8 to re-ask (Ctrl+Alt+Space blocked on Wayland)"
+              : " · Ctrl+Alt+Space to re-ask"}
+            .
           </span>
 
           <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
@@ -391,7 +409,6 @@ const Rehearsal = ({
             data-testid="rehearsal-question-input"
             value={question}
             onChange={(e) => setQuestion(e.target.value)}
-            onKeyDown={handleQuestionKeyDown}
             placeholder="Type a practice interview question… (Enter = new line, Ctrl+Enter = Ask)"
             rows={3}
             disabled={asking}

@@ -7,26 +7,81 @@ import { useUIStore } from "../store/ui";
 const DOUBLE_TAP_MS = 400;
 const HOLD_MS = 2000;
 
-function isQuestionEndedChord(e: KeyboardEvent): boolean {
-  return e.ctrlKey && e.code === "KeyQ" && !e.altKey && !e.metaKey && !e.shiftKey;
+function isLinuxPlatform(): boolean {
+  return typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
 }
 
+function isSpaceKey(e: KeyboardEvent): boolean {
+  return e.code === "Space" || e.key === " ";
+}
+
+function isEnterKey(e: KeyboardEvent): boolean {
+  return e.code === "Enter" || e.code === "NumpadEnter" || e.key === "Enter";
+}
+
+function ctrlHeld(e: KeyboardEvent): boolean {
+  return e.ctrlKey || e.getModifierState("Control");
+}
+
+function altHeld(e: KeyboardEvent): boolean {
+  return e.altKey || e.getModifierState("Alt");
+}
+
+function metaHeld(e: KeyboardEvent): boolean {
+  return e.metaKey || e.getModifierState("Meta");
+}
+
+function isQuestionEndedChord(e: KeyboardEvent): boolean {
+  return ctrlHeld(e) && e.code === "KeyQ" && !altHeld(e) && !metaHeld(e) && !e.shiftKey;
+}
+
+/** Primary chord: Ctrl+Alt+Space (Linux also accepts Ctrl+Super/Option+Space). */
 function isTriggerChord(e: KeyboardEvent): boolean {
+  if (!isSpaceKey(e) || e.repeat || !ctrlHeld(e) || e.shiftKey) return false;
+  if (altHeld(e)) return true;
+  return isLinuxPlatform() && metaHeld(e);
+}
+
+/** Stealth panic hide: Ctrl+Alt+Shift+Space (Linux also Ctrl+Super+Shift+Space). */
+function isPanicChord(e: KeyboardEvent): boolean {
+  if (!isSpaceKey(e) || e.repeat || !ctrlHeld(e) || !e.shiftKey) return false;
+  if (altHeld(e)) return true;
+  return isLinuxPlatform() && metaHeld(e);
+}
+
+/** Wayland often blocks Ctrl+Alt+Space; tap-only fallback while Flint is focused. */
+function isLinuxShiftTrigger(e: KeyboardEvent): boolean {
   return (
-    e.ctrlKey &&
-    e.altKey &&
-    !e.metaKey &&
-    (e.code === "Space" || e.key === " ")
+    isLinuxPlatform() &&
+    ctrlHeld(e) &&
+    e.shiftKey &&
+    isSpaceKey(e) &&
+    !altHeld(e) &&
+    !metaHeld(e) &&
+    !e.repeat
   );
+}
+
+/** Dev-only focused-window fallback (also registered globally in Rust on Linux). */
+function isLinuxDevTriggerKey(e: KeyboardEvent): boolean {
+  return isLinuxPlatform() && import.meta.env.DEV && e.code === "F8" && !e.repeat;
 }
 
 function isChordModifierRelease(e: KeyboardEvent): boolean {
   return (
     e.key === "Control" ||
     e.key === "Alt" ||
+    e.key === "Meta" ||
+    e.key === "Shift" ||
     e.code === "Space" ||
     e.key === " "
   );
+}
+
+/** Rehearsal Ask shortcut — also exported for document-level listeners. */
+export function isRehearsalSubmitChord(e: KeyboardEvent): boolean {
+  if (!isEnterKey(e) || e.repeat || e.shiftKey) return false;
+  return ctrlHeld(e) || metaHeld(e);
 }
 
 export function useHotkeys(
@@ -55,12 +110,7 @@ export function useHotkeys(
     setAnswerNowMode(false);
     clearStreamingBuffers();
     void triggerResponse(lastQuestion, sessionId);
-  }, [
-    clearStreamingBuffers,
-    lastQuestion,
-    sessionId,
-    setAnswerNowMode,
-  ]);
+  }, [clearStreamingBuffers, lastQuestion, sessionId, setAnswerNowMode]);
 
   const fireHold = useCallback(() => {
     if (!lastQuestion.trim() || !sessionId) return;
@@ -68,12 +118,7 @@ export function useHotkeys(
     setAnswerNowMode(true);
     clearStreamingBuffers();
     void triggerResponse(lastQuestion, sessionId);
-  }, [
-    clearStreamingBuffers,
-    lastQuestion,
-    sessionId,
-    setAnswerNowMode,
-  ]);
+  }, [clearStreamingBuffers, lastQuestion, sessionId, setAnswerNowMode]);
 
   const registerPress = useCallback((): boolean => {
     if (!enabled || !sessionId) return false;
@@ -97,7 +142,6 @@ export function useHotkeys(
     return true;
   }, [clearHoldTimer, clearStreamingBuffers, enabled, sessionId, setAnswerNowMode]);
 
-  /** OS-global shortcut (X11 / macOS / Windows) — single fire on press, tap only. */
   const handleGlobalShortcut = useCallback(() => {
     if (!registerPress()) return;
     fireTap();
@@ -112,7 +156,6 @@ export function useHotkeys(
     [enabled, sessionId],
   );
 
-  /** Window-focused chord — supports hold-to-Answer-Now via keyup timing. */
   const handleChordKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (!enabled || !sessionId) return;
@@ -122,13 +165,28 @@ export function useHotkeys(
         return;
       }
 
-      if (!isTriggerChord(e) || e.repeat) return;
-      e.preventDefault();
+      if (isLinuxDevTriggerKey(e)) {
+        e.preventDefault();
+        if (!registerPress()) return;
+        fireTap();
+        return;
+      }
 
-      if (e.shiftKey) {
+      if (isPanicChord(e)) {
+        e.preventDefault();
         void panicHideOverlay();
         return;
       }
+
+      if (isLinuxShiftTrigger(e)) {
+        e.preventDefault();
+        if (!registerPress()) return;
+        fireTap();
+        return;
+      }
+
+      if (!isTriggerChord(e) || e.repeat) return;
+      e.preventDefault();
 
       if (!registerPress()) return;
 
@@ -142,7 +200,7 @@ export function useHotkeys(
         }
       }, HOLD_MS);
     },
-    [clearHoldTimer, enabled, fireHold, handleQuestionEnded, registerPress, sessionId],
+    [clearHoldTimer, enabled, fireHold, fireTap, handleQuestionEnded, registerPress, sessionId],
   );
 
   const handleChordKeyUp = useCallback(
@@ -150,8 +208,12 @@ export function useHotkeys(
       if (!chordActiveRef.current || !isChordModifierRelease(e)) return;
 
       const stillHeld =
-        (e.code !== "Space" && e.key !== " " && (e.getModifierState("Control") || e.getModifierState("Alt"))) ||
-        ((e.code === "Space" || e.key === " ") && e.ctrlKey && e.altKey);
+        (!isSpaceKey(e) &&
+          (e.getModifierState("Control") ||
+            e.getModifierState("Alt") ||
+            e.getModifierState("Meta") ||
+            e.getModifierState("Shift"))) ||
+        (isSpaceKey(e) && ctrlHeld(e) && (altHeld(e) || (isLinuxPlatform() && metaHeld(e))));
       if (stillHeld) return;
 
       chordActiveRef.current = false;
@@ -199,8 +261,8 @@ export function useHotkeys(
     };
   }, [clearHoldTimer, handleGlobalShortcut, setAnswerNowMode, setPanicHideActive]);
 
-  // Wayland does not deliver true OS-global shortcuts; macOS/Windows/X11 also
-  // benefit from focused-window hold detection (global plugin fires once on press).
+  // Wayland: focused-window listeners cover hold timing + Ctrl+Shift+Space / F8
+  // when OS-global Ctrl+Alt chords are blocked (accepted P2 for unfocused).
   useEffect(() => {
     window.addEventListener("keydown", handleChordKeyDown, true);
     window.addEventListener("keyup", handleChordKeyUp, true);

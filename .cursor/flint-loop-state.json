@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase2",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-phase2-hardening" },
-  "current_slice": 1,
-  "completed_slices": [0],
-  "current_task_id": "v1p2-s1-audio-isolation",
+  "current_slice": 4,
+  "completed_slices": [0, 1, 2, 3],
+  "current_task_id": "v1p2-s4-dev-clean-ux",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -60,7 +60,7 @@
     {
       "gate": "Wayland hotkeys unfocused",
       "doc": "Accepted P2",
-      "notes": "Do not invent portal fix in v1"
+      "notes": "Do not invent portal fix in v1; focused Ctrl+Shift+Space / F8 fallbacks shipped in slice 3"
     }
   ],
   "agent_ladder": {
@@ -68,5 +68,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 0 complete — main reset to origin/main (47e192b); WIP on feature/v1-closure-phase2-hardening; Fisher scripts/json left untracked."
+  "notes": "Slice 3 complete — Linux/Wayland hotkey fallbacks + global-shortcut capabilities + Rehearsal Ctrl+Enter doc listener; commands.rs OAuth WIP left unstaged."
 }
