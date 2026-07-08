@@ -2,9 +2,9 @@
   "current_milestone": "v1-closure-phase2",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/v1-closure-phase2-hardening" },
-  "current_slice": 7,
-  "completed_slices": [0, 1, 2, 3, 4, 5, 6],
-  "current_task_id": "v1p2-s7-consolidated-review",
+  "current_slice": 9,
+  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8],
+  "current_task_id": "v1p2-s9-pr-ci-merge",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -21,6 +21,16 @@
       "gate": "L2 System audio loopback",
       "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
       "notes": "Retest after pulse-first fix; YouTube → INTERVIEWER only"
+    },
+    {
+      "gate": "L3 Hotkeys with focus",
+      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
+      "notes": "Retest after slice 3 Linux fallbacks"
+    },
+    {
+      "gate": "L4 Hotkeys without focus",
+      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
+      "notes": "Document Wayland outcome; accepted P2 if fail"
     },
     {
       "gate": "L5 OBS / screen capture",
@@ -60,7 +70,7 @@
     {
       "gate": "Wayland hotkeys unfocused",
       "doc": "Accepted P2",
-      "notes": "Do not invent portal fix in v1; focused Ctrl+Shift+Space / F8 fallbacks shipped in slice 3"
+      "notes": "Do not invent portal fix in v1"
     }
   ],
   "agent_ladder": {
@@ -68,5 +78,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 6 complete — local docs pass (ROADMAP, system design §12/§14/§16.2/§29/Linux loopback, STRATEGY_B). docs/ gitignored, never staged. Next: slice 7 consolidated review."
+  "notes": "Slices 0-8 complete. Opening PR for CI merge phase."
 }
