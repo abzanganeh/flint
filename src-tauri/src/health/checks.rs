@@ -683,9 +683,7 @@ pub fn check_system_audio_isolation() -> HealthCheckResult {
                 return warn(
                     HealthCheck::SystemAudioIsolation,
                     "Could not resolve a system audio (loopback) device.",
-                    format!(
-                        "{e} This will block starting a live session until resolved."
-                    ),
+                    format!("{e} This will block starting a live session until resolved."),
                 );
             }
         };

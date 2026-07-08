@@ -102,12 +102,14 @@ fn register_trigger_shortcut<R: Runtime>(
     label: &'static str,
     app_trigger: AppHandle<R>,
 ) {
-    match app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            info!(event = "hotkey_trigger", shortcut = label);
-            fire_trigger(&app_trigger);
-        }
-    }) {
+    match app
+        .global_shortcut()
+        .on_shortcut(shortcut, move |_app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                info!(event = "hotkey_trigger", shortcut = label);
+                fire_trigger(&app_trigger);
+            }
+        }) {
         Ok(()) => info!(shortcut = label, event = "hotkey_register_ok"),
         Err(e) => warn!(shortcut = label, error = %e, event = "hotkey_register_failed"),
     }
@@ -119,12 +121,14 @@ fn register_panic_shortcut<R: Runtime>(
     label: &'static str,
     app_panic: AppHandle<R>,
 ) {
-    match app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-        if event.state() == ShortcutState::Pressed {
-            info!(event = "hotkey_panic_hide", shortcut = label);
-            toggle_overlay(&app_panic);
-        }
-    }) {
+    match app
+        .global_shortcut()
+        .on_shortcut(shortcut, move |_app, _shortcut, event| {
+            if event.state() == ShortcutState::Pressed {
+                info!(event = "hotkey_panic_hide", shortcut = label);
+                toggle_overlay(&app_panic);
+            }
+        }) {
         Ok(()) => info!(shortcut = label, event = "hotkey_register_ok"),
         Err(e) => warn!(shortcut = label, error = %e, event = "hotkey_register_failed"),
     }

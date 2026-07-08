@@ -83,8 +83,7 @@ fn headphones_likely_in_use() -> bool {
     let Some(sink) = pactl_default_sink() else {
         return false;
     };
-    sink_name_indicates_headphones(&sink)
-        || sink_active_port_indicates_headphones(&sink)
+    sink_name_indicates_headphones(&sink) || sink_active_port_indicates_headphones(&sink)
 }
 
 #[cfg(target_os = "linux")]
@@ -201,7 +200,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn analog_active_port_headphones() {
-        let block = "Name: alsa_output.pci.analog-stereo\n\tActive Port: analog-output-headphones\n";
+        let block =
+            "Name: alsa_output.pci.analog-stereo\n\tActive Port: analog-output-headphones\n";
         assert!(parse_active_port_headphones(block));
     }
 
