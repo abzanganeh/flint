@@ -1,35 +1,72 @@
 {
-  "current_milestone": "v1-closure-phase1",
-  "milestone_status": "awaiting_merge",
-  "milestone_branch": { "flint": "feature/v1-closure-deploy-readiness" },
-  "current_slice": 16,
-  "completed_slices": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-  "current_task_id": "v1p1-s16-pr-merge",
-  "loop_stopped": true,
-  "ci_fix_attempts": 3,
+  "current_milestone": "v1-closure-phase2",
+  "milestone_status": "in_progress",
+  "milestone_branch": { "flint": "feature/v1-closure-phase2-hardening" },
+  "current_slice": 1,
+  "completed_slices": [0],
+  "current_task_id": "v1p2-s1-audio-isolation",
+  "loop_stopped": false,
+  "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {
-    "flint": "https://github.com/abzanganeh/flint/pull/32"
-  },
+  "open_prs": {},
   "manual_gate_backlog": [
     {
-      "slice": "v1p1-s10-eval-baseline",
-      "reason": "Eval smoke conciseness gate flaky with Ollama judge (80-90% pass on 10-question smoke). Full baseline committed; manual re-run with --update-baseline before prompt merges."
+      "gate": "L1 HealthCheck screenshot",
+      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
+      "notes": "Include system_audio_isolation"
     },
     {
-      "slice": "v1p1-s12-installer-signing-prep",
-      "reason": "Signed/notarized macOS + Authenticode Windows installers require Apple Developer ID and Windows code-signing certs. CI wired in release.yml; secrets + verification checklist in tests/manual-qa/installer-signing-runbook.md."
+      "gate": "L2 System audio loopback",
+      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
+      "notes": "Retest after pulse-first fix; YouTube → INTERVIEWER only"
     },
     {
-      "slice": "v1p1-s13-hosted-supabase-prep",
-      "reason": "Cloud Supabase project must be created in dashboard. Migrations verified locally (3/3 clean, RLS on all 9 tables). Runbook: tests/manual-qa/hosted-supabase-runbook.md."
+      "gate": "L5 OBS / screen capture",
+      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
+      "notes": "Document Wayland outcome"
     },
     {
-      "slice": "v1p1-s14-stealth-audio-manual-gate",
-      "reason": "BlackHole/WASAPI/OBS/Wayland hotkey validation needs real hardware per platform. Known Wayland unfocused hotkey limitation (P2, M3_LINUX_FINDINGS) — no v1 code fix. Runbook: tests/manual-qa/stealth-audio-validation-runbook.md."
+      "gate": "Installer signing / notarization",
+      "doc": "tests/manual-qa/installer-signing-runbook.md",
+      "notes": "Needs Apple + Windows certs"
+    },
+    {
+      "gate": "Hosted Supabase project",
+      "doc": "tests/manual-qa/hosted-supabase-runbook.md",
+      "notes": "Human in dashboard"
+    },
+    {
+      "gate": "M8 device WER",
+      "doc": "M8_INPUT_QUALITY.md",
+      "notes": "Calibration thresholds"
+    },
+    {
+      "gate": "M10 live Zoom/Teams + phone Ctrl+Q",
+      "doc": "M10_LIVE_RELIABILITY.md",
+      "notes": "Device"
+    },
+    {
+      "gate": "M6 provider P1–P3",
+      "doc": "M6_LLM_PROVIDERS.md",
+      "notes": "Device / keys"
+    },
+    {
+      "gate": "M7 macOS BlackHole + Windows WASAPI",
+      "doc": "ROADMAP M7",
+      "notes": "Device"
+    },
+    {
+      "gate": "Wayland hotkeys unfocused",
+      "doc": "Accepted P2",
+      "notes": "Do not invent portal fix in v1"
     }
   ],
-  "notes": "Slice 16 complete — all 11 PR #32 checks green (Windows pass 25m44s after diarizer stub). PR mergeable; awaiting user approval to merge to main."
+  "agent_ladder": {
+    "simple": "composer-2.5-fast",
+    "medium": "grok-4.5-fast-xhigh",
+    "complex": "claude-sonnet-5-thinking-high"
+  },
+  "notes": "Slice 0 complete — main reset to origin/main (47e192b); WIP on feature/v1-closure-phase2-hardening; Fisher scripts/json left untracked."
 }
