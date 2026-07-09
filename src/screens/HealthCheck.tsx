@@ -27,6 +27,7 @@ const CHECK_LABELS: Record<HealthCheckName, string> = {
   global_hotkey: "Global hotkey",
   panic_hotkey: "Panic hotkey",
   echo_cancellation: "Echo cancellation",
+  system_audio_isolation: "System audio isolation",
 };
 
 type OsFamily = "linux" | "macos" | "windows" | "other";

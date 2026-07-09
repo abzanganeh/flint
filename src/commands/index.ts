@@ -23,7 +23,8 @@ export type HealthCheckName =
   | "supabase_connection"
   | "global_hotkey"
   | "panic_hotkey"
-  | "echo_cancellation";
+  | "echo_cancellation"
+  | "system_audio_isolation";
 
 export type CheckStatus = "pass" | "warn" | "fail";
 

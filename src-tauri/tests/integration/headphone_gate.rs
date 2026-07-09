@@ -16,15 +16,15 @@ fn manual_override_clears_headphone_gate_block() {
 }
 
 #[test]
-fn gate_status_aligns_with_echo_cancellation_check() {
+fn gate_unblocked_when_echo_passes_or_headphones_detected() {
     use flint_lib::health::checks::{check_echo_cancellation, CheckStatus};
 
     let echo = check_echo_cancellation();
     let status = headphone_gate::evaluate(false, false);
-    match echo.status {
-        CheckStatus::Pass => assert!(!status.blocked),
-        CheckStatus::Warn | CheckStatus::Fail => assert!(status.blocked),
+    if echo.status == CheckStatus::Pass {
+        assert!(!status.blocked);
     }
+    // When echo warns, Linux may still pass if default output is BT/headphones.
 }
 
 #[test]

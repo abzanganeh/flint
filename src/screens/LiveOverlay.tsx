@@ -179,6 +179,11 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       const gate = await getHeadphoneGateStatus();
       if (gate.blocked) {
         setHeadphoneGate(gate);
+        setError(
+          "Flint still sees laptop speakers as the default output (or echo-cancel is off). " +
+            "In Settings → Sound, pick your headset as Output, then retry — or use " +
+            "Continue with speakers anyway.",
+        );
         setStarting(false);
         return;
       }

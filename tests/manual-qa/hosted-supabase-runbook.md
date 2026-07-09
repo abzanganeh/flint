@@ -101,10 +101,12 @@ In **Authentication → URL configuration**:
 | Setting | Value |
 | --- | --- |
 | Site URL | Your production landing or app origin (e.g. `https://flint.app`) |
-| Redirect URLs | `flint://auth/callback` (required for desktop OAuth) |
-| | Production web callback if used (e.g. `https://flint.app/oauth-callback.html`) |
+| Redirect URLs | `flint://auth/callback` (required for release desktop OAuth) |
+| | `http://127.0.0.1:1420/oauth-callback.html` (required for **local dev** — Vite bridge shows “Open Flint” + Ctrl+W) |
 
 Local dev mirrors this in `supabase/config.toml` → `[auth].additional_redirect_urls`.
+
+**Do not** set `FLINT_OAUTH_REDIRECT_URI=flint://auth/callback` during `npm run tauri dev` — the browser lands on a blank/spinning page with no bridge UI. Leave `FLINT_OAUTH_REDIRECT_URI` unset in `.env` (debug builds default to the Vite bridge).
 
 ### OAuth providers (optional)
 
