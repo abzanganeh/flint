@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::Context as AnyhowContext;
 use secrecy::{ExposeSecret, SecretString};
@@ -75,6 +75,53 @@ const NOT_LOGGED_IN: &str = "You are not logged in. Please sign in again.";
 const NO_ACTIVE_SESSION: &str = "No active session. Please create a session first.";
 const SESSION_ID_MISMATCH: &str =
     "Session ID does not match the active session. Refresh and try again.";
+
+const OAUTH_CODE_DEDUPE_SECS: u64 = 120;
+
+struct RecentOAuthCode {
+    code: String,
+    seen_at: Instant,
+}
+
+static OAUTH_CALLBACK_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+static RECENT_OAUTH_CODE: OnceLock<Mutex<Option<RecentOAuthCode>>> = OnceLock::new();
+
+fn oauth_callback_mutex() -> &'static Mutex<()> {
+    OAUTH_CALLBACK_MUTEX.get_or_init(|| Mutex::new(()))
+}
+
+fn recent_oauth_code() -> &'static Mutex<Option<RecentOAuthCode>> {
+    RECENT_OAUTH_CODE.get_or_init(|| Mutex::new(None))
+}
+
+/// Returns `true` when this auth code should be processed; `false` for duplicates
+/// within the dedupe window (Linux dev: single-instance argv + deep-link plugin).
+fn claim_oauth_auth_code(code: &str) -> bool {
+    let mut guard = recent_oauth_code()
+        .lock()
+        .expect("oauth dedupe lock poisoned");
+    let now = Instant::now();
+    if let Some(ref recent) = *guard {
+        if recent.code == code
+            && now.duration_since(recent.seen_at) < Duration::from_secs(OAUTH_CODE_DEDUPE_SECS)
+        {
+            debug!(event = "oauth_callback_duplicate_ignored");
+            return false;
+        }
+    }
+    *guard = Some(RecentOAuthCode {
+        code: code.to_string(),
+        seen_at: now,
+    });
+    true
+}
+
+#[cfg(test)]
+fn reset_oauth_auth_code_dedupe_for_tests() {
+    *recent_oauth_code()
+        .lock()
+        .expect("oauth dedupe lock poisoned") = None;
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Error helpers
@@ -288,18 +335,28 @@ pub async fn process_oauth_callback_url<R: Runtime>(app: &AppHandle<R>, url: &st
             }
         }
         AuthCallback::Code(code) => {
-            let verifier = match keychain::take_oauth_code_verifier() {
-                Ok(Some(v)) => v,
-                _ => {
-                    emit_auth_oauth_error(
-                        app,
-                        AuthOAuthErrorPayload {
-                            message: "OAuth session expired. Please try again.".to_string(),
-                        },
-                    );
-                    return true;
+            if !claim_oauth_auth_code(&code.code) {
+                return true;
+            }
+
+            let verifier = {
+                let _guard = oauth_callback_mutex()
+                    .lock()
+                    .expect("oauth callback mutex poisoned");
+                match keychain::take_oauth_code_verifier() {
+                    Ok(Some(v)) => v,
+                    _ => {
+                        emit_auth_oauth_error(
+                            app,
+                            AuthOAuthErrorPayload {
+                                message: "OAuth session expired. Please try again.".to_string(),
+                            },
+                        );
+                        return true;
+                    }
                 }
             };
+
             match state
                 .supabase_auth
                 .exchange_pkce_code(&code.code, &verifier)
@@ -5550,6 +5607,31 @@ pub struct MockTurnDto {
     pub coach_json: String,
     pub suggested: String,
     pub score: u8,
+}
+
+#[cfg(test)]
+mod oauth_dedupe_tests {
+    use super::{claim_oauth_auth_code, reset_oauth_auth_code_dedupe_for_tests};
+
+    #[test]
+    fn first_auth_code_is_claimed() {
+        reset_oauth_auth_code_dedupe_for_tests();
+        assert!(claim_oauth_auth_code("code-abc"));
+    }
+
+    #[test]
+    fn duplicate_auth_code_within_window_is_rejected() {
+        reset_oauth_auth_code_dedupe_for_tests();
+        assert!(claim_oauth_auth_code("code-dup"));
+        assert!(!claim_oauth_auth_code("code-dup"));
+    }
+
+    #[test]
+    fn different_auth_codes_both_claimed() {
+        reset_oauth_auth_code_dedupe_for_tests();
+        assert!(claim_oauth_auth_code("code-one"));
+        assert!(claim_oauth_auth_code("code-two"));
+    }
 }
 
 #[cfg(test)]
