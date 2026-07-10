@@ -82,7 +82,10 @@ impl CreditClient for NoopCreditClient {
     }
 }
 
-/// HTTP client for Smart Resume `/api/credits/*` (Strategy B §3.2 scaffold).
+//! HTTP client for Smart Resume `/api/credits/*` (Strategy B §3.2 scaffold).
+//!
+//! Auth note: sends the Flint desktop bearer from keychain (Supabase session today).
+//! Full Phase 3 SSO will align JWT issuers; until then live deduct may 401 against SR.
 pub struct SmartResumeCreditClient {
     http: reqwest::Client,
     base_url: String,
