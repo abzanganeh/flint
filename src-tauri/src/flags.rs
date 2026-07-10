@@ -74,21 +74,22 @@ pub struct FeatureFlag {
 /// Compiled-in baseline. Keep this short — every entry has to be reasoned
 /// about on every launch. Real flag values come from Supabase at runtime.
 fn default_flags() -> Vec<FeatureFlag> {
-    vec![    FeatureFlag {
-        name: "post_session_summary".to_string(),
-        enabled: true,
-        allowed_plans: vec![Plan::Free, Plan::Premium],
-        rollout_percentage: 100,
-        ga: true,
-    },
-    FeatureFlag {
-        name: "metered_credits_enabled".to_string(),
-        enabled: false,
-        allowed_plans: vec![Plan::Free, Plan::Premium],
-        rollout_percentage: 0,
-        ga: false,
-    },
-]
+    vec![
+        FeatureFlag {
+            name: "post_session_summary".to_string(),
+            enabled: true,
+            allowed_plans: vec![Plan::Free, Plan::Premium],
+            rollout_percentage: 100,
+            ga: true,
+        },
+        FeatureFlag {
+            name: "metered_credits_enabled".to_string(),
+            enabled: false,
+            allowed_plans: vec![Plan::Free, Plan::Premium],
+            rollout_percentage: 0,
+            ga: false,
+        },
+    ]
 }
 
 /// Wire format for the cached file on disk + the Supabase response.

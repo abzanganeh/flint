@@ -59,7 +59,10 @@ impl CreditClient for NoopCreditClient {
     }
 
     async fn deduct(&self, action: &str, _session_id: &str) -> Result<DeductResult> {
-        debug!(event = "credit_deduct_noop", action, "metered credits disabled");
+        debug!(
+            event = "credit_deduct_noop",
+            action, "metered credits disabled"
+        );
         Ok(DeductResult {
             new_balance: i32::MAX / 4,
             transaction_id: None,
@@ -69,9 +72,7 @@ impl CreditClient for NoopCreditClient {
     async fn hold(&self, session_id: &str, amount: i32) -> Result<HoldId> {
         debug!(
             event = "credit_hold_noop",
-            session_id,
-            amount,
-            "metered credits disabled"
+            session_id, amount, "metered credits disabled"
         );
         Ok(Uuid::nil())
     }
@@ -134,10 +135,7 @@ impl SmartResumeCreditClient {
         let url = format!("{}{path}", self.base_url);
         self.http
             .get(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", token.expose_secret()),
-            )
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
             .send()
             .await
             .context("Smart Resume credit request failed")
@@ -148,10 +146,7 @@ impl SmartResumeCreditClient {
         let url = format!("{}{path}", self.base_url);
         self.http
             .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", token.expose_secret()),
-            )
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
             .json(body)
             .send()
             .await
@@ -239,10 +234,7 @@ impl CreditClient for SmartResumeCreditClient {
     }
 
     async fn hold(&self, session_id: &str, amount: i32) -> Result<HoldId> {
-        let body = HoldRequest {
-            session_id,
-            amount,
-        };
+        let body = HoldRequest { session_id, amount };
         let resp = self.authed_post("/api/credits/hold", &body).await?;
         if !resp.status().is_success() {
             anyhow::bail!("credit hold failed");

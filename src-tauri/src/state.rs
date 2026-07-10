@@ -20,7 +20,9 @@ use crate::transcription::hybrid::SystemTranscriptBuffer;
 
 use crate::auth_session::restore_auth_from_keychain;
 use crate::cost::CostTracker;
-use crate::credit_client::{build_credit_client, CreditClient, KeychainBearerSource, NoopCreditClient};
+use crate::credit_client::{
+    build_credit_client, CreditClient, KeychainBearerSource, NoopCreditClient,
+};
 use crate::digest::Digest;
 use crate::flags::{cache_path_in, FeatureFlagClient};
 use crate::interfaces::auth::{AuthInterface, AuthToken};
