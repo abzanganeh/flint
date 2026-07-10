@@ -22,13 +22,7 @@ import "./SessionDesign.css";
 // Constants
 // ──────────────────────────────────────────────────────────────────────────────
 
-const SESSION_TYPES = [
-  { value: "interview", label: "Interview" },
-  { value: "meeting", label: "Meeting" },
-  { value: "presentation", label: "Presentation" },
-  { value: "negotiation", label: "Negotiation" },
-  { value: "other", label: "Other" },
-];
+const SESSION_TYPES = [{ value: "interview", label: "Job interview" }];
 
 const MIN_REQUIRED_CHARS = 50;
 const CHAR_WARN_THRESHOLD = 3_000;
@@ -414,6 +408,9 @@ export default function SessionDesign({
                 <option key={t.value} value={t.value}>{t.label}</option>
               ))}
             </select>
+            <p className="sd-hint">
+              Meeting, presentation, and negotiation templates are planned — interview only in v1.
+            </p>
           </div>
         </div>
 

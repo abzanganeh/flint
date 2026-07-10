@@ -11,7 +11,7 @@ use serde::Serialize;
 use crate::health::hardware::{self, WhisperModel};
 use crate::keychain;
 use crate::llm::stack;
-use crate::supabase::resolve_supabase_config;
+use crate::supabase::{resolve_supabase_config, SupabaseConfig};
 
 #[cfg(target_os = "linux")]
 use cpal::traits::DeviceTrait;
@@ -66,7 +66,7 @@ pub async fn run_health_check(
     plugins: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Vec<HealthCheckResult> {
     let profile = hardware::assess_hardware();
-    let supabase_url = resolve_supabase_config(plugins).map(|cfg| cfg.url);
+    let supabase_config = resolve_supabase_config(plugins);
 
     vec![
         check_microphone_access(),
@@ -78,7 +78,7 @@ pub async fn run_health_check(
         check_ollama_availability().await,
         check_os_keychain(),
         check_local_sqlite(),
-        check_supabase_connection(supabase_url.as_deref()).await,
+        check_supabase_connection(supabase_config.as_ref()).await,
         check_global_hotkey(),
         check_panic_hotkey(),
         check_echo_cancellation(),
@@ -458,15 +458,16 @@ fn check_local_sqlite() -> HealthCheckResult {
     }
 }
 
-async fn check_supabase_connection(supabase_url: Option<&str>) -> HealthCheckResult {
-    let Some(base_url) = supabase_url else {
+async fn check_supabase_connection(config: Option<&SupabaseConfig>) -> HealthCheckResult {
+    let Some(cfg) = config else {
         return fail(
             HealthCheck::SupabaseConnection,
-            "Supabase URL is not configured.",
+            "Supabase URL and anon key are not configured.",
             "Export FLINT_SUPABASE_URL and FLINT_SUPABASE_ANON_KEY before `npm run tauri dev`, or set plugins.supabase in tauri.conf.json.",
         );
     };
 
+    let base_url = cfg.url.trim_end_matches('/');
     let health_url = format!("{base_url}/auth/v1/health");
     let client = match Client::builder()
         .timeout(Duration::from_secs(SUPABASE_HEALTH_TIMEOUT_SECS))
@@ -482,14 +483,25 @@ async fn check_supabase_connection(supabase_url: Option<&str>) -> HealthCheckRes
         }
     };
 
-    match client.get(&health_url).send().await {
+    match client
+        .get(&health_url)
+        .header("apikey", &cfg.anon_key)
+        .header("Authorization", format!("Bearer {}", cfg.anon_key))
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => pass(
             HealthCheck::SupabaseConnection,
             "Supabase auth service is reachable.",
         ),
+        Ok(resp) if resp.status() == reqwest::StatusCode::UNAUTHORIZED => fail(
+            HealthCheck::SupabaseConnection,
+            "Supabase anon key was rejected (401).",
+            "Verify FLINT_SUPABASE_ANON_KEY or plugins.supabase.anonKey matches your project's anon/public key in the Supabase dashboard.",
+        ),
         Ok(resp) if resp.status().is_client_error() => fail(
             HealthCheck::SupabaseConnection,
-            "Supabase URL responded with an error.",
+            format!("Supabase URL responded with HTTP {}.", resp.status()),
             "Verify plugins.supabase.url in tauri.conf.json points to your Supabase project.",
         ),
         Ok(_) => warn(
