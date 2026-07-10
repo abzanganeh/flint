@@ -243,6 +243,13 @@ function AccountTab({
         </section>
       )}
 
+      <section className="settings-tab__section" data-testid="credits-scaffold">
+        <h4 className="settings-tab__subheading">Credits</h4>
+        <p className="settings-tab__description">
+          Platform credits (coming soon) — metered billing is scaffold-only and disabled by default in v1.
+        </p>
+      </section>
+
       <section className="settings-tab__section">
         <h4 className="settings-tab__subheading">Display zoom</h4>
         <p className="settings-tab__description">

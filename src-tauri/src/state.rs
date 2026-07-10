@@ -20,6 +20,9 @@ use crate::transcription::hybrid::SystemTranscriptBuffer;
 
 use crate::auth_session::restore_auth_from_keychain;
 use crate::cost::CostTracker;
+use crate::credit_client::{
+    build_credit_client, CreditClient, KeychainBearerSource, NoopCreditClient,
+};
 use crate::digest::Digest;
 use crate::flags::{cache_path_in, FeatureFlagClient};
 use crate::interfaces::auth::{AuthInterface, AuthToken};
@@ -171,6 +174,11 @@ pub struct AppState {
     /// `RwLock` so UI panels can call `is_feature_enabled` on every render.
     pub feature_flags: Arc<FeatureFlagClient>,
 
+    /// v1 default — no remote credit calls.
+    pub noop_credit_client: Arc<dyn CreditClient>,
+    /// Smart Resume metered client (used when `metered_credits_enabled` is on).
+    pub metered_credit_client: Arc<dyn CreditClient>,
+
     /// Stable ONNX embedding model cache (`<app_data>/fastembed_cache`).
     embedder_cache_dir: PathBuf,
 
@@ -253,6 +261,11 @@ impl AppState {
         let persister = Arc::clone(&persistence) as Arc<dyn crate::session::state::StatePersister>;
         let state_machine = Arc::new(Mutex::new(SessionStateMachine::with_persister(persister)));
 
+        let feature_flags = Arc::new(FeatureFlagClient::load(flags_cache_path));
+        let bearer_source = Arc::new(KeychainBearerSource);
+        let metered_credit_client = build_credit_client(bearer_source);
+        let noop_credit_client: Arc<dyn CreditClient> = Arc::new(NoopCreditClient);
+
         Ok(Self {
             auth,
             supabase_auth,
@@ -276,7 +289,9 @@ impl AppState {
             mock_tasks: Mutex::new(None),
             global_kb,
             cost_tracker: Arc::new(CostTracker::new()),
-            feature_flags: Arc::new(FeatureFlagClient::load(flags_cache_path)),
+            feature_flags,
+            noop_credit_client,
+            metered_credit_client,
             embedder_cache_dir,
             pending_import_token,
             overlay_panic_hidden: std::sync::Mutex::new(false),
@@ -360,6 +375,25 @@ impl AppState {
 
     pub async fn auth_token(&self) -> Option<AuthToken> {
         self.auth_token.read().await.clone()
+    }
+
+    /// Active credit client — BYOK and flag-off paths use the noop client.
+    pub fn credit_client_for(
+        &self,
+        ctx: &crate::flags::EvaluationContext,
+        byok: bool,
+    ) -> Arc<dyn CreditClient> {
+        if byok {
+            return Arc::clone(&self.noop_credit_client);
+        }
+        if self
+            .feature_flags
+            .is_enabled("metered_credits_enabled", ctx)
+        {
+            Arc::clone(&self.metered_credit_client)
+        } else {
+            Arc::clone(&self.noop_credit_client)
+        }
     }
 
     /// Load keychain tokens into memory, refreshing if the access token expired.

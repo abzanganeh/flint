@@ -5,6 +5,7 @@ pub mod calibration;
 mod commands;
 pub mod confidence;
 pub mod cost;
+pub mod credit_client;
 pub mod deep_link;
 pub mod digest;
 mod dto;

@@ -2021,6 +2021,27 @@ pub async fn run_rehearsal_turn(
         *turn
     };
 
+    let eval_ctx = evaluation_context(&state).await;
+    let credit_client = state.credit_client_for(&eval_ctx, crate::billing::has_byok_llm_key());
+    match credit_client.get_balance().await {
+        Ok(balance) => {
+            info!(
+                event = "credit_balance_prefetch",
+                balance,
+                session_id = %sid,
+                "rehearsal credit balance (scaffold)"
+            );
+        }
+        Err(e) => {
+            warn!(
+                event = "credit_balance_prefetch_failed",
+                error = %e,
+                session_id = %sid,
+                "credit balance unavailable — rehearsal continues"
+            );
+        }
+    }
+
     let question_text = if rephrase.unwrap_or(false) {
         format!("Rephrase your previous answer to: {question}")
     } else {
