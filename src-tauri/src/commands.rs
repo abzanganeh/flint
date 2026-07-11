@@ -3899,8 +3899,11 @@ fn apply_session_stats(summary_json: &str, stats: SessionStats) -> String {
 pub async fn generate_session_summary(
     app: AppHandle,
     state: State<'_, AppState>,
+    session_id: Option<String>,
 ) -> Result<String, String> {
-    let sid = {
+    let sid = if let Some(id) = session_id {
+        Uuid::parse_str(&id).map_err(|e| format!("Invalid session_id: {e}"))?
+    } else {
         let machine = state.state_machine.lock().await;
         machine.session_id().ok_or("No session to summarise.")?
     };
@@ -3981,7 +3984,7 @@ pub async fn generate_session_summary(
     };
 
     let summary = match failover.complete(prompt, config, &app, 800).await {
-        Ok(text) => text,
+        Ok(text) => normalize_summary_for_ui(&text),
         Err(e) => {
             warn!(
                 session_id = %sid,
@@ -4001,6 +4004,11 @@ pub async fn generate_session_summary(
     // The LLM cannot reliably count Q/A from a fragmented transcript, so the
     // authoritative stats from persisted responses always win.
     Ok(apply_session_stats(&summary, stats))
+}
+
+/// Normalize LLM summary output to parseable JSON for the UI.
+fn normalize_summary_for_ui(raw: &str) -> String {
+    crate::session::summary_parse::normalize_llm_summary_json(raw, &summary_unavailable_json())
 }
 
 /// One transcript line for the Session Review screen.
@@ -5734,7 +5742,8 @@ mod review_tests {
 #[cfg(test)]
 mod summary_tests {
     use super::{
-        apply_session_stats, compute_session_stats, summary_unavailable_json, SessionStats,
+        apply_session_stats, compute_session_stats, normalize_summary_for_ui,
+        summary_unavailable_json, SessionStats,
     };
     use crate::session::persistence::{Response, ResponseType};
     use uuid::Uuid;
@@ -5813,5 +5822,25 @@ mod summary_tests {
         let garbage = "not json";
         let merged = apply_session_stats(garbage, SessionStats::default());
         assert_eq!(merged, garbage);
+    }
+
+    #[test]
+    fn normalize_summary_strips_markdown_and_applies_stats_path() {
+        let raw = r#"```json
+{"questions_count":99,"confidence_distribution":{"high":0,"medium":0,"low":0},"one_line_summary":"narrative"}
+```"#;
+        let normalized = normalize_summary_for_ui(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&normalized).expect("valid JSON");
+        assert_eq!(parsed["one_line_summary"], "narrative");
+    }
+
+    #[test]
+    fn normalize_summary_falls_back_on_prose() {
+        let normalized = normalize_summary_for_ui("Here is a prose summary with no JSON.");
+        let parsed: serde_json::Value = serde_json::from_str(&normalized).expect("valid JSON");
+        assert!(parsed["one_line_summary"]
+            .as_str()
+            .unwrap()
+            .contains("Retry from Past Sessions"));
     }
 }

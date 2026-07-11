@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { triggerResponse } from "../commands";
+import { copyTextToClipboard, triggerResponse } from "../commands";
 import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
 import type { Speaker } from "../types";
 
@@ -15,7 +15,7 @@ const AUDIO_GAP_PREFIX = "[audio gap";
 /// dozens of tiny fragments per sentence. The backend `timestamp` is a
 /// relative elapsed value and unreliable for gap detection, so we use arrival
 /// time on the UI side.
-const UTTERANCE_MERGE_WINDOW_MS = 4000;
+const UTTERANCE_MERGE_WINDOW_MS = 8000;
 
 /// How long the "Asking…" affordance stays visible after clicking a Q chip
 /// before the chip resets to idle. The user can re-click sooner than this by
@@ -52,14 +52,6 @@ function joinFragments(existing: string, addition: string): string {
   return needsSpace ? `${existing} ${trimmed}` : `${existing}${trimmed}`;
 }
 
-/**
- * Split an interviewer utterance into individual sentences for Q-per-sentence.
- *
- * The matcher captures runs of non-terminal characters followed by one or more
- * `.?!` (greedily, so trailing "?!" stays attached), and a final tail without
- * terminal punctuation as one in-progress sentence. Whitespace is trimmed and
- * empty / overly-short fragments are dropped.
- */
 export function splitIntoSentences(text: string): string[] {
   const trimmed = text.trim();
   if (trimmed.length === 0) return [];
@@ -68,6 +60,16 @@ export function splitIntoSentences(text: string): string[] {
     .map((s) => s.trim())
     .filter((s) => s.length >= Q_MIN_SENTENCE_CHARS);
   return pieces.length === 0 ? [trimmed] : pieces;
+}
+
+export function linesToPlainText(lines: TranscriptLine[]): string {
+  return lines
+    .filter((line) => !isAudioGap(line.text))
+    .map((line) => {
+      const label = line.speaker === "System" ? "INTERVIEWER" : "YOU";
+      return `${label}: ${line.text.trim()}`;
+    })
+    .join("\n\n");
 }
 
 export function appendLine(
@@ -130,6 +132,8 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
   const [lines, setLines] = useState<TranscriptLine[]>([]);
   const [askingKey, setAskingKey] = useState<string | null>(null);
   const [askError, setAskError] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const askingTimerRef = useRef<number | null>(null);
   // Per-instance counter — avoids shared module-level mutable state.
@@ -168,8 +172,8 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
   }, []);
 
   const handleAsk = useCallback(
-    async (key: string, sentence: string) => {
-      const text = sentence.trim();
+    async (key: string, utterance: string) => {
+      const text = utterance.trim();
       if (text.length === 0) return;
 
       setAskError(null);
@@ -195,6 +199,23 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
     },
     [sessionId],
   );
+
+  const handleCopyTranscript = useCallback(() => {
+    setCopyError(null);
+    const text = linesToPlainText(lines);
+    if (text.length === 0) {
+      setCopyError("Nothing to copy yet.");
+      return;
+    }
+    void copyTextToClipboard(text)
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch((e: unknown) => {
+        setCopyError(String(e));
+      });
+  }, [lines]);
 
   // Snap to bottom on every update. Using "instant" instead of "smooth"
   // because live transcripts receive bursts of chunks — smooth animations
@@ -231,18 +252,55 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
         }}
       >
         <span>Transcript</span>
-        <span
-          style={{
-            color: "#4b5563",
-            fontSize: "10px",
-            letterSpacing: "0.04em",
-            textTransform: "none",
-          }}
-          title="Click Q on any interviewer sentence to send only that sentence to the AI."
-        >
-          Click Q to answer that sentence
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button
+            type="button"
+            data-testid="copy-transcript-btn"
+            onClick={handleCopyTranscript}
+            disabled={lines.length === 0}
+            style={{
+              color: copied ? "#22c55e" : "#6b7280",
+              fontSize: "10px",
+              letterSpacing: "0.04em",
+              textTransform: "none",
+              background: "transparent",
+              border: "1px solid #1f2937",
+              borderRadius: 4,
+              padding: "2px 8px",
+              cursor: lines.length === 0 ? "default" : "pointer",
+            }}
+            title="Copy the full transcript without selecting text"
+          >
+            {copied ? "Copied" : "Copy"}
+          </button>
+          <span
+            style={{
+              color: "#4b5563",
+              fontSize: "10px",
+              letterSpacing: "0.04em",
+              textTransform: "none",
+            }}
+            title="Q sends the full merged interviewer utterance (same scope as Ctrl+Q for that burst)."
+          >
+            Q = full question
+          </span>
+        </div>
       </div>
+
+      {copyError && (
+        <div
+          data-testid="transcript-copy-error"
+          style={{
+            padding: "6px 12px",
+            color: "#ef4444",
+            fontSize: "11px",
+            borderBottom: "1px solid #1e2028",
+            backgroundColor: "#1a0d0d",
+          }}
+        >
+          {copyError}
+        </div>
+      )}
 
       {askError && (
         <div
@@ -300,7 +358,7 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
 interface TranscriptLineRowProps {
   line: TranscriptLine;
   askingKey: string | null;
-  onAsk: (key: string, sentence: string) => void;
+  onAsk: (key: string, utterance: string) => void;
 }
 
 const TranscriptLineRow = ({ line, askingKey, onAsk }: TranscriptLineRowProps) => {
@@ -314,7 +372,10 @@ const TranscriptLineRow = ({ line, askingKey, onAsk }: TranscriptLineRowProps) =
     return <UserBubble line={line} />;
   }
 
-  const sentences = splitIntoSentences(line.text);
+  const key = String(line.id);
+  const status = askingKey === key ? "asking" : "idle";
+  const utterance = line.text.trim();
+  const showQ = utterance.length >= Q_MIN_SENTENCE_CHARS;
 
   return (
     <div
@@ -327,81 +388,60 @@ const TranscriptLineRow = ({ line, askingKey, onAsk }: TranscriptLineRowProps) =
       }}
     >
       <SpeakerLabel isSystem corrected={line.corrected} />
-      {sentences.map((sentence, idx) => {
-        const key = `${line.id}:${idx}`;
-        const status = askingKey === key ? "asking" : "idle";
-        return (
-          <InterviewerSentence
-            key={key}
-            sentence={sentence}
-            status={status}
-            onClick={() => onAsk(key, sentence)}
-          />
-        );
-      })}
-    </div>
-  );
-};
-
-interface InterviewerSentenceProps {
-  sentence: string;
-  status: "idle" | "asking";
-  onClick: () => void;
-}
-
-const InterviewerSentence = ({ sentence, status, onClick }: InterviewerSentenceProps) => {
-  return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "row",
-        alignItems: "flex-start",
-        justifyContent: "flex-end",
-        gap: 6,
-        maxWidth: "90%",
-      }}
-    >
-      <span
+      <div
         style={{
-          color: "#e5e7eb",
-          lineHeight: 1.5,
-          textAlign: "right",
-          wordBreak: "break-word",
-          flex: 1,
+          display: "flex",
+          flexDirection: "row",
+          alignItems: "flex-start",
+          justifyContent: "flex-end",
+          gap: 6,
+          maxWidth: "90%",
         }}
       >
-        {sentence}
-      </span>
-      <button
-        type="button"
-        data-testid="q-chip"
-        data-status={status}
-        onClick={onClick}
-        disabled={status === "asking"}
-        title={
-          status === "asking"
-            ? "Asking the AI to answer this sentence…"
-            : "Send only this sentence to the AI"
-        }
-        style={{
-          flexShrink: 0,
-          minWidth: 26,
-          height: 22,
-          padding: "0 7px",
-          borderRadius: 11,
-          border: `1px solid ${status === "asking" ? "#1e3a8a" : "#1f2937"}`,
-          backgroundColor: status === "asking" ? "#1e3a8a" : "transparent",
-          color: status === "asking" ? "#bfdbfe" : "#3b82f6",
-          fontSize: 10,
-          fontWeight: 700,
-          letterSpacing: "0.04em",
-          cursor: status === "asking" ? "default" : "pointer",
-          marginTop: 2,
-          lineHeight: 1,
-        }}
-      >
-        {status === "asking" ? "Asking…" : "Q"}
-      </button>
+        <span
+          style={{
+            color: "#e5e7eb",
+            lineHeight: 1.5,
+            textAlign: "right",
+            wordBreak: "break-word",
+            flex: 1,
+          }}
+        >
+          {utterance}
+        </span>
+        {showQ && (
+          <button
+            type="button"
+            data-testid="q-chip"
+            data-status={status}
+            onClick={() => onAsk(key, utterance)}
+            disabled={status === "asking"}
+            title={
+              status === "asking"
+                ? "Asking the AI to answer this question…"
+                : "Send the full merged interviewer utterance to the AI"
+            }
+            style={{
+              flexShrink: 0,
+              minWidth: 26,
+              height: 22,
+              padding: "0 7px",
+              borderRadius: 11,
+              border: `1px solid ${status === "asking" ? "#1e3a8a" : "#1f2937"}`,
+              backgroundColor: status === "asking" ? "#1e3a8a" : "transparent",
+              color: status === "asking" ? "#bfdbfe" : "#3b82f6",
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              cursor: status === "asking" ? "default" : "pointer",
+              marginTop: 2,
+              lineHeight: 1,
+            }}
+          >
+            {status === "asking" ? "Asking…" : "Q"}
+          </button>
+        )}
+      </div>
     </div>
   );
 };

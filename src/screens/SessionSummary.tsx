@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { generateSessionSummary } from "../commands";
 
 interface SessionEssence {
@@ -15,6 +16,7 @@ interface SessionEssence {
 }
 
 interface Props {
+  sessionId?: string | null;
   onDone: () => void;
 }
 
@@ -42,26 +44,41 @@ function parseEssence(raw: string): SessionEssence | null {
   }
 }
 
-export function SessionSummary({ onDone }: Props) {
+function isSoftUnavailableSummary(essence: SessionEssence): boolean {
+  const line = essence.one_line_summary.toLowerCase();
+  return (
+    line.includes("summary unavailable") ||
+    line.includes("no transcript data") ||
+    line.includes("retry from past sessions")
+  );
+}
+
+export function SessionSummary({ sessionId, onDone }: Props) {
   const [essence, setEssence] = useState<SessionEssence | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const fetchedRef = useRef(false);
 
-  useEffect(() => {
-    if (fetchedRef.current) return;
-    fetchedRef.current = true;
-
-    generateSessionSummary()
+  const loadSummary = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    return generateSessionSummary(sessionId ?? undefined)
       .then((raw) => {
         setEssence(parseEssence(raw));
         setLoading(false);
       })
       .catch((err: unknown) => {
         setError(String(err));
+        setEssence(null);
         setLoading(false);
       });
-  }, []);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+    void loadSummary();
+  }, [loadSummary]);
 
   if (loading) {
     return (
@@ -77,6 +94,16 @@ export function SessionSummary({ onDone }: Props) {
         <p className="ss-error">
           {error ?? "Summary unavailable for this session."}
         </p>
+        <button
+          type="button"
+          className="ss-done-btn"
+          onClick={() => {
+            fetchedRef.current = false;
+            void loadSummary();
+          }}
+        >
+          Retry summary
+        </button>
         <button className="ss-done-btn" onClick={onDone}>
           Back to sessions
         </button>
@@ -84,6 +111,7 @@ export function SessionSummary({ onDone }: Props) {
     );
   }
 
+  const softUnavailable = isSoftUnavailableSummary(essence);
   const { high, medium, low } = essence.confidence_distribution;
   const total = high + medium + low || 1;
 
@@ -93,6 +121,12 @@ export function SessionSummary({ onDone }: Props) {
         <h1 className="ss-title">Session complete</h1>
         {essence.one_line_summary && (
           <p className="ss-tagline">{essence.one_line_summary}</p>
+        )}
+        {softUnavailable && (
+          <p className="ss-error" data-testid="session-summary-soft-unavailable">
+            Narrative summary could not be generated. Counts below are from your
+            session data. You can retry when a provider is available.
+          </p>
         )}
       </header>
 
@@ -167,6 +201,19 @@ export function SessionSummary({ onDone }: Props) {
       )}
 
       <footer className="ss-footer">
+        {softUnavailable && (
+          <button
+            type="button"
+            className="ss-done-btn"
+            data-testid="session-summary-retry"
+            onClick={() => {
+              fetchedRef.current = false;
+              void loadSummary();
+            }}
+          >
+            Retry summary
+          </button>
+        )}
         <button className="ss-done-btn" onClick={onDone}>
           Back to sessions
         </button>

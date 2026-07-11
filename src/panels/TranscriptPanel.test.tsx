@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import TranscriptPanel, {
   __triggerResponseImpl,
   appendLine,
+  linesToPlainText,
   splitIntoSentences,
   type TranscriptLine,
 } from "./TranscriptPanel";
@@ -30,6 +31,13 @@ vi.mock("../hooks/useTranscriptionStream", () => ({
     streamHandlerRef.current = handler;
   },
 }));
+
+vi.mock("../commands", () => ({
+  triggerResponse: vi.fn(),
+  copyTextToClipboard: vi.fn(),
+}));
+
+import { copyTextToClipboard } from "../commands";
 
 function pushChunk(chunk: {
   text: string;
@@ -127,44 +135,44 @@ describe("splitIntoSentences", () => {
   });
 });
 
-describe("Q-per-sentence chip", () => {
+describe("Q-per-utterance chip", () => {
   beforeEach(() => {
     streamHandlerRef.current = null;
     __triggerResponseImpl.fn = vi.fn().mockResolvedValue(undefined);
+    vi.mocked(copyTextToClipboard).mockReset();
+    vi.mocked(copyTextToClipboard).mockResolvedValue(undefined);
   });
 
-  it("renders one Q chip per interviewer sentence and none for user lines", () => {
+  it("renders one Q chip per merged interviewer utterance and none for user lines", () => {
     render(<TranscriptPanel sessionId="sess-1" />);
     pushChunk({ text: "Hi there! How are you today?", speaker: "System" });
     pushChunk({ text: "I am doing well, thank you.", speaker: "Microphone" });
 
     const chips = screen.getAllByTestId("q-chip");
-    expect(chips).toHaveLength(2);
-    chips.forEach((chip) => {
-      expect(chip.textContent).toBe("Q");
-      expect(chip.getAttribute("data-status")).toBe("idle");
-    });
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toBe("Q");
   });
 
-  it("dispatches only the clicked sentence via triggerResponse", async () => {
+  it("dispatches the full merged utterance via triggerResponse", async () => {
     const trigger = vi.fn().mockResolvedValue(undefined);
     __triggerResponseImpl.fn = trigger;
 
     render(<TranscriptPanel sessionId="sess-1" />);
-    pushChunk({ text: "Hi there! Tell me about yourself.", speaker: "System" });
+    pushChunk({ text: "Hi there!", speaker: "System" });
+    pushChunk({ text: "Tell me about yourself.", speaker: "System" });
 
-    const chips = screen.getAllByTestId("q-chip");
-    expect(chips).toHaveLength(2);
-    const second = chips[1] as HTMLButtonElement;
-
-    fireEvent.click(second);
+    const chip = screen.getByTestId("q-chip") as HTMLButtonElement;
+    fireEvent.click(chip);
 
     await waitFor(() => {
       expect(trigger).toHaveBeenCalledTimes(1);
     });
-    expect(trigger).toHaveBeenCalledWith("Tell me about yourself.", "sess-1");
-    expect(second.getAttribute("data-status")).toBe("asking");
-    expect(second.disabled).toBe(true);
+    expect(trigger).toHaveBeenCalledWith(
+      "Hi there! Tell me about yourself.",
+      "sess-1",
+    );
+    expect(chip.getAttribute("data-status")).toBe("asking");
+    expect(chip.disabled).toBe(true);
   });
 
   it("only one chip is in 'asking' state at a time", async () => {
@@ -172,19 +180,43 @@ describe("Q-per-sentence chip", () => {
     __triggerResponseImpl.fn = trigger;
 
     render(<TranscriptPanel sessionId="sess-1" />);
-    pushChunk({ text: "Hi there! Tell me about yourself.", speaker: "System" });
+    pushChunk({ text: "First question?", speaker: "System" });
+    pushChunk({ text: "I am answering.", speaker: "Microphone" });
+    pushChunk({ text: "Second question?", speaker: "System" });
 
     const chips = screen.getAllByTestId("q-chip");
-    const first = chips[0] as HTMLButtonElement;
-    const second = chips[1] as HTMLButtonElement;
-    fireEvent.click(first);
+    expect(chips).toHaveLength(2);
+    fireEvent.click(chips[0] as HTMLButtonElement);
     await waitFor(() => expect(trigger).toHaveBeenCalledTimes(1));
 
-    fireEvent.click(second);
+    fireEvent.click(chips[1] as HTMLButtonElement);
     await waitFor(() => expect(trigger).toHaveBeenCalledTimes(2));
 
-    expect(first.getAttribute("data-status")).toBe("idle");
-    expect(second.getAttribute("data-status")).toBe("asking");
+    expect(chips[0].getAttribute("data-status")).toBe("idle");
+    expect(chips[1].getAttribute("data-status")).toBe("asking");
+  });
+
+  it("linesToPlainText formats interviewer and user labels", () => {
+    let lines: TranscriptLine[] = [];
+    lines = appendLine(lines, "Tell me about yourself.", "System", 1, "channel", nextId);
+    lines = appendLine(lines, "I am an architect.", "Microphone", 2, "channel", nextId);
+    expect(linesToPlainText(lines)).toBe(
+      "INTERVIEWER: Tell me about yourself.\n\nYOU: I am an architect.",
+    );
+  });
+
+  it("copies transcript via native clipboard command", async () => {
+    render(<TranscriptPanel sessionId="sess-1" />);
+    pushChunk({ text: "Tell me about yourself.", speaker: "System" });
+    pushChunk({ text: "I am an architect.", speaker: "Microphone" });
+
+    fireEvent.click(screen.getByTestId("copy-transcript-btn"));
+
+    await waitFor(() => {
+      expect(copyTextToClipboard).toHaveBeenCalledWith(
+        "INTERVIEWER: Tell me about yourself.\n\nYOU: I am an architect.",
+      );
+    });
   });
 
   it("surfaces an error message and re-enables the chip on failure", async () => {

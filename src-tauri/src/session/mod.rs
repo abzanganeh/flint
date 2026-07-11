@@ -13,3 +13,4 @@ pub mod question_bank;
 pub mod recovery;
 pub mod shuffle;
 pub mod state;
+pub mod summary_parse;

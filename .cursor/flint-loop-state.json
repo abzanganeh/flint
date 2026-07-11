@@ -1,10 +1,12 @@
 {
-  "current_milestone": "v1-closure-phase2",
+  "current_milestone": "qa-fix-summary-transcript",
   "milestone_status": "in_progress",
-  "milestone_branch": { "flint": "feature/v1-closure-phase2-hardening" },
-  "current_slice": 9,
-  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8],
-  "current_task_id": "v1p2-s9-pr-ci-merge",
+  "milestone_branch": {
+    "flint": "fix/qa-summary-transcript-ux"
+  },
+  "current_slice": 5,
+  "completed_slices": [0, 1, 2, 3, 4],
+  "current_task_id": "qa-s5-review-pr-ci-merge",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -13,64 +15,9 @@
   "open_prs": {},
   "manual_gate_backlog": [
     {
-      "gate": "L1 HealthCheck screenshot",
+      "gate": "Post-summary + Q-merge device retest",
       "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
-      "notes": "Include system_audio_isolation"
-    },
-    {
-      "gate": "L2 System audio loopback",
-      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
-      "notes": "Retest after pulse-first fix; YouTube → INTERVIEWER only"
-    },
-    {
-      "gate": "L3 Hotkeys with focus",
-      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
-      "notes": "Retest after slice 3 Linux fallbacks"
-    },
-    {
-      "gate": "L4 Hotkeys without focus",
-      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
-      "notes": "Document Wayland outcome; accepted P2 if fail"
-    },
-    {
-      "gate": "L5 OBS / screen capture",
-      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
-      "notes": "Document Wayland outcome"
-    },
-    {
-      "gate": "Installer signing / notarization",
-      "doc": "tests/manual-qa/installer-signing-runbook.md",
-      "notes": "Needs Apple + Windows certs"
-    },
-    {
-      "gate": "Hosted Supabase project",
-      "doc": "tests/manual-qa/hosted-supabase-runbook.md",
-      "notes": "Human in dashboard"
-    },
-    {
-      "gate": "M8 device WER",
-      "doc": "M8_INPUT_QUALITY.md",
-      "notes": "Calibration thresholds"
-    },
-    {
-      "gate": "M10 live Zoom/Teams + phone Ctrl+Q",
-      "doc": "M10_LIVE_RELIABILITY.md",
-      "notes": "Device"
-    },
-    {
-      "gate": "M6 provider P1–P3",
-      "doc": "M6_LLM_PROVIDERS.md",
-      "notes": "Device / keys"
-    },
-    {
-      "gate": "M7 macOS BlackHole + Windows WASAPI",
-      "doc": "ROADMAP M7",
-      "notes": "Device"
-    },
-    {
-      "gate": "Wayland hotkeys unfocused",
-      "doc": "Accepted P2",
-      "notes": "Do not invent portal fix in v1"
+      "notes": "After PR merge: End Session shows summary; Q matches full utterance; Copy on live"
     }
   ],
   "agent_ladder": {
@@ -78,5 +25,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slices 0-8 complete. Opening PR for CI merge phase."
+  "notes": "Slices 1-4 implemented on fix/qa-summary-transcript-ux; slice 5 PR/CI pending."
 }
