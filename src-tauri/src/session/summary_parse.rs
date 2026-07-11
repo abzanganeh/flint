@@ -83,7 +83,10 @@ Thanks!"#;
     fn extracts_json_with_preamble() {
         let raw = r#"Summary follows: {"topics_covered":["rust"],"one_line_summary":"ok"}"#;
         let out = extract_json_object(raw).expect("json");
-        assert_eq!(out, r#"{"topics_covered":["rust"],"one_line_summary":"ok"}"#);
+        assert_eq!(
+            out,
+            r#"{"topics_covered":["rust"],"one_line_summary":"ok"}"#
+        );
     }
 
     #[test]
