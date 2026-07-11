@@ -769,6 +769,7 @@ function App() {
     return (
       <Shell nav={nav}>
         <SessionSummary
+          sessionId={sessionId}
           onDone={() => {
             setSessionId(null);
             setScreen("session-list");

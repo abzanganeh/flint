@@ -428,8 +428,8 @@ export const discardCrashedSession = (): Promise<void> =>
   invoke<void>("discard_crashed_session");
 
 /** Generate a structured post-session summary using the session_essence prompt. */
-export const generateSessionSummary = (): Promise<string> =>
-  invoke<string>("generate_session_summary");
+export const generateSessionSummary = (sessionId?: string): Promise<string> =>
+  invoke<string>("generate_session_summary", { sessionId: sessionId ?? null });
 
 export interface ReviewChunkDto {
   speaker: "System" | "Microphone";
