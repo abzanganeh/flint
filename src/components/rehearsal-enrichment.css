@@ -1687,3 +1687,68 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.live-help-drawer__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.live-help-drawer {
+  width: min(360px, 92vw);
+  height: 100%;
+  background: #111827;
+  border-left: 1px solid #1e2028;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
+}
+
+.live-help-drawer__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #1e2028;
+}
+
+.live-help-drawer__header h2 {
+  margin: 0;
+  font-size: 14px;
+  color: #e5e7eb;
+}
+
+.live-help-drawer__header button {
+  background: transparent;
+  border: 1px solid #374151;
+  color: #94a3b8;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.live-help-drawer__body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.live-help-drawer__section h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: #a78bfa;
+}
+
+.live-help-drawer__section p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #cbd5e1;
+}
