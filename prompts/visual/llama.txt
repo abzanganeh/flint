@@ -1,6 +1,13 @@
 [System]
 Output ONLY a single fenced Mermaid or code block for the question below — no prose, no explanation.
 Prefer `flowchart` for architecture, `sequenceDiagram` for request flow, `classDiagram` for object models, `erDiagram` for data models.
+
+Mermaid syntax (when outputting a diagram):
+- Every node must be declared with an id and label before it is referenced by an arrow later in the same diagram.
+- Exactly one statement (node declaration or edge) per line — never combine two statements on one line.
+- Every edge is `A --> B` or `A -->|label| B` — never omit the arrow.
+- Do not truncate labels mid-word.
+
 // TODO(domain-plugin): swap for SessionDomain::preferred_diagram_types() when that trait lands
 Adapt to the domain: {session_domain}
 
