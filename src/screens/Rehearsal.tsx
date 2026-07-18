@@ -29,7 +29,7 @@ import { useRagChunks } from "../hooks/useRagChunks";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import { needsUserContext } from "../lib/contextQuality";
 import AnswerPanel from "../panels/AnswerPanel";
-import DepthPanel from "../panels/DepthPanel";
+import VisualPanel from "../panels/VisualPanel";
 import ClarifyingPanel from "../panels/ClarifyingPanel";
 import ContextPanel from "../panels/ContextPanel";
 import TranscriptPanel from "../panels/TranscriptPanel";
@@ -514,7 +514,7 @@ const Rehearsal = ({
               directional={
                 <AnswerPanel sessionId={sessionId} isGenerating={asking} />
               }
-              depth={<DepthPanel isGenerating={asking} />}
+              depth={<VisualPanel isGenerating={asking} />}
               clarifying={<ClarifyingPanel />}
               context={<ContextPanel sessionId={sessionId} />}
             />
