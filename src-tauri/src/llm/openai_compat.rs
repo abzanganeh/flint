@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use secrecy::{ExposeSecret, SecretString};
@@ -16,6 +17,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::provider::{CompletionConfig, LLMProvider, RateLimit};
+use super::sse_lines::buffered_lines;
 
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatConfig {
@@ -141,6 +143,29 @@ impl OpenAiCompatProvider {
             .map(|t| t.contains("rate_limit"))
             .unwrap_or(false)
     }
+
+    /// Wraps a raw byte stream as a token stream: reassembles complete SSE
+    /// lines across chunk boundaries via `buffered_lines`, then applies the
+    /// existing per-line parser unchanged. Extracted from `complete_stream`
+    /// so the chunk-boundary regression test can drive it with a synthetic
+    /// byte stream that deliberately splits a `data: {...}` line mid-JSON.
+    fn token_stream_from_bytes(
+        byte_stream: impl Stream<Item = Result<Bytes>> + Send + Unpin + 'static,
+        provider_name: &'static str,
+    ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send>> {
+        let line_stream = buffered_lines(byte_stream).filter_map(move |line_result| async move {
+            match line_result {
+                Err(e) => Some(Err(e)),
+                Ok(line) => {
+                    #[cfg(debug_assertions)]
+                    debug!(provider = provider_name, line = %line, "openai-compat sse line");
+
+                    Self::parse_sse_line(&line).map(Ok)
+                }
+            }
+        });
+        Box::pin(line_stream)
+    }
 }
 
 #[async_trait]
@@ -226,34 +251,11 @@ impl LLMProvider for OpenAiCompatProvider {
             return Ok(Box::pin(stream));
         }
 
-        let byte_stream = response.bytes_stream();
         let provider_name = self.config.provider_name;
-        let line_stream = byte_stream
-            .map(|chunk| chunk.context("stream read error"))
-            .flat_map(|chunk_result| {
-                let lines: Vec<Result<String>> = match chunk_result {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes)
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(|l| Ok(l.to_string()))
-                        .collect(),
-                    Err(e) => vec![Err(e)],
-                };
-                futures::stream::iter(lines)
-            })
-            .filter_map(move |line_result| async move {
-                match line_result {
-                    Err(e) => Some(Err(e)),
-                    Ok(line) => {
-                        #[cfg(debug_assertions)]
-                        debug!(provider = provider_name, line = %line, "openai-compat sse line");
-
-                        Self::parse_sse_line(&line).map(Ok)
-                    }
-                }
-            });
-
-        Ok(Box::pin(line_stream))
+        let byte_stream = response
+            .bytes_stream()
+            .map(|chunk| chunk.context("stream read error"));
+        Ok(Self::token_stream_from_bytes(byte_stream, provider_name))
     }
 
     fn name(&self) -> &str {
@@ -319,5 +321,24 @@ mod tests {
         let provider =
             OpenAiCompatProvider::new(SecretString::new("test-key".into()), test_config()).unwrap();
         assert!(provider.is_available());
+    }
+
+    /// Regression test for the corrupted-Mermaid-diagram bug: a `data: {...}`
+    /// SSE line split mid-JSON across two network chunks must reassemble
+    /// into one complete token, not be silently dropped by both halves
+    /// failing to parse independently.
+    #[tokio::test]
+    async fn token_stream_reassembles_sse_line_split_mid_json_across_chunks() {
+        let first_chunk = Bytes::from_static(b"data: {\"id\":\"1\",\"choices\":[{\"delta\":");
+        let second_chunk = Bytes::from_static(b"{\"content\":\"Twilio\"}}]}\n");
+        let byte_stream = futures::stream::iter(vec![Ok(first_chunk), Ok(second_chunk)]);
+
+        let mut token_stream = OpenAiCompatProvider::token_stream_from_bytes(byte_stream, "test");
+        let mut tokens = Vec::new();
+        while let Some(result) = token_stream.next().await {
+            tokens.push(result.expect("token stream should not error"));
+        }
+
+        assert_eq!(tokens, vec!["Twilio".to_string()]);
     }
 }
