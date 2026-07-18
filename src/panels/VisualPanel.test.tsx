@@ -120,6 +120,58 @@ describe("VisualPanel", () => {
     expect(screen.getByTestId("visual-raw-fallback").textContent).toContain(
       "flowchart TD",
     );
+    expect(triggerVisualResponse).not.toHaveBeenCalled();
+  });
+
+  it("auto-retries once on mermaid render failure then shows the diagram", async () => {
+    mermaidRender
+      .mockRejectedValueOnce(new Error("parse error"))
+      .mockResolvedValue({ svg: "<svg>retried</svg>" });
+
+    useUIStore.setState({
+      currentQuestion: "Design a notification microservice.",
+    });
+    setVisualBuffer("```mermaid\nflowchart TD\nA--\n```");
+    render(<VisualPanel sessionId="sess-1" />);
+
+    await waitFor(() => {
+      expect(triggerVisualResponse).toHaveBeenCalledTimes(1);
+    });
+    expect(triggerVisualResponse).toHaveBeenCalledWith(
+      "Design a notification microservice.",
+      "sess-1",
+    );
+
+    setVisualBuffer("```mermaid\nflowchart TD\nA-->B\n```");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("visual-mermaid-svg")).toBeTruthy();
+    });
+    expect(screen.queryByTestId("visual-raw-fallback")).toBeNull();
+  });
+
+  it("falls back to raw text without looping when mermaid fails twice", async () => {
+    mermaidRender.mockRejectedValue(new Error("parse error"));
+
+    useUIStore.setState({
+      currentQuestion: "Design a notification microservice.",
+    });
+    setVisualBuffer("```mermaid\nflowchart TD\nA--\n```");
+    render(<VisualPanel sessionId="sess-1" />);
+
+    await waitFor(() => {
+      expect(triggerVisualResponse).toHaveBeenCalledTimes(1);
+    });
+
+    setVisualBuffer("```mermaid\nflowchart TD\nB--\n```");
+
+    await waitFor(() => {
+      expect(screen.getByTestId("visual-raw-fallback")).toBeTruthy();
+    });
+    expect(triggerVisualResponse).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("visual-raw-fallback").textContent).toContain(
+      "flowchart TD",
+    );
   });
 
   it("highlights non-diagram code fences via shiki", async () => {
