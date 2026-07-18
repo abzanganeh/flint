@@ -82,6 +82,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const [pace, setPace] = useState<MockPace>("guided");
   const [studyMode, setStudyMode] = useState<MockStudyMode>("practice");
   const [shuffleQuestions, setShuffleQuestions] = useState(readShuffleQuestionsPreference);
+  const [practiceSampleAudio, setPracticeSampleAudio] = useState(false);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [turn, setTurn] = useState<TurnState>(emptyTurn());
@@ -689,6 +690,63 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   </span>
                 </span>
               </label>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
+                PHONE / SAMPLE AUDIO (OPTIONAL)
+              </span>
+              <label
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "flex-start",
+                  padding: "10px 12px",
+                  borderRadius: 6,
+                  border: practiceSampleAudio ? "1px solid #7c3aed" : "1px solid #374151",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={practiceSampleAudio}
+                  onChange={(e) => setPracticeSampleAudio(e.target.checked)}
+                  style={{ marginTop: 3 }}
+                  data-testid="mock-sample-audio-toggle"
+                />
+                <span>
+                  <strong style={{ color: "#e2e8f0" }}>
+                    Practice with sample call audio
+                  </strong>
+                  <br />
+                  <span style={{ fontSize: "12px", color: "#94a3b8" }}>
+                    Instructions only — play a recorded phone-screen on your phone speaker
+                    near the laptop mic while Mock Interview runs. Enable{" "}
+                    <strong>Phone interview mode</strong> in Session Design (or Settings)
+                    so Flint labels interviewer vs you. Use Live Preview after rehearsal to
+                    verify labels before a real call.
+                  </span>
+                </span>
+              </label>
+              {practiceSampleAudio && (
+                <div
+                  data-testid="mock-sample-audio-guidance"
+                  style={{
+                    fontSize: "12px",
+                    color: "#cbd5e1",
+                    lineHeight: 1.55,
+                    padding: "10px 12px",
+                    borderRadius: 6,
+                    background: "#0f172a",
+                    border: "1px solid #334155",
+                  }}
+                >
+                  <strong>Setup:</strong> headphones on, phone on speaker at arm&apos;s length,
+                  volume low enough that only the mic picks up the interviewer track.
+                  Start Mock Interview, then play your sample MP3 or a YouTube phone-screen
+                  walkthrough. If labels look wrong, swap speakers in the transcript during
+                  Live Preview — user relabels override the classifier.
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               <span style={{ fontSize: "11px", fontWeight: 600, color: "#64748b", letterSpacing: "0.05em" }}>
