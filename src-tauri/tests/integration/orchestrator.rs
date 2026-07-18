@@ -1,6 +1,8 @@
 //! Integration test for Phase 4 orchestrator — parallel thread dispatch.
 //!
-//! Task 4.15: mock provider → directional + depth threads fire concurrently.
+//! Task 4.15: mock provider → Answer + Visual threads fire concurrently
+//! (renamed from directional/depth in `lpav` slice 30 — Visual replaced
+//! Depth as of slice 19).
 
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
@@ -127,34 +129,34 @@ fn make_failover(response: &str) -> Arc<FailoverManager> {
 }
 
 #[tokio::test]
-async fn directional_and_depth_threads_run_concurrently() {
+async fn answer_and_visual_threads_run_concurrently() {
     let app = mock_app_handle();
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
 
-    let dir_ctx = test_context("What is your experience with Rust?");
-    let dep_ctx = test_context("What is your experience with Rust?");
+    let ans_ctx = test_context("What is your experience with Rust?");
+    let vis_ctx = test_context("What is your experience with Rust?");
 
-    let dir_failover = make_failover("directional answer");
-    let dep_failover = make_failover("depth answer");
+    let ans_failover = make_failover("answer response");
+    let vis_failover = make_failover("```rust\nfn main() {}\n```");
 
-    let dir_app = app.clone();
-    let dep_app = app.clone();
-    let dir_prompts = prompts_dir.clone();
-    let dep_prompts = prompts_dir;
+    let ans_app = app.clone();
+    let vis_app = app.clone();
+    let ans_prompts = prompts_dir.clone();
+    let vis_prompts = prompts_dir;
 
     let start = Instant::now();
-    let dir_task = tokio::spawn(async move {
-        answer::run_answer(dir_ctx, dir_failover, &dir_prompts, dir_app).await
+    let ans_task = tokio::spawn(async move {
+        answer::run_answer(ans_ctx, ans_failover, &ans_prompts, ans_app).await
     });
-    let dep_task = tokio::spawn(async move {
-        visual::run_visual(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+    let vis_task = tokio::spawn(async move {
+        visual::run_visual(vis_ctx, vis_failover, &vis_prompts, vis_app).await
     });
 
-    let (dir_result, dep_result) = tokio::join!(dir_task, dep_task);
+    let (ans_result, vis_result) = tokio::join!(ans_task, vis_task);
     let elapsed = start.elapsed();
 
-    assert!(dir_result.unwrap().is_ok());
-    assert!(dep_result.unwrap().is_ok());
+    assert!(ans_result.unwrap().is_ok());
+    assert!(vis_result.unwrap().is_ok());
 
     let sequential_floor = Duration::from_millis(MOCK_DELAY_MS * 2);
     assert!(
@@ -1127,5 +1129,91 @@ async fn dispatch_turn_skips_visual_thread_for_behavioral_question() {
     assert!(
         !has_visual_response,
         "behavioral question must skip Visual — no Visual response should be persisted"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 30 — manual visual trigger forces the thread past the classifier
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `trigger_visual_response` (Tauri command, slice 20) surfaces as a
+/// `DetectedQuestion` tagged `DetectedQuestionSource::VisualManual`. The
+/// per-turn config built in `run_orchestrator` must force Visual to spawn
+/// for that source regardless of what `visual_classifier::needs_visual`
+/// says about the question text — covers the `cfg.force_visual` branch
+/// that `dispatch_turn` alone can't reach (it always passes `force_visual:
+/// false`, see slice 21).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_orchestrator_forces_visual_thread_on_manual_trigger() {
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
+    let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+    let session_id = Uuid::new_v4();
+
+    let persistence = fresh_persistence();
+    persistence
+        .create_session_row(session_id, "Manual Visual Test", "interview", "swe")
+        .expect("session row");
+    persistence
+        .write_state_transition(session_id, &flint_lib::session::state::SessionState::Live)
+        .expect("state -> LIVE");
+
+    let failover = fast_failover("```mermaid\nflowchart TD\nA-->B\n```", "default");
+    let local_llm: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
+        response: "local summary".to_string(),
+        provider_name: "ollama".to_string(),
+    });
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(8);
+
+    let config = OrchestratorConfig {
+        session_id,
+        digest: Arc::new(test_digest()),
+        prompts_dir,
+        failover,
+        embedder,
+        vector_store: fresh_vector_store(),
+        prewarm_cache: Arc::new(Mutex::new(PreWarmCache::new())),
+        memory: Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        compression_prompt: "Summarise:\n{old_turns}".to_string(),
+        local_llm,
+        turn_cancel_slot: Arc::new(Mutex::new(None)),
+        persistence: Arc::clone(&persistence),
+        cost_tracker: no_op_tracker(),
+    };
+
+    let app = mock_app_handle();
+    let handle = tokio::spawn(run_orchestrator(rx, config, app));
+
+    // A purely behavioral question — `needs_visual` returns false for this
+    // on its own (see visual_classifier's own test table) — sent with the
+    // manual-trigger source so only `force_visual` can explain a Visual spawn.
+    tx.send(DetectedQuestion {
+        text: "Tell me about a time you disagreed with a teammate.".to_string(),
+        session_id,
+        detected_at: Instant::now(),
+        source: flint_lib::audio::pipeline::DetectedQuestionSource::VisualManual,
+    })
+    .await
+    .expect("send question");
+    drop(tx);
+
+    handle
+        .await
+        .expect("orchestrator loop must shut down cleanly");
+
+    let recovery = persistence
+        .load_session_for_recovery(session_id)
+        .expect("recovery query")
+        .expect("session must be recoverable (state = LIVE)");
+    let has_visual_response = recovery
+        .responses
+        .iter()
+        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Visual);
+    assert!(
+        has_visual_response,
+        "manual visual trigger must force Visual to spawn regardless of the classifier"
     );
 }
