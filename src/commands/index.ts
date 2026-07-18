@@ -195,6 +195,13 @@ export const rephraseResponse = (
   sessionId: string,
 ): Promise<void> => triggerResponse(question, sessionId, true);
 
+/** Force a Visual (diagram) response for a question the classifier judged as purely verbal. */
+export const triggerVisualResponse = (
+  question: string,
+  sessionId: string,
+): Promise<void> =>
+  invoke<void>("trigger_visual_response", { question, sessionId });
+
 export const copyTextToClipboard = (text: string): Promise<void> =>
   invoke<void>("copy_text_to_clipboard", { text });
 

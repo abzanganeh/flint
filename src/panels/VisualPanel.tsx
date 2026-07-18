@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import mermaid from "mermaid";
 import { codeToHtml } from "shiki";
 
-import { copyTextToClipboard } from "../commands";
+import { copyTextToClipboard, triggerVisualResponse } from "../commands";
 import { useUIStore } from "../store/ui";
 import { QuestionHeading } from "./TurnCards";
 
@@ -15,6 +15,12 @@ mermaid.initialize({
 
 export interface VisualPanelProps {
   isGenerating?: boolean;
+  /**
+   * Only provided from the LIVE screen (`trigger_visual_response` requires
+   * `SessionState::Live`) — enables the manual "Generate diagram" trigger.
+   * Omitted in Rehearsal, where the button stays hidden.
+   */
+  sessionId?: string;
 }
 
 export interface FencedBlock {
@@ -48,10 +54,11 @@ export function isMermaidBlock(block: FencedBlock): boolean {
 
 let mermaidRenderCounter = 0;
 
-const VisualPanel = ({ isGenerating = false }: VisualPanelProps) => {
+const VisualPanel = ({ isGenerating = false, sessionId }: VisualPanelProps) => {
   const { streamingBuffers, depthPrePrepared, currentQuestion } = useUIStore();
   const pushNotification = useUIStore((s) => s.pushNotification);
   const [copied, setCopied] = useState(false);
+  const [requesting, setRequesting] = useState(false);
   const [svg, setSvg] = useState<string | null>(null);
   const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
   const [renderFailed, setRenderFailed] = useState(false);
@@ -103,6 +110,23 @@ const VisualPanel = ({ isGenerating = false }: VisualPanelProps) => {
           level: "error",
         });
       });
+  };
+
+  const canTriggerManually =
+    sessionId != null && !isGenerating && currentQuestion.trim().length > 0;
+
+  const handleGenerateDiagram = () => {
+    if (!sessionId || !canTriggerManually) return;
+    setRequesting(true);
+    void triggerVisualResponse(currentQuestion, sessionId)
+      .catch((err: unknown) => {
+        pushNotification({
+          id: crypto.randomUUID(),
+          message: `Couldn't generate diagram: ${String(err)}`,
+          level: "error",
+        });
+      })
+      .finally(() => setRequesting(false));
   };
 
   const showRawFallback = text.length > 0 && (!block || renderFailed);
@@ -188,13 +212,36 @@ const VisualPanel = ({ isGenerating = false }: VisualPanelProps) => {
           <QuestionHeading question={currentQuestion} />
         )}
         {text.length === 0 ? (
-          <span
-            style={{ color: "#4b5563", fontStyle: "italic", fontSize: "12px" }}
-          >
-            {isGenerating
-              ? "Generating visual response…"
-              : "Waiting for visual response…"}
-          </span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <span
+              style={{ color: "#4b5563", fontStyle: "italic", fontSize: "12px" }}
+            >
+              {isGenerating || requesting
+                ? "Generating visual response…"
+                : "Waiting for visual response…"}
+            </span>
+            {canTriggerManually && !requesting && (
+              <button
+                type="button"
+                data-testid="generate-diagram-button"
+                onClick={handleGenerateDiagram}
+                title="Force a diagram for the current question, even if it wasn't flagged as visual"
+                style={{
+                  alignSelf: "flex-start",
+                  padding: "4px 10px",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  borderRadius: 4,
+                  border: "1px solid #7c3aed",
+                  backgroundColor: "transparent",
+                  color: "#a78bfa",
+                  cursor: "pointer",
+                }}
+              >
+                Generate diagram
+              </button>
+            )}
+          </div>
         ) : svg ? (
           <div data-testid="visual-mermaid-svg" dangerouslySetInnerHTML={{ __html: svg }} />
         ) : highlightedHtml ? (

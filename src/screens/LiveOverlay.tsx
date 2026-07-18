@@ -437,7 +437,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
         <OverlayLayout
           transcript={<TranscriptPanel sessionId={sessionId} />}
           answer={<AnswerPanel sessionId={sessionId} />}
-          visual={<VisualPanel />}
+          visual={<VisualPanel sessionId={sessionId} />}
           context={<ContextPanel sessionId={sessionId} />}
         />
       </div>

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useUIStore } from "../store/ui";
@@ -19,8 +19,11 @@ vi.mock("shiki", () => ({
   codeToHtml: (...args: unknown[]) => codeToHtml(...args),
 }));
 
+const triggerVisualResponse = vi.fn().mockResolvedValue(undefined);
+
 vi.mock("../commands", () => ({
   copyTextToClipboard: vi.fn().mockResolvedValue(undefined),
+  triggerVisualResponse: (...args: unknown[]) => triggerVisualResponse(...args),
 }));
 
 const setVisualBuffer = (text: string) => {
@@ -33,6 +36,8 @@ describe("VisualPanel", () => {
   beforeEach(() => {
     mermaidRender.mockReset();
     codeToHtml.mockReset();
+    triggerVisualResponse.mockClear();
+    triggerVisualResponse.mockResolvedValue(undefined);
     useUIStore.setState({
       streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
@@ -150,5 +155,43 @@ describe("VisualPanel", () => {
     render(<VisualPanel />);
 
     expect(screen.getByText("pre-prepared")).toBeTruthy();
+  });
+
+  describe("manual visual trigger", () => {
+    it("hides the Generate diagram button when no sessionId is provided (e.g. Rehearsal)", () => {
+      useUIStore.setState({ currentQuestion: "Design a URL shortener." });
+
+      render(<VisualPanel />);
+
+      expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
+    });
+
+    it("hides the Generate diagram button when there is no current question", () => {
+      useUIStore.setState({ currentQuestion: "" });
+
+      render(<VisualPanel sessionId="sess-1" />);
+
+      expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
+    });
+
+    it("hides the Generate diagram button while a response is generating", () => {
+      useUIStore.setState({ currentQuestion: "Design a URL shortener." });
+
+      render(<VisualPanel sessionId="sess-1" isGenerating />);
+
+      expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
+    });
+
+    it("forces a visual response for the current question when clicked", () => {
+      useUIStore.setState({ currentQuestion: "Design a URL shortener." });
+
+      render(<VisualPanel sessionId="sess-1" />);
+      fireEvent.click(screen.getByTestId("generate-diagram-button"));
+
+      expect(triggerVisualResponse).toHaveBeenCalledWith(
+        "Design a URL shortener.",
+        "sess-1",
+      );
+    });
   });
 });
