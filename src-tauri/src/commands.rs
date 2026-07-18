@@ -1797,6 +1797,7 @@ fn prompts_base_dir() -> PathBuf {
 fn build_speaker_classifier(
     app: &AppHandle,
     persistence: Arc<SessionPersistence>,
+    system_buffer: Arc<std::sync::Mutex<SystemTranscriptBuffer>>,
 ) -> Option<Arc<SpeakerClassifier>> {
     let provider = stack::resolve_primary_by_name("groq")?;
     let app_handle = app.clone();
@@ -1809,6 +1810,12 @@ fn build_speaker_classifier(
             };
             match persistence.confirm_transcript_chunk_speaker(result.chunk_id, speaker) {
                 Ok(true) => {
+                    if let Ok(mut buf) = system_buffer.lock() {
+                        buf.confirm_chunk(&result.chunk_id.to_string(), "llm");
+                        if speaker == "Microphone" {
+                            buf.exclude_chunk(&result.chunk_id.to_string());
+                        }
+                    }
                     crate::events::emit_speaker_refined(
                         &app_handle,
                         crate::events::SpeakerRefinedPayload {
@@ -3140,7 +3147,11 @@ pub async fn start_session(
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
-    let speaker_classifier = build_speaker_classifier(&app, Arc::clone(&state.persistence));
+    let speaker_classifier = build_speaker_classifier(
+        &app,
+        Arc::clone(&state.persistence),
+        Arc::clone(&system_transcript_buffer),
+    );
 
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
@@ -3347,7 +3358,11 @@ pub async fn start_live_preview(
 
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
-    let speaker_classifier = build_speaker_classifier(&app, Arc::clone(&state.persistence));
+    let speaker_classifier = build_speaker_classifier(
+        &app,
+        Arc::clone(&state.persistence),
+        Arc::clone(&system_transcript_buffer),
+    );
 
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
@@ -3827,6 +3842,107 @@ pub async fn trigger_visual_response(
     Ok(())
 }
 
+/// Sync the in-memory interviewer span buffer when the user manually relabels
+/// a chunk (Slice 6/7).
+async fn sync_buffer_on_relabel(
+    state: &AppState,
+    chunk_id: &str,
+    new_speaker: &str,
+    label_source: &str,
+) {
+    let live_buffer = state
+        .live_tasks
+        .lock()
+        .await
+        .as_ref()
+        .map(|h| Arc::clone(&h.system_transcript_buffer));
+
+    let buffer = match live_buffer {
+        Some(buf) => Some(buf),
+        None => state
+            .live_preview_tasks
+            .lock()
+            .await
+            .as_ref()
+            .map(|h| Arc::clone(&h.system_transcript_buffer)),
+    };
+
+    let Some(system_buffer) = buffer else {
+        return;
+    };
+    {
+        let Ok(mut buf) = system_buffer.lock() else {
+            return;
+        };
+        if new_speaker == "Microphone" {
+            buf.exclude_chunk(chunk_id);
+        } else {
+            buf.confirm_chunk(chunk_id, label_source);
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InterviewerSpanPreviewDto {
+    /// Interviewer-labeled text accumulated since the last question signal.
+    pub text: String,
+    /// True when any chunk in the span still lacks classifier/user confirmation.
+    pub uncertain_speaker: bool,
+}
+
+/// Read-only peek at the backend interviewer span — used by the global Q
+/// button preview in `LiveSessionStatusBar` (Slice 7).
+#[tauri::command]
+pub async fn get_interviewer_span_preview(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<InterviewerSpanPreviewDto, String> {
+    let _sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        let current = *machine.current();
+        if current != SessionState::Live && current != SessionState::LivePreview {
+            return Err(format!(
+                "get_interviewer_span_preview requires LIVE or LIVE_PREVIEW (current: {current})"
+            ));
+        }
+    }
+
+    let live_buffer = state
+        .live_tasks
+        .lock()
+        .await
+        .as_ref()
+        .map(|h| Arc::clone(&h.system_transcript_buffer));
+
+    let buffer = match live_buffer {
+        Some(buf) => Some(buf),
+        None => state
+            .live_preview_tasks
+            .lock()
+            .await
+            .as_ref()
+            .map(|h| Arc::clone(&h.system_transcript_buffer)),
+    };
+
+    let Some(buffer) = buffer else {
+        return Ok(InterviewerSpanPreviewDto {
+            text: String::new(),
+            uncertain_speaker: false,
+        });
+    };
+
+    let guard = buffer
+        .lock()
+        .map_err(|_| "System transcript buffer lock poisoned.".to_string())?;
+    Ok(InterviewerSpanPreviewDto {
+        text: guard.accumulated_text(),
+        uncertain_speaker: guard.has_uncertain_speaker(),
+    })
+}
+
 /// Manual question boundary — Ctrl+Q (M10 Slice 2 Layer 4).
 ///
 /// Grabs the System transcript buffer since the last signal and sends it
@@ -3932,11 +4048,13 @@ pub async fn relabel_transcript_chunk<R: tauri::Runtime>(
     crate::events::emit_transcript_chunk_relabeled(
         &app_handle,
         crate::events::TranscriptChunkRelabeledPayload {
-            chunk_id,
-            speaker: new_speaker,
+            chunk_id: chunk_id.clone(),
+            speaker: new_speaker.clone(),
             label_source: "user".to_string(),
         },
     );
+
+    sync_buffer_on_relabel(state.inner(), &chunk_id, &new_speaker, "user").await;
 
     Ok(())
 }

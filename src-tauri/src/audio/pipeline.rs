@@ -850,7 +850,7 @@ async fn process_frame(
         let mut buf = system_buffer
             .lock()
             .map_err(|_| anyhow::anyhow!("system transcript buffer mutex poisoned"))?;
-        buf.append(&result.text);
+        buf.append_chunk(&result.text, Some(chunk_id.to_string()), label_source);
     }
 
     if phone_mode_manual_only {

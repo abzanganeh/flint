@@ -115,6 +115,17 @@ export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 export const signalQuestionEnded = (sessionId: string): Promise<void> =>
   invoke<void>("signal_question_ended", { sessionId });
 
+export interface InterviewerSpanPreviewDto {
+  text: string;
+  uncertainSpeaker: boolean;
+}
+
+/** Backend interviewer span since the last question signal (Slice 7). */
+export const getInterviewerSpanPreview = (
+  sessionId: string,
+): Promise<InterviewerSpanPreviewDto> =>
+  invoke<InterviewerSpanPreviewDto>("get_interviewer_span_preview", { sessionId });
+
 export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
   invoke<void>("assign_speaker", { sessionId, speakerId });
 

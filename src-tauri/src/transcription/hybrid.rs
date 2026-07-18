@@ -32,22 +32,66 @@ const CANDIDATE_THRESHOLD: f32 = 0.7;
 const SKIP_THRESHOLD: f32 = 0.3;
 
 /// Rolling System-channel transcript since the last Ctrl+Q signal.
+///
+/// Chunks carry optional `chunk_id` and `label_source` so manual relabels
+/// (Slice 6/7) can exclude user-corrected lines from the interviewer span
+/// preview and from `drain_since_last_signal`.
+#[derive(Debug, Clone)]
+struct BufferedChunk {
+    chunk_id: Option<String>,
+    text: String,
+    label_source: String,
+    excluded: bool,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SystemTranscriptBuffer {
-    chunks: Vec<String>,
+    chunks: Vec<BufferedChunk>,
 }
 
 impl SystemTranscriptBuffer {
     pub fn append(&mut self, text: &str) {
+        self.append_chunk(text, None, "channel");
+    }
+
+    pub fn append_chunk(&mut self, text: &str, chunk_id: Option<String>, label_source: &str) {
         let trimmed = text.trim();
         if !trimmed.is_empty() {
-            self.chunks.push(trimmed.to_string());
+            self.chunks.push(BufferedChunk {
+                chunk_id,
+                text: trimmed.to_string(),
+                label_source: label_source.to_string(),
+                excluded: false,
+            });
         }
+    }
+
+    /// Exclude a chunk from the interviewer span after the user relabels it to
+    /// `Microphone` (You).
+    pub fn exclude_chunk(&mut self, chunk_id: &str) {
+        for chunk in &mut self.chunks {
+            if chunk.chunk_id.as_deref() == Some(chunk_id) {
+                chunk.excluded = true;
+            }
+        }
+    }
+
+    /// Update label provenance when the classifier or user confirms a speaker.
+    pub fn confirm_chunk(&mut self, chunk_id: &str, label_source: &str) {
+        for chunk in &mut self.chunks {
+            if chunk.chunk_id.as_deref() == Some(chunk_id) {
+                chunk.label_source = label_source.to_string();
+            }
+        }
+    }
+
+    fn active_chunks(&self) -> impl Iterator<Item = &BufferedChunk> {
+        self.chunks.iter().filter(|c| !c.excluded)
     }
 
     /// Drain and join all chunks accumulated since the last manual signal.
     pub fn drain_since_last_signal(&mut self) -> String {
-        let joined = self.chunks.join(" ");
+        let joined = self.accumulated_text();
         self.chunks.clear();
         joined
     }
@@ -61,7 +105,20 @@ impl SystemTranscriptBuffer {
     }
 
     pub fn accumulated_text(&self) -> String {
-        self.chunks.join(" ")
+        self.active_chunks()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// True when any active chunk still lacks classifier or user confirmation.
+    pub fn has_uncertain_speaker(&self) -> bool {
+        self.active_chunks().any(|c| {
+            matches!(
+                c.label_source.as_str(),
+                "channel" | "heuristic" | "heuristic_pending"
+            )
+        })
     }
 }
 
@@ -352,6 +409,24 @@ mod tests {
         let drained = buf.drain_since_last_signal();
         assert_eq!(drained, "Tell me about yourself.");
         assert!(buf.accumulated_text().is_empty());
+    }
+
+    #[test]
+    fn system_buffer_excludes_user_relabeled_chunks() {
+        let mut buf = SystemTranscriptBuffer::default();
+        buf.append_chunk("Wrong label.", Some("id-1".into()), "heuristic");
+        buf.append_chunk("Still interviewer.", Some("id-2".into()), "llm");
+        buf.exclude_chunk("id-1");
+        assert_eq!(buf.accumulated_text(), "Still interviewer.");
+    }
+
+    #[test]
+    fn system_buffer_uncertain_when_heuristic_only() {
+        let mut buf = SystemTranscriptBuffer::default();
+        buf.append_chunk("Maybe interviewer.", Some("id-1".into()), "heuristic");
+        assert!(buf.has_uncertain_speaker());
+        buf.confirm_chunk("id-1", "llm");
+        assert!(!buf.has_uncertain_speaker());
     }
 
     #[test]
