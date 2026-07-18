@@ -61,6 +61,7 @@ const ENRICHMENT_RESULTS_PER_QUERY: usize = 4;
 use crate::session::draft;
 use crate::session::limits;
 use crate::session::memory::ConversationMemory;
+use crate::session::persistence::SessionPersistence;
 use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
@@ -1784,7 +1785,7 @@ fn prompts_base_dir() -> PathBuf {
         })
 }
 
-/// Build the Tier-2/3 async speaker classifier for a live session (Slice 4).
+/// Build the Tier-2/3 async speaker classifier for a live session (Slice 4/5).
 ///
 /// Uses the Groq fast tier directly (bypassing the failover manager — this
 /// is a best-effort background confirmation signal, not a critical-path
@@ -1792,19 +1793,40 @@ fn prompts_base_dir() -> PathBuf {
 /// a failed call simply means chunks stay at their heuristic label).
 /// Returns `None` if no Groq key is configured — phone/dual-stream sessions
 /// still work fine on heuristics alone in that case.
-fn build_speaker_classifier() -> Option<Arc<SpeakerClassifier>> {
+fn build_speaker_classifier(
+    app: &AppHandle,
+    persistence: Arc<SessionPersistence>,
+) -> Option<Arc<SpeakerClassifier>> {
     let provider = stack::resolve_primary_by_name("groq")?;
+    let app_handle = app.clone();
     Some(Arc::new(SpeakerClassifier::spawn(
         provider,
         prompts_base_dir(),
         move |result| {
-            // Persistence + `speaker_refined` event wiring lands in Slice 5 —
-            // for now this only proves the queue delivers verdicts end to end.
-            debug!(
-                chunk_id = %result.chunk_id,
-                verdict = ?result.verdict,
-                "speaker classifier verdict received"
-            );
+            let Some(speaker) = result.verdict.as_speaker() else {
+                return; // Uncertain — leave the existing heuristic label alone.
+            };
+            match persistence.confirm_transcript_chunk_speaker(result.chunk_id, speaker) {
+                Ok(true) => {
+                    crate::events::emit_speaker_refined(
+                        &app_handle,
+                        crate::events::SpeakerRefinedPayload {
+                            chunk_id: result.chunk_id.to_string(),
+                            speaker: speaker.to_string(),
+                            source: "llm".to_string(),
+                        },
+                    );
+                }
+                Ok(false) => {
+                    debug!(
+                        chunk_id = %result.chunk_id,
+                        "speaker classifier verdict landed after chunk no longer exists"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to persist speaker classifier verdict");
+                }
+            }
         },
     )))
 }
@@ -3106,7 +3128,7 @@ pub async fn start_session(
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
-    let speaker_classifier = build_speaker_classifier();
+    let speaker_classifier = build_speaker_classifier(&app, Arc::clone(&state.persistence));
 
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),

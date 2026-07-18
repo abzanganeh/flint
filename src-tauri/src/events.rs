@@ -165,6 +165,23 @@ pub fn emit_transcript_chunk_relabeled<R: Runtime>(
     let _ = app.emit("transcript_chunk_relabeled", payload);
 }
 
+/// Slice 5 (`lpav-s5-speaker-refined-events`) — fired when the async Tier-2/3
+/// LLM speaker classifier ([`crate::audio::speaker_classifier`]) returns a
+/// confirmed verdict for a chunk. `source` is always `"llm"` here; the
+/// frontend uses this to distinguish a classifier-confirmed correction from
+/// the immediate heuristic auto-correct already reflected in the initial
+/// `transcription_chunk` event.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpeakerRefinedPayload {
+    pub chunk_id: String,
+    pub speaker: String,
+    pub source: String,
+}
+
+pub fn emit_speaker_refined<R: Runtime>(app: &AppHandle<R>, payload: SpeakerRefinedPayload) {
+    let _ = app.emit("speaker_refined", payload);
+}
+
 pub fn emit_turn_started<R: Runtime>(app: &AppHandle<R>, payload: TurnStartedPayload) {
     let _ = app.emit("turn_started", payload);
 }
