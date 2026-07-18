@@ -2,9 +2,9 @@
   "current_milestone": "visual-robustness-and-triggers",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
-  "current_slice": 1,
-  "completed_slices": [0],
-  "current_task_id": "vrt-s1-sse-line-buffering",
+  "current_slice": 2,
+  "completed_slices": [0, 1],
+  "current_task_id": "vrt-s2-wire-buffered-lines-all-providers",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -23,5 +23,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 0 done: cherry-picked whisper health-check copy fix (6e78602) and mic calibration/diarizer crash fix (2de2e5f) onto new branch, added run-dev-stack.sh, deleted stray fix branches. Starting Part A streaming correctness."
+  "notes": "Slice 1 done (55b350f): sse_lines.rs byte-buffering module + 6 regression tests. Starting slice 2: wire into all 5 LLM providers."
 }
