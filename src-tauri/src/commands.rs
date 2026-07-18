@@ -1508,7 +1508,7 @@ fn reopen_ui_state(stored: SessionState, has_digest: bool) -> SessionState {
         PreWarming => DigestReview,
         Rehearsing | MockInterview => Rehearsing,
         Configuring | Ingesting => Configuring,
-        Live | Ending | Crashed | Recovering | Paused | Idle => {
+        Live | LivePreview | Ending | Crashed | Recovering | Paused | Idle => {
             if has_digest {
                 Rehearsing
             } else {

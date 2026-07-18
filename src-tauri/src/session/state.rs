@@ -40,6 +40,7 @@ pub enum SessionState {
     Rehearsing,
     MockInterview,
     Ready,
+    LivePreview,
     Live,
     Paused,
     Ending,
@@ -61,6 +62,7 @@ impl SessionState {
             SessionState::Rehearsing => "REHEARSING",
             SessionState::MockInterview => "MOCK_INTERVIEW",
             SessionState::Ready => "READY",
+            SessionState::LivePreview => "LIVE_PREVIEW",
             SessionState::Live => "LIVE",
             SessionState::Paused => "PAUSED",
             SessionState::Ending => "ENDING",
@@ -299,6 +301,9 @@ const fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
             | (MockInterview, Configuring) // user restarts from session design
             | (Ready, Configuring) // user returns to edit pasted context before live
             | (Ready, Live)
+            | (Ready, LivePreview) // user opts into a 60s live preview before going fully live
+            | (LivePreview, Ready) // preview cancelled or timed out — back to the READY gate
+            | (LivePreview, Live) // preview committed — orchestrator spawns, session goes live
             | (Live, Paused)
             | (Paused, Live)
             | (Live, Ending)
@@ -1087,6 +1092,7 @@ mod tests {
         assert_eq!(SessionState::PreWarming.to_string(), "PRE_WARMING");
         assert_eq!(SessionState::Rehearsing.to_string(), "REHEARSING");
         assert_eq!(SessionState::Ready.to_string(), "READY");
+        assert_eq!(SessionState::LivePreview.to_string(), "LIVE_PREVIEW");
         assert_eq!(SessionState::Live.to_string(), "LIVE");
         assert_eq!(SessionState::Paused.to_string(), "PAUSED");
         assert_eq!(SessionState::Ending.to_string(), "ENDING");
@@ -1234,5 +1240,134 @@ mod tests {
         let mut sm = SessionStateMachine::new();
         assert!(sm.transition(SessionState::MockInterview).is_err());
         assert_eq!(*sm.current(), SessionState::Idle);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Live Preview transitions (`lpav-s8-live-preview-state`):
+    // READY <-> LIVE_PREVIEW, LIVE_PREVIEW -> LIVE, LIVE_PREVIEW -> READY.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    fn drive_to_ready() -> SessionStateMachine {
+        drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Ready,
+        ])
+    }
+
+    #[test]
+    fn test_valid_ready_to_live_preview() {
+        let mut sm = drive_to_ready();
+        assert!(sm.transition(SessionState::LivePreview).is_ok());
+        assert_eq!(*sm.current(), SessionState::LivePreview);
+    }
+
+    #[test]
+    fn test_valid_live_preview_to_ready_cancelled_or_timed_out() {
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::LivePreview).unwrap();
+        assert!(sm.transition(SessionState::Ready).is_ok());
+        assert_eq!(*sm.current(), SessionState::Ready);
+    }
+
+    #[test]
+    fn test_valid_live_preview_to_live_committed() {
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::LivePreview).unwrap();
+        assert!(sm.transition(SessionState::Live).is_ok());
+        assert_eq!(*sm.current(), SessionState::Live);
+    }
+
+    #[test]
+    fn test_live_preview_round_trip_can_repeat() {
+        // A user can back out of preview and re-enter it before committing.
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::LivePreview).unwrap();
+        sm.transition(SessionState::Ready).unwrap();
+        assert!(sm.transition(SessionState::LivePreview).is_ok());
+        assert_eq!(*sm.current(), SessionState::LivePreview);
+    }
+
+    #[test]
+    fn test_invalid_idle_to_live_preview_is_rejected() {
+        let mut sm = SessionStateMachine::new();
+        let result = sm.transition(SessionState::LivePreview);
+        assert!(result.is_err());
+        assert_eq!(*sm.current(), SessionState::Idle);
+    }
+
+    #[test]
+    fn test_invalid_live_to_live_preview_is_rejected() {
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::Live).unwrap();
+        let result = sm.transition(SessionState::LivePreview);
+        assert!(result.is_err());
+        assert_eq!(*sm.current(), SessionState::Live);
+    }
+
+    #[test]
+    fn test_invalid_live_preview_to_configuring_is_rejected() {
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::LivePreview).unwrap();
+        let result = sm.transition(SessionState::Configuring);
+        assert!(result.is_err());
+        assert_eq!(*sm.current(), SessionState::LivePreview);
+    }
+
+    #[test]
+    fn test_invalid_live_preview_to_ending_is_rejected() {
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::LivePreview).unwrap();
+        let result = sm.transition(SessionState::Ending);
+        assert!(result.is_err());
+        assert_eq!(*sm.current(), SessionState::LivePreview);
+    }
+
+    #[test]
+    fn test_invalid_live_preview_to_live_preview_self_transition_is_rejected() {
+        let mut sm = drive_to_ready();
+        sm.transition(SessionState::LivePreview).unwrap();
+        let result = sm.transition(SessionState::LivePreview);
+        assert!(result.is_err());
+        assert_eq!(*sm.current(), SessionState::LivePreview);
+    }
+
+    #[test]
+    fn test_invalid_mock_interview_to_live_preview_is_rejected() {
+        let mut sm = drive(&[
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Rehearsing,
+            SessionState::MockInterview,
+        ]);
+        let result = sm.transition(SessionState::LivePreview);
+        assert!(result.is_err());
+        assert_eq!(*sm.current(), SessionState::MockInterview);
+    }
+
+    #[test]
+    fn test_live_preview_transition_is_persisted() {
+        let persister = Arc::new(RecordingPersister::default());
+        let mut sm = SessionStateMachine::with_persister(persister.clone());
+        let session_id = Uuid::new_v4();
+        sm.set_session_id(session_id).unwrap();
+        for s in [
+            SessionState::Configuring,
+            SessionState::Ingesting,
+            SessionState::DigestReview,
+            SessionState::PreWarming,
+            SessionState::Ready,
+        ] {
+            sm.transition(s).unwrap();
+        }
+        sm.transition(SessionState::LivePreview).unwrap();
+        assert_eq!(
+            persister.calls().last(),
+            Some(&(session_id, SessionState::LivePreview))
+        );
     }
 }
