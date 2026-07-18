@@ -1,7 +1,15 @@
-//! Directional response thread (design doc §8, task 4.7).
+//! Answer response thread (design doc §8, task 4.7; `lpav-s18-answer-thread`).
 //!
 //! Fires on every `System`-source question. Target TTFT < 800ms (P95 < 900ms).
-//! Prompt loaded from `/prompts/directional/{provider}.txt` or `default.txt`.
+//! Prompt loaded from `/prompts/answer/{provider}.txt` or `default.txt`.
+//!
+//! Renamed from `directional.rs` — the Answer thread now also absorbs the
+//! retired Clarifying thread's job: rather than spawning a second LLM call to
+//! generate a standalone clarifying question, the `/prompts/answer/` template
+//! instructs the model to state its best-guess interpretation of an ambiguous
+//! question directly in the conclusion and always answer (see slice 17). The
+//! old `clarifying.rs` module itself is deleted end-to-end in slice 28, once
+//! `mod.rs` stops spawning it (slice 21).
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -23,12 +31,13 @@ use crate::llm::provider::CompletionConfig;
 
 use super::{load_prompt, OrchestrationContext};
 
-/// Execute the directional response thread.
+/// Execute the Answer response thread.
 ///
-/// Streams tokens to the React layer via `directional_token` events.
+/// Streams tokens to the React layer via `directional_token` events (renamed
+/// to `answer_token` in slice 22, alongside the rest of the event contract).
 /// Returns the full assembled response text (for confidence scoring and
 /// memory recording).
-pub async fn run_directional<R: Runtime>(
+pub async fn run_answer<R: Runtime>(
     ctx: OrchestrationContext,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
@@ -206,8 +215,8 @@ fn build_prompt(
     provider_name: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
-    let template = load_prompt("directional", provider_name, prompts_dir)
-        .context("failed to load directional prompt")?;
+    let template = load_prompt("answer", provider_name, prompts_dir)
+        .context("failed to load answer prompt")?;
 
     let rag_text = ctx
         .rag_chunks

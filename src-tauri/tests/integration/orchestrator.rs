@@ -16,8 +16,8 @@ use flint_lib::llm::provider::{
     PanickingMockLLMProvider, RateLimit,
 };
 use flint_lib::llm::rate_limiter::RateLimiter;
+use flint_lib::orchestrator::answer;
 use flint_lib::orchestrator::depth;
-use flint_lib::orchestrator::directional;
 use flint_lib::orchestrator::prewarm::PreWarmCache;
 use flint_lib::orchestrator::{
     dispatch_turn, run_orchestrator, OrchestrationContext, OrchestratorConfig,
@@ -144,7 +144,7 @@ async fn directional_and_depth_threads_run_concurrently() {
 
     let start = Instant::now();
     let dir_task = tokio::spawn(async move {
-        directional::run_directional(dir_ctx, dir_failover, &dir_prompts, dir_app).await
+        answer::run_answer(dir_ctx, dir_failover, &dir_prompts, dir_app).await
     });
     let dep_task = tokio::spawn(async move {
         depth::run_depth(dep_ctx, dep_failover, &dep_prompts, dep_app).await
@@ -809,7 +809,7 @@ async fn cache_hit_serves_directional_without_llm_call() {
     let failover = make_failover("should not be called");
 
     let start = Instant::now();
-    let result = directional::run_directional(ctx, failover, &prompts_dir, app)
+    let result = answer::run_answer(ctx, failover, &prompts_dir, app)
         .await
         .expect("cache serve should succeed");
     let elapsed = start.elapsed();

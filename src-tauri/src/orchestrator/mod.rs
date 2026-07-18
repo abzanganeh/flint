@@ -1,5 +1,6 @@
-//! Orchestration layer: directional/depth/clarifying response threads,
-//! pre-warm cache, and session lifecycle management.
+//! Orchestration layer: response threads (directional/depth/clarifying,
+//! migrating to answer/visual across slices 18-28 of `lpav`), pre-warm
+//! cache, and session lifecycle management.
 //!
 //! Reference: design doc §8 (System Architecture), `.cursor/rules` flint-core
 //! §4 (parallel threads via tokio::spawn, never sequential).
@@ -16,9 +17,9 @@
 //! If a new question arrives within that window the timer resets and the older
 //! question is discarded. This prevents double-firing on split utterances.
 
+pub mod answer;
 pub mod clarifying;
 pub mod depth;
-pub mod directional;
 pub mod prewarm;
 
 use std::path::{Path, PathBuf};
@@ -621,7 +622,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     let cla_prompts = cfg.prompts_dir.clone();
 
     let dir_task = tokio::spawn(async move {
-        directional::run_directional(dir_ctx, dir_failover, &dir_prompts, dir_app).await
+        answer::run_answer(dir_ctx, dir_failover, &dir_prompts, dir_app).await
     });
 
     let dep_task = tokio::spawn(async move {
