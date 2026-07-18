@@ -998,6 +998,38 @@ mod tests {
         assert_eq!(mean_rag_score(&[]), 0.0);
     }
 
+    /// Slice 17 (`lpav-s17-prompts-answer-visual`) — the Answer + Visual
+    /// prompt artifacts must exist on disk before either thread can load
+    /// them; the gpt/claude/llama variants are the task's minimum bar.
+    #[test]
+    fn answer_and_visual_prompts_exist_on_disk() {
+        let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+        for category in ["answer", "visual"] {
+            for provider in ["default", "gpt", "claude", "llama"] {
+                let path = prompts_dir.join(category).join(format!("{provider}.txt"));
+                assert!(path.exists(), "missing prompt file: {}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn load_prompt_answer_loads_from_real_prompts_dir() {
+        let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+        let template =
+            load_prompt("answer", "groq", &prompts_dir).expect("answer prompt must load");
+        assert!(template.contains("{question}"));
+        assert!(template.contains("Follow-up"));
+    }
+
+    #[test]
+    fn load_prompt_visual_loads_from_real_prompts_dir() {
+        let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+        let template =
+            load_prompt("visual", "groq", &prompts_dir).expect("visual prompt must load");
+        assert!(template.contains("{question}"));
+        assert!(template.to_lowercase().contains("fenced"));
+    }
+
     #[tokio::test]
     async fn debounce_returns_latest_question() {
         use crate::audio::pipeline::DetectedQuestionSource;
