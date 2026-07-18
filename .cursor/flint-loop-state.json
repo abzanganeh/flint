@@ -2,9 +2,9 @@
   "current_milestone": "visual-robustness-and-triggers",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
-  "current_slice": 4,
-  "completed_slices": [0, 1, 2, 3],
-  "current_task_id": "vrt-s4-visual-panel-auto-retry",
+  "current_slice": 5,
+  "completed_slices": [0, 1, 2, 3, 4],
+  "current_task_id": "vrt-s5-visual-prompt-guardrails",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -20,8 +20,8 @@
   ],
   "agent_ladder": {
     "simple": "composer-2.5-fast",
-    "medium": "grok-4.5-fast-xhigh",
+    "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 3 done (4d9a68e): Visual non-streaming. Starting slice 4: Mermaid auto-retry in VisualPanel."
+  "notes": "Slice 4 done (4f3a5a8): VisualPanel Mermaid auto-retry once. Starting slice 5: Visual prompt guardrails."
 }
