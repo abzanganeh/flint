@@ -19,8 +19,8 @@
 
 pub mod answer;
 pub mod clarifying;
-pub mod depth;
 pub mod prewarm;
+pub mod visual;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -626,7 +626,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     });
 
     let dep_task = tokio::spawn(async move {
-        depth::run_depth(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+        visual::run_visual(dep_ctx, dep_failover, &dep_prompts, dep_app).await
     });
 
     let cla_task = tokio::spawn(async move {

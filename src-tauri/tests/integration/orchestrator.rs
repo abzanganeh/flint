@@ -17,8 +17,8 @@ use flint_lib::llm::provider::{
 };
 use flint_lib::llm::rate_limiter::RateLimiter;
 use flint_lib::orchestrator::answer;
-use flint_lib::orchestrator::depth;
 use flint_lib::orchestrator::prewarm::PreWarmCache;
+use flint_lib::orchestrator::visual;
 use flint_lib::orchestrator::{
     dispatch_turn, run_orchestrator, OrchestrationContext, OrchestratorConfig,
 };
@@ -147,7 +147,7 @@ async fn directional_and_depth_threads_run_concurrently() {
         answer::run_answer(dir_ctx, dir_failover, &dir_prompts, dir_app).await
     });
     let dep_task = tokio::spawn(async move {
-        depth::run_depth(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+        visual::run_visual(dep_ctx, dep_failover, &dep_prompts, dep_app).await
     });
 
     let (dir_result, dep_result) = tokio::join!(dir_task, dep_task);
@@ -604,9 +604,9 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
     assert!(result.is_ok());
 }
 
-/// Cache hit + turn >= 3 → depth.rs runs a fresh LLM pass in parallel with
+/// Cache hit + turn >= 3 → visual.rs runs a fresh LLM pass in parallel with
 /// streaming the cached text. Covers the `cached_depth && turn_number >= 3`
-/// branch in `depth::run_depth`.
+/// branch in `visual::run_visual`.
 #[tokio::test]
 async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
     let embedder = match try_embedder() {
