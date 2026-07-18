@@ -132,6 +132,7 @@ describe("LiveSessionStatusBar", () => {
 
     expect(signalQuestionEnded).toHaveBeenCalledWith("session-1");
     expect(screen.getByTestId("live-q-button").className).toContain("live-q-button--flash");
+    expect(screen.getByTestId("live-q-button").textContent).toContain("Ask now");
   });
 
   it("surfaces backend errors when signalQuestionEnded fails", async () => {

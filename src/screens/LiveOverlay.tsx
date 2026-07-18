@@ -369,7 +369,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
           }}
         >
           Phone interview mode: one audio channel. Labels are best-effort — press{" "}
-          <strong>Q</strong> (or Ctrl+Q) when the <em>interviewer</em> finishes their question,
+          <strong>Ask now</strong> (Ctrl+Q) when the <em>interviewer</em> finishes their question,
           not when you speak. Use headphones in normal mode if you hear echo.
         </div>
       )}

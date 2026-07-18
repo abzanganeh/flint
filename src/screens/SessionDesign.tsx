@@ -4,6 +4,7 @@ import {
   createSession,
   getSessionSnapshot,
   ingestStructuredContext,
+  setPhoneCallMode,
   type SessionConfigDto,
   type SessionContextFields,
 } from "../commands";
@@ -207,6 +208,7 @@ export default function SessionDesign({
     fieldsFromPreFill(preFill, pendingIntel),
   );
   const [showRecommended, setShowRecommended] = useState(false);
+  const [phoneCallMode, setPhoneCallModeState] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -252,6 +254,7 @@ export default function SessionDesign({
         if (snapshot.name) setName(snapshot.name);
         if (snapshot.sessionType) setSessionType(snapshot.sessionType);
         if (snapshot.domain) setDomain(snapshot.domain);
+        if (snapshot.phoneCallMode) setPhoneCallModeState(snapshot.phoneCallMode);
 
         if (snapshot.contextFields) {
           // v6 session — restore all structured fields.
@@ -335,6 +338,7 @@ export default function SessionDesign({
         name: name.trim(),
         sessionType,
         domain: domain.trim() || "general",
+        phoneCallMode,
       };
 
       let sid = sessionIdRef.current;
@@ -351,6 +355,7 @@ export default function SessionDesign({
 
       sid = await createSession(config);
       sessionIdRef.current = sid;
+      await setPhoneCallMode(phoneCallMode);
       await ingestStructuredContext(sid, fields);
     } catch (err: unknown) {
       setError(String(err));
@@ -424,6 +429,29 @@ export default function SessionDesign({
             onChange={(e) => setDomain(e.target.value)}
             disabled={isLoading}
           />
+        </div>
+
+        <div className="sd-field sd-field--phone-mode" data-testid="session-design-phone-mode">
+          <label className="sd-phone-mode-toggle">
+            <input
+              type="checkbox"
+              checked={phoneCallMode}
+              disabled={isLoading}
+              onChange={(e) => {
+                const enabled = e.target.checked;
+                setPhoneCallModeState(enabled);
+                void setPhoneCallMode(enabled).catch(() => undefined);
+              }}
+            />
+            <span>
+              <strong>Phone interview mode</strong>
+              <span className="sd-hint" style={{ display: "block", marginTop: 4 }}>
+                {phoneCallMode
+                  ? "Interviewer is on a phone call near your laptop — Flint captures both voices from the microphone. You can still override this in Settings."
+                  : "Default: system audio loopback (Zoom, Meet, browser tabs). Enable for speakerphone calls next to the laptop."}
+              </span>
+            </span>
+          </label>
         </div>
 
         {/* ── Required fields ── */}

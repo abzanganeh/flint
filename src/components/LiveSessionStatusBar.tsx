@@ -198,7 +198,7 @@ const LiveSessionStatusBar = ({
         : detectionPhase === "generating"
           ? "Generating response…"
           : phoneCallMode
-            ? "Phone mode — press Q when interviewer finishes"
+            ? "Phone mode — press Ask now when interviewer finishes"
             : "Listening…";
 
   const providerDotClass = failoverActive
@@ -236,7 +236,7 @@ const LiveSessionStatusBar = ({
           ) : (
             <span className="live-status-bar__transcript-empty">
               {phoneCallMode
-                ? "Waiting for audio… press Q when the interviewer finishes their question"
+                ? "Waiting for audio… press Ask now when the interviewer finishes their question"
                 : "Waiting for interviewer audio…"}
             </span>
           )}
@@ -270,7 +270,8 @@ const LiveSessionStatusBar = ({
           title="Mark question ended — sends captured interviewer speech to AI (Ctrl+Q)"
           onClick={() => void fireManualQuestion()}
         >
-          Q
+          <span className="live-q-button__label">Ask now</span>
+          <kbd className="live-q-button__keycap">Ctrl+Q</kbd>
         </button>
       </div>
     </div>
