@@ -231,6 +231,9 @@ pub fn run() {
             // Live session (Phase 3+)
             commands::start_session,
             commands::stop_session,
+            commands::start_live_preview,
+            commands::commit_live_preview,
+            commands::cancel_live_preview,
             commands::trigger_response,
             commands::signal_question_ended,
             commands::relabel_transcript_chunk,

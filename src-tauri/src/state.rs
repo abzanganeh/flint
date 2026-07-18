@@ -16,6 +16,7 @@ use crate::mock::mic_capture::MicCapture;
 
 use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::DetectedQuestion;
+use crate::llm::failover::FailoverManager;
 use crate::transcription::hybrid::SystemTranscriptBuffer;
 
 use crate::auth_session::restore_auth_from_keychain;
@@ -101,6 +102,45 @@ pub struct LiveTaskHandles {
     pub watchdog: JoinHandle<()>,
 }
 
+/// Handles for an active LIVE_PREVIEW: audio capture + transcription
+/// pipeline only — deliberately no orchestrator, no watchdog. Either:
+///
+/// * `commit_live_preview` consumes this and builds a [`LiveTaskHandles`] on
+///   top of the same capture thread and pipeline task (no audio
+///   re-initialisation), or
+/// * `cancel_live_preview` (explicit, or the 60s auto-cancel timer) tears
+///   the capture thread and pipeline down and returns to READY.
+///
+/// `failover` / `local_provider` / `context_window` are kept alive here
+/// specifically so `commit_live_preview` never has to rebuild the failover
+/// stack — it was already validated (API key present, etc.) at preview
+/// start time.
+pub struct LivePreviewTaskHandles {
+    pub stop_tx: oneshot::Sender<()>,
+    pub zeroed_rx: oneshot::Receiver<()>,
+    pub pipeline: JoinHandle<anyhow::Result<()>>,
+    /// Sender clone used by `trigger_response` during the preview window
+    /// (e.g. Ask Now). Cloned again into `LiveTaskHandles` on commit.
+    pub question_tx: mpsc::Sender<DetectedQuestion>,
+    /// The receiver side is parked here — unconsumed — until
+    /// `commit_live_preview` hands it to a freshly spawned orchestrator.
+    /// No orchestrator runs during the preview window, so nothing drains
+    /// this channel; a full preview window (60s, low question volume) never
+    /// approaches its capacity.
+    pub question_rx: mpsc::Receiver<DetectedQuestion>,
+    pub system_transcript_buffer: Arc<std::sync::Mutex<SystemTranscriptBuffer>>,
+    pub diarizer: Arc<std::sync::Mutex<DiarizerManager>>,
+    pub audit: Arc<crate::audio::audit::AudioAuditCounters>,
+    pub turn_cancel: Arc<Mutex<Option<TurnCancelFlag>>>,
+    pub failover: Arc<FailoverManager>,
+    pub local_provider: Arc<dyn LLMProvider>,
+    pub context_window: usize,
+    /// 60s auto-cancel timer. Aborted by `cancel_live_preview` /
+    /// `commit_live_preview` so it can never fire after the preview has
+    /// already been resolved.
+    pub timeout: JoinHandle<()>,
+}
+
 /// Shared application state for Tauri commands.
 pub struct AppState {
     // ── Auth (Phase 1) ───────────────────────────────────────────────────────
@@ -137,7 +177,12 @@ pub struct AppState {
     /// Audio capture thread stop signal + background task handles. `Some`
     /// only while the session is LIVE. Cleared on `stop_session`.
     pub live_tasks: Mutex<Option<LiveTaskHandles>>,
-    /// Serializes `start_session` — React StrictMode can invoke it twice in dev.
+    /// `Some` only while the session is LIVE_PREVIEW. Consumed by
+    /// `commit_live_preview` (moved into `live_tasks`) or torn down by
+    /// `cancel_live_preview` / the 60s auto-cancel timer.
+    pub live_preview_tasks: Mutex<Option<LivePreviewTaskHandles>>,
+    /// Serializes `start_session` / `start_live_preview` — React StrictMode
+    /// can invoke either twice in dev.
     pub live_start_lock: Mutex<()>,
     /// Shared orchestrator conversation memory. Same `Arc` as passed to
     /// `OrchestratorConfig` — not a duplicate instance.
@@ -280,6 +325,7 @@ impl AppState {
             vector_store,
             llm: Arc::new(StubLLMProvider),
             live_tasks: Mutex::new(None),
+            live_preview_tasks: Mutex::new(None),
             live_start_lock: Mutex::new(()),
             session_memory: Arc::new(Mutex::new(None)),
             rehearsal_turn: Mutex::new(0),

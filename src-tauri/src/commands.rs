@@ -6,10 +6,11 @@ use std::time::{Duration, Instant};
 use anyhow::Context as AnyhowContext;
 use secrecy::{ExposeSecret, SecretString};
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
+use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::audio::capture::AudioCapture;
+use crate::audio::capture::{AudioCapture, AudioFrame};
 use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
 use crate::audio::speaker_classifier::SpeakerClassifier;
@@ -65,7 +66,7 @@ use crate::session::persistence::SessionPersistence;
 use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
-use crate::state::{AppState, LiveTaskHandles, MockTaskHandles};
+use crate::state::{AppState, LivePreviewTaskHandles, LiveTaskHandles, MockTaskHandles};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{HybridQuestionDetector, SystemTranscriptBuffer};
 use crate::transcription::prompt::{build_whisper_initial_prompt, FALLBACK_WHISPER_INITIAL_PROMPT};
@@ -2946,6 +2947,60 @@ pub async fn append_research_to_context(
     })
 }
 
+/// Spawn the audio capture thread (`cpal::Stream` is `!Send`, so it must own
+/// its own OS thread) and wait up to 5s for it to confirm startup.
+///
+/// Shared by `start_session` and `start_live_preview` — both need identical
+/// capture-thread lifecycle semantics: `stop_tx` signals the thread to call
+/// `AudioCapture::stop()` (zeroing both ring buffers) and exit; `zeroed_rx`
+/// resolves once that has happened, which callers await before treating
+/// teardown as complete (the "zeroed on session end" security invariant).
+async fn spawn_audio_capture_thread(
+    is_phone_call_mode: bool,
+    system_tx: mpsc::Sender<AudioFrame>,
+    mic_tx: mpsc::Sender<AudioFrame>,
+) -> Result<(oneshot::Sender<()>, oneshot::Receiver<()>), String> {
+    let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let (zeroed_tx, zeroed_rx) = oneshot::channel::<()>();
+    let (ready_tx, ready_rx) = oneshot::channel::<anyhow::Result<()>>();
+
+    std::thread::spawn(move || {
+        let capture_result = if is_phone_call_mode {
+            tracing::info!("phone-call mode: routing mic as interviewer audio source");
+            AudioCapture::start_phone_mode(system_tx, mic_tx)
+        } else {
+            AudioCapture::start(system_tx, mic_tx)
+        };
+        match capture_result {
+            Ok(capture) => {
+                let _ = ready_tx.send(Ok(()));
+                // Block here until the caller signals stop (or drops stop_tx).
+                let _ = stop_rx.blocking_recv();
+                if let Err(e) = capture.stop() {
+                    tracing::warn!(error = %e, "audio capture stop error");
+                }
+                let _ = zeroed_tx.send(());
+            }
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+            }
+        }
+    });
+
+    tokio::time::timeout(Duration::from_secs(5), ready_rx)
+        .await
+        .map_err(|_| start_session_step_err("audio capture", "startup timed out after 5s"))?
+        .map_err(|_| {
+            start_session_step_err(
+                "audio capture",
+                "capture thread exited before sending ready signal",
+            )
+        })?
+        .map_err(|e| start_session_step_err("audio capture", e))?;
+
+    Ok((stop_tx, zeroed_rx))
+}
+
 /// Start a live session: initialise the audio pipeline and transition to LIVE.
 ///
 /// Valid from: `READY` only (rehearsal must be completed first).
@@ -3035,54 +3090,11 @@ pub async fn start_session(
     let (system_tx, system_rx) = tokio::sync::mpsc::channel(1024);
     let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(1024);
     let (question_tx, question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
-    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-    let (zeroed_tx, zeroed_rx) = tokio::sync::oneshot::channel::<()>();
 
     // ── 4. Audio capture on a dedicated OS thread (cpal::Stream is !Send) ─
-    //
-    // The thread owns the AudioCapture. When stop_tx fires (or is dropped),
-    // blocking_recv() returns, capture.stop() zeroes the ring buffers, then
-    // zeroed_tx fires so stop_session can confirm zeroing before emitting ENDED.
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<anyhow::Result<()>>();
-
     *state.phone_mode_manual_only.lock().await = is_phone_call_mode;
-
-    std::thread::spawn(move || {
-        let capture_result = if is_phone_call_mode {
-            tracing::info!("phone-call mode: routing mic as interviewer audio source");
-            AudioCapture::start_phone_mode(system_tx, mic_tx)
-        } else {
-            AudioCapture::start(system_tx, mic_tx)
-        };
-        match capture_result {
-            Ok(capture) => {
-                let _ = ready_tx.send(Ok(()));
-                // Block here until stop_session fires or AppState is dropped.
-                let _ = stop_rx.blocking_recv();
-                if let Err(e) = capture.stop() {
-                    tracing::warn!(error = %e, "audio capture stop error");
-                }
-                // Signal that ring buffers are zeroed. stop_session awaits
-                // this before emitting ENDED (security invariant).
-                let _ = zeroed_tx.send(());
-            }
-            Err(e) => {
-                let _ = ready_tx.send(Err(e));
-            }
-        }
-    });
-
-    // Wait up to 5 seconds for the capture thread to confirm startup.
-    tokio::time::timeout(Duration::from_secs(5), ready_rx)
-        .await
-        .map_err(|_| start_session_step_err("audio capture", "startup timed out after 5s"))?
-        .map_err(|_| {
-            start_session_step_err(
-                "audio capture",
-                "capture thread exited before sending ready signal",
-            )
-        })?
-        .map_err(|e| start_session_step_err("audio capture", e))?;
+    let (stop_tx, zeroed_rx) =
+        spawn_audio_capture_thread(is_phone_call_mode, system_tx, mic_tx).await?;
 
     // ── 5. Build conversation memory ──────────────────────────────────────
 
@@ -3209,6 +3221,346 @@ pub async fn start_session(
         model = %profile.recommended_whisper_model,
         "live session started",
     );
+    Ok(())
+}
+
+/// Stop the audio capture thread and pipeline behind an active
+/// [`LivePreviewTaskHandles`], and transition `LIVE_PREVIEW → READY` if the
+/// state machine is still in `LIVE_PREVIEW` by the time this runs.
+///
+/// Shared by the explicit `cancel_live_preview` command and the 60s
+/// auto-cancel timer spawned in `start_live_preview` — both need identical
+/// teardown semantics, and neither should emit `session_state_change` if the
+/// state already moved on (e.g. `commit_live_preview` won the race).
+async fn teardown_live_preview(app: &AppHandle, state: &AppState, handles: LivePreviewTaskHandles) {
+    let _ = handles.stop_tx.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
+    handles.pipeline.abort();
+
+    let transitioned = {
+        let mut machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::LivePreview {
+            false
+        } else {
+            match machine.transition(SessionState::Ready) {
+                Ok(()) => true,
+                Err(e) => {
+                    warn!(error = %e, "failed to transition LIVE_PREVIEW -> READY during teardown");
+                    false
+                }
+            }
+        }
+    };
+    if transitioned {
+        emit_state(app, SessionState::Ready);
+    }
+}
+
+/// Start a 60-second live preview: audio capture + transcription pipeline
+/// only — deliberately no orchestrator, so no responses are generated
+/// during the preview window.
+///
+/// Valid from: `READY` only. Auto-cancels back to `READY` after 60s unless
+/// `commit_live_preview` or `cancel_live_preview` resolves it first.
+#[tauri::command]
+pub async fn start_live_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    if !keychain::is_rehearsal_completed() {
+        return Err("Complete rehearsal before starting a live preview.".to_string());
+    }
+
+    let plan = open_session_plan(state.inner()).await;
+    crate::billing::validate_live_session_billing(plan)?;
+
+    checks::run_stealth_self_test()?;
+
+    let is_phone_call_mode = *state.phone_call_mode.lock().await;
+    if !is_phone_call_mode {
+        let isolation = checks::check_system_audio_isolation();
+        if isolation.status == checks::CheckStatus::Fail {
+            let hint = isolation
+                .fix_instruction
+                .as_deref()
+                .unwrap_or("Fix system audio routing before going live.");
+            return Err(format!("{} {}", isolation.message, hint));
+        }
+    }
+
+    let headphone_override = state
+        .persistence
+        .get_headphone_gate_override()
+        .map_err(|e| e.to_string())?;
+    let gate_status = headphone_gate::evaluate(is_phone_call_mode, headphone_override);
+    if gate_status.blocked {
+        return Err(headphone_gate::live_start_error(&gate_status));
+    }
+
+    // Shared with start_session — StrictMode double-mount can fire two
+    // concurrent starts in dev.
+    let _live_start_guard = state.live_start_lock.lock().await;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Ready {
+            return Err(format!(
+                "start_live_preview requires READY (current: {})",
+                machine.current()
+            ));
+        }
+    }
+    if state.live_preview_tasks.lock().await.is_some() {
+        return Err("A live preview is already running.".to_string());
+    }
+
+    // ── 1. Hardware profile and Whisper model ─────────────────────────────
+    let profile = hardware::assess_hardware();
+    let initial_prompt = resolve_whisper_initial_prompt(state.inner(), sid).await;
+    let whisper = init_whisper_engine(&profile, initial_prompt)
+        .map_err(|e| start_session_step_err("whisper init", e))?;
+
+    // ── 2. Failover stack — kept alive in LivePreviewTaskHandles so
+    // commit_live_preview reuses it instead of re-validating API keys ─────
+    let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
+        .await
+        .map_err(|e| start_session_step_err("failover stack", e))?;
+
+    let hybrid = Arc::new(tokio::sync::Mutex::new(
+        HybridQuestionDetector::new(Arc::clone(&failover), &prompts_base_dir())
+            .map_err(|e| start_session_step_err("hybrid question detector init", e))?,
+    ));
+    let system_transcript_buffer =
+        Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
+
+    // ── 3. Audio channels + capture thread — pipeline only, no orchestrator
+    let (system_tx, system_rx) = tokio::sync::mpsc::channel(1024);
+    let (mic_tx, mic_rx) = tokio::sync::mpsc::channel(1024);
+    let (question_tx, question_rx) = tokio::sync::mpsc::channel::<DetectedQuestion>(64);
+
+    *state.phone_mode_manual_only.lock().await = is_phone_call_mode;
+    let (stop_tx, zeroed_rx) =
+        spawn_audio_capture_thread(is_phone_call_mode, system_tx, mic_tx).await?;
+
+    let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
+    let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+    let speaker_classifier = build_speaker_classifier(&app, Arc::clone(&state.persistence));
+
+    let pipeline = tokio::spawn(run_audio_pipeline(
+        app.clone(),
+        sid,
+        whisper,
+        hybrid,
+        Arc::clone(&system_transcript_buffer),
+        question_tx.clone(),
+        system_rx,
+        mic_rx,
+        Arc::clone(&state.persistence),
+        Arc::new(std::sync::Mutex::new(MicQualityMonitor::default())),
+        Arc::clone(&audit),
+        !is_phone_call_mode,
+        is_phone_call_mode,
+        if is_phone_call_mode {
+            Some(Arc::clone(&diarizer))
+        } else {
+            None
+        },
+        speaker_classifier,
+    ));
+
+    let turn_cancel_slot: Arc<tokio::sync::Mutex<Option<crate::state::TurnCancelFlag>>> =
+        Arc::new(tokio::sync::Mutex::new(None));
+
+    // ── 4. State transition READY → LIVE_PREVIEW ───────────────────────────
+    {
+        let mut machine = state.state_machine.lock().await;
+        if let Err(e) = machine.transition(SessionState::LivePreview) {
+            drop(machine);
+            let _ = stop_tx.send(());
+            let _ = tokio::time::timeout(Duration::from_secs(2), zeroed_rx).await;
+            pipeline.abort();
+            return Err(session_error(e));
+        }
+    }
+    emit_state(&app, SessionState::LivePreview);
+
+    // ── 5. 60s auto-cancel timer ─────────────────────────────────────────
+    let timeout_app = app.clone();
+    let timeout = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let app_state = timeout_app.state::<AppState>();
+        let Some(handles) = app_state.live_preview_tasks.lock().await.take() else {
+            return; // already committed or explicitly cancelled
+        };
+        warn!(session_id = %sid, "live preview auto-cancelled after 60s timeout");
+        teardown_live_preview(&timeout_app, app_state.inner(), handles).await;
+    });
+
+    *state.live_preview_tasks.lock().await = Some(LivePreviewTaskHandles {
+        stop_tx,
+        zeroed_rx,
+        pipeline,
+        question_tx,
+        question_rx,
+        system_transcript_buffer,
+        diarizer,
+        audit,
+        turn_cancel: turn_cancel_slot,
+        failover,
+        local_provider,
+        context_window,
+        timeout,
+    });
+
+    info!(session_id = %sid, "live preview started");
+    Ok(())
+}
+
+/// Commit an active live preview into a full live session.
+///
+/// Spawns the orchestrator on top of the already-running capture thread and
+/// pipeline task — no audio re-initialisation — and transitions
+/// `LIVE_PREVIEW → LIVE`.
+///
+/// Valid from: `LIVE_PREVIEW` only.
+#[tauri::command]
+pub async fn commit_live_preview(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::LivePreview {
+            return Err(format!(
+                "commit_live_preview requires LIVE_PREVIEW (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let Some(preview) = state.live_preview_tasks.lock().await.take() else {
+        return Err("No live preview is running.".to_string());
+    };
+    preview.timeout.abort();
+
+    let memory = Arc::new(tokio::sync::Mutex::new(ConversationMemory::new(
+        preview.context_window,
+    )));
+
+    let digest = match resolve_session_digest(state.inner(), sid).await {
+        Ok(d) => d,
+        Err(e) => {
+            // The preview pipeline is still perfectly valid — hand it back
+            // rather than tearing it down over a recoverable digest error.
+            *state.live_preview_tasks.lock().await = Some(preview);
+            return Err(start_session_step_err("digest resolve", e));
+        }
+    };
+
+    let embedder = match state.require_embedder() {
+        Ok(e) => e,
+        Err(e) => {
+            *state.live_preview_tasks.lock().await = Some(preview);
+            return Err(start_session_step_err("embedder ready", e));
+        }
+    };
+
+    *state.session_memory.lock().await = Some(Arc::clone(&memory));
+
+    let orch_config = OrchestratorConfig {
+        session_id: sid,
+        digest: Arc::new(digest),
+        prompts_dir: prompts_base_dir(),
+        failover: Arc::clone(&preview.failover),
+        embedder,
+        vector_store: Arc::clone(&state.vector_store),
+        prewarm_cache: Arc::clone(&state.prewarm_cache),
+        memory,
+        compression_prompt: load_compression_prompt(),
+        local_llm: Arc::clone(&preview.local_provider),
+        turn_cancel_slot: Arc::clone(&preview.turn_cancel),
+        persistence: Arc::clone(&state.persistence),
+        cost_tracker: Arc::clone(&state.cost_tracker),
+    };
+
+    let orch_app = app.clone();
+    let orchestrator = tokio::spawn(async move {
+        run_orchestrator(preview.question_rx, orch_config, orch_app).await;
+    });
+
+    let watchdog = {
+        let wd_app = app.clone();
+        let wd_audit = Arc::clone(&preview.audit);
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            crate::audio::watchdog::run_audio_watchdog(wd_app, wd_audit, started).await;
+        })
+    };
+
+    let handles = LiveTaskHandles {
+        stop_tx: preview.stop_tx,
+        zeroed_rx: preview.zeroed_rx,
+        pipeline: preview.pipeline,
+        orchestrator,
+        question_tx: preview.question_tx,
+        turn_cancel: preview.turn_cancel,
+        system_transcript_buffer: preview.system_transcript_buffer,
+        diarizer: preview.diarizer,
+        audit: preview.audit,
+        watchdog,
+    };
+
+    {
+        let mut machine = state.state_machine.lock().await;
+        if let Err(e) = machine.transition(SessionState::Live) {
+            drop(machine);
+            // The preview's capture/pipeline are already folded into
+            // `handles` at this point — a rejected transition here means
+            // the state machine diverged underneath us (e.g. a concurrent
+            // caller raced to LIVE first). Abort everything and surface the
+            // error rather than attempting a partial rollback.
+            handles.pipeline.abort();
+            handles.orchestrator.abort();
+            handles.watchdog.abort();
+            return Err(session_error(e));
+        }
+    }
+
+    *state.live_tasks.lock().await = Some(handles);
+    emit_state(&app, SessionState::Live);
+
+    info!(session_id = %sid, "live preview committed — session now live");
+    Ok(())
+}
+
+/// Cancel an active live preview and return to `READY`.
+///
+/// Valid from: `LIVE_PREVIEW` only.
+#[tauri::command]
+pub async fn cancel_live_preview(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::LivePreview {
+            return Err(format!(
+                "cancel_live_preview requires LIVE_PREVIEW (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let Some(handles) = state.live_preview_tasks.lock().await.take() else {
+        return Err("No live preview is running.".to_string());
+    };
+    handles.timeout.abort();
+    teardown_live_preview(&app, state.inner(), handles).await;
+
+    info!("live preview cancelled");
     Ok(())
 }
 
