@@ -58,7 +58,7 @@ use crate::transcription::hybrid::{
 };
 use crate::transcription::rolling_context::ChannelRollingContexts;
 use crate::transcription::sanitizer::sanitize_live_transcript;
-use crate::transcription::speaker_suspicion::{self, SuspicionReason};
+use crate::transcription::speaker_suspicion::{self, NearDuplicateTracker, SuspicionReason};
 
 /// Default `label_source` value applied to every chunk emitted from this
 /// pipeline. The suspicion detector and the manual `relabel_transcript_chunk`
@@ -270,7 +270,11 @@ impl CrossChannelDedup {
     }
 }
 
-fn tokenize_for_echo(text: &str) -> Vec<String> {
+/// Tokenize text for near-duplicate comparison. Shared with
+/// [`crate::transcription::speaker_suspicion::NearDuplicateTracker`] (Slice 3)
+/// so both the hard 500ms echo-suppression window here and the wider 1.5s
+/// suspicion window there agree on what counts as "the same words".
+pub(crate) fn tokenize_for_echo(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -278,7 +282,7 @@ fn tokenize_for_echo(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn jaccard(a: &[String], b: &[String]) -> f32 {
+pub(crate) fn jaccard(a: &[String], b: &[String]) -> f32 {
     use std::collections::HashSet;
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -361,6 +365,7 @@ pub async fn run_audio_pipeline(
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
     let dedup = SyncMutex::new(CrossChannelDedup::default());
+    let near_duplicate = SyncMutex::new(NearDuplicateTracker::new());
     let phone_heuristic = SyncMutex::new(PhoneHeuristicState::new());
     let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
 
@@ -394,6 +399,7 @@ pub async fn run_audio_pipeline(
             &question_tx,
             &persistence,
             &dedup,
+            &near_duplicate,
             &phone_heuristic,
             &mic_quality,
             &audit,
@@ -428,6 +434,7 @@ async fn process_frame(
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
     dedup: &SyncMutex<CrossChannelDedup>,
+    near_duplicate: &SyncMutex<NearDuplicateTracker>,
     phone_heuristic: &SyncMutex<PhoneHeuristicState>,
     mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
     audit: &Arc<AudioAuditCounters>,
@@ -538,6 +545,11 @@ async fn process_frame(
     }
 
     let now = Instant::now();
+    let channel_speaker = match source {
+        AudioSource::System => "System",
+        AudioSource::Microphone => "Microphone",
+    };
+
     if echo_suppression_enabled {
         let mut guard = match dedup.lock() {
             Ok(g) => g,
@@ -584,6 +596,14 @@ async fn process_frame(
         }
         guard.record(source, &result.text, now);
     }
+    // Wider (1.5s) near-duplicate window — dual-stream only (Slice 3). Phone
+    // mode routes everything onto one physical channel, so there is no
+    // "opposite channel" for loopback bleed to survive onto.
+    if echo_suppression_enabled {
+        if let Ok(mut guard) = near_duplicate.lock() {
+            guard.record(channel_speaker, &result.text, now);
+        }
+    }
 
     if let Ok(mut guard) = rolling_contexts.lock() {
         guard.append(source, &result.text);
@@ -598,18 +618,31 @@ async fn process_frame(
     // question detection, summary) sees the speaker that actually spoke.
     // Phone-call mode collapses both speakers onto one channel, so the
     // heuristic is meaningless there and only runs in dual-stream mode.
-    let channel_speaker = match source {
-        AudioSource::System => "System",
-        AudioSource::Microphone => "Microphone",
-    };
     let mut speaker = channel_speaker;
     let mut label_source = LABEL_SOURCE_CHANNEL;
+    // True when a heuristic (text-shape or near-duplicate suspicion)
+    // overrode the channel label this chunk — Slice 4 will use this to
+    // decide which chunks are worth a Tier-2/3 LLM confirmation call.
+    let mut was_suspicious = false;
 
     // Dual-stream: channel is usually reliable; heuristics catch bleed.
     // Phone mode: all audio arrives on System — heuristics are the only way
     // to distinguish interviewer questions from the user's answers.
     if echo_suppression_enabled || phone_mode_manual_only {
-        if let Some(verdict) = speaker_suspicion::evaluate(channel_speaker, &result.text) {
+        let text_shape_verdict = speaker_suspicion::evaluate(channel_speaker, &result.text);
+        let verdict = text_shape_verdict.or_else(|| {
+            if echo_suppression_enabled {
+                near_duplicate
+                    .lock()
+                    .ok()
+                    .and_then(|mut guard| guard.check(channel_speaker, &result.text, now))
+            } else {
+                None
+            }
+        });
+
+        if let Some(verdict) = verdict {
+            was_suspicious = true;
             match verdict.reason {
                 SuspicionReason::QuestionShapeOnMic => audit.record_suspicion_question_on_mic(),
                 SuspicionReason::FirstPersonOnSystem => {
@@ -618,6 +651,7 @@ async fn process_frame(
                         maybe_warn_mixed_source(app_handle, dedup);
                     }
                 }
+                SuspicionReason::NearDuplicateCrossChannel => {}
             }
             tracing::info!(
                 from = %channel_speaker,
@@ -647,6 +681,16 @@ async fn process_frame(
             };
             label_source = LABEL_SOURCE_HEURISTIC;
         }
+    }
+
+    // Slice 3 stub: route the chunk to a Tier-2/3 LLM classifier queue once
+    // one exists. No queue is wired yet (Slice 4) — this only tags which
+    // chunks *would* be enqueued, for observability while that lands.
+    if was_suspicious {
+        tracing::debug!(
+            speaker = %speaker,
+            "chunk flagged suspicious — would enqueue for Tier-2/3 classification"
+        );
     }
 
     // The speaker that actually spoke drives all routing below.

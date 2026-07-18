@@ -14,8 +14,11 @@
 //! confirms or fixes the label via `relabel_transcript_chunk`.
 
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use regex::Regex;
+
+use crate::audio::pipeline::{jaccard, tokenize_for_echo};
 
 /// Heuristic verdict from [`evaluate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +33,10 @@ pub enum SuspicionReason {
     QuestionShapeOnMic,
     /// First-person statement appeared on the System channel.
     FirstPersonOnSystem,
+    /// Near-identical text appeared on the opposite channel within
+    /// [`NEAR_DUPLICATE_WINDOW`] — loopback bleed that survived the
+    /// pipeline's hard 500ms echo-suppression window (Slice 3).
+    NearDuplicateCrossChannel,
 }
 
 impl SuspicionReason {
@@ -37,6 +44,98 @@ impl SuspicionReason {
         match self {
             SuspicionReason::QuestionShapeOnMic => "question_shape_on_mic",
             SuspicionReason::FirstPersonOnSystem => "first_person_on_system",
+            SuspicionReason::NearDuplicateCrossChannel => "near_duplicate_cross_channel",
+        }
+    }
+}
+
+/// Window used by [`NearDuplicateTracker`] — deliberately wider than the
+/// pipeline's hard 500ms echo-suppression window
+/// (`crate::audio::pipeline::ECHO_WINDOW`). Content that near-duplicates the
+/// opposite channel 500ms-1.5s later already survived hard suppression (it
+/// was too late to catch), but is still strong evidence the channel label is
+/// unreliable for this chunk — worth flagging as suspicious even though it
+/// is too late to silently drop.
+pub const NEAR_DUPLICATE_WINDOW: Duration = Duration::from_millis(1_500);
+
+/// Same threshold as the pipeline's hard echo suppression — this is the same
+/// "near-identical text" bar, just applied over a longer window.
+pub const NEAR_DUPLICATE_JACCARD_THRESHOLD: f32 = 0.85;
+
+/// Minimum tokens before two utterances are even compared — short phrases
+/// ("yeah", "okay") produce false-positive matches at any threshold.
+const NEAR_DUPLICATE_MIN_WORDS: usize = 3;
+
+/// Tracks recent per-channel transcripts so [`NearDuplicateTracker::check`]
+/// can spot loopback bleed that survived the pipeline's hard echo
+/// suppression — i.e. duplicate content that arrived 500ms-1.5s apart on
+/// both channels, too late to be caught as an exact echo but still evidence
+/// the channel label is unreliable for this chunk.
+///
+/// Only meaningful in dual-stream (non-phone) mode — phone-call mode routes
+/// all audio onto a single channel, so there is no "opposite channel" to
+/// compare against.
+#[derive(Default)]
+pub struct NearDuplicateTracker {
+    recent_system: Vec<(Vec<String>, Instant)>,
+    recent_mic: Vec<(Vec<String>, Instant)>,
+}
+
+impl NearDuplicateTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record text just accepted on `speaker`'s channel (`"System"` or
+    /// `"Microphone"`) so later chunks on the opposite channel can be
+    /// checked against it. No-op for unrecognised speaker strings or
+    /// too-short text.
+    pub fn record(&mut self, speaker: &str, text: &str, now: Instant) {
+        let tokens = tokenize_for_echo(text);
+        if tokens.len() < NEAR_DUPLICATE_MIN_WORDS {
+            return;
+        }
+        match speaker {
+            "System" => self.recent_system.push((tokens, now)),
+            "Microphone" => self.recent_mic.push((tokens, now)),
+            _ => {}
+        }
+        self.prune(now);
+    }
+
+    /// Check whether `text` on `speaker`'s channel closely duplicates
+    /// something recently seen on the OPPOSITE channel within
+    /// [`NEAR_DUPLICATE_WINDOW`]. Returns a suspicion verdict suggesting the
+    /// opposite channel's speaker if so — the physical channel that captured
+    /// `text` is very likely just an echo of the other speaker, not a new
+    /// utterance from whoever the channel proxy implies.
+    pub fn check(&mut self, speaker: &str, text: &str, now: Instant) -> Option<SuspicionVerdict> {
+        self.prune(now);
+        let tokens = tokenize_for_echo(text);
+        if tokens.len() < NEAR_DUPLICATE_MIN_WORDS {
+            return None;
+        }
+        let (opposite, suggested_speaker) = match speaker {
+            "System" => (&self.recent_mic, "Microphone"),
+            "Microphone" => (&self.recent_system, "System"),
+            _ => return None,
+        };
+        let matched = opposite
+            .iter()
+            .any(|(other_tokens, _)| jaccard(&tokens, other_tokens) >= NEAR_DUPLICATE_JACCARD_THRESHOLD);
+        if !matched {
+            return None;
+        }
+        Some(SuspicionVerdict {
+            suggested_speaker: suggested_speaker.to_string(),
+            reason: SuspicionReason::NearDuplicateCrossChannel,
+        })
+    }
+
+    fn prune(&mut self, now: Instant) {
+        if let Some(cutoff) = now.checked_sub(NEAR_DUPLICATE_WINDOW) {
+            self.recent_system.retain(|(_, at)| *at >= cutoff);
+            self.recent_mic.retain(|(_, at)| *at >= cutoff);
         }
     }
 }
@@ -185,5 +284,148 @@ mod tests {
             "Tell me about a project you led at your last role."
         )
         .is_none());
+    }
+
+    // ── NearDuplicateTracker (Slice 3) ──────────────────────────────────────
+
+    /// Table-driven cases: (label, seed_speaker, seed_text, check_speaker,
+    /// check_text, gap_ms, expect_match, expect_suggested_speaker).
+    #[test]
+    fn near_duplicate_table_driven_cases() {
+        struct Case {
+            label: &'static str,
+            seed_speaker: &'static str,
+            seed_text: &'static str,
+            check_speaker: &'static str,
+            check_text: &'static str,
+            gap_ms: u64,
+            expect_match: bool,
+            expect_suggested: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                label: "near-identical text 800ms later on opposite channel matches",
+                seed_speaker: "System",
+                seed_text: "Why do you like to work with Fisher Investors",
+                check_speaker: "Microphone",
+                check_text: "Why do you like to work with Fisher Investors",
+                gap_ms: 800,
+                expect_match: true,
+                expect_suggested: Some("System"),
+            },
+            Case {
+                label: "near-identical text just inside the 1.5s window matches",
+                seed_speaker: "Microphone",
+                seed_text: "I am excited about the AI Engineer opportunity at Fisher",
+                check_speaker: "System",
+                check_text: "I am excited about the AI Engineer opportunity at Fisher",
+                gap_ms: 1_499,
+                expect_match: true,
+                expect_suggested: Some("Microphone"),
+            },
+            Case {
+                label: "outside the 1.5s window does not match",
+                seed_speaker: "System",
+                seed_text: "Tell me about a project you led at your company",
+                check_speaker: "Microphone",
+                check_text: "Tell me about a project you led at your company",
+                gap_ms: 1_501,
+                expect_match: false,
+                expect_suggested: None,
+            },
+            Case {
+                label: "distinct content on the opposite channel does not match",
+                seed_speaker: "System",
+                seed_text: "Tell me about a project you led at your company",
+                check_speaker: "Microphone",
+                check_text: "I led the fraud detection platform migration last year",
+                gap_ms: 500,
+                expect_match: false,
+                expect_suggested: None,
+            },
+            Case {
+                label: "same-channel duplicate is not a cross-channel suspicion",
+                seed_speaker: "System",
+                seed_text: "How are you today and what brings you here",
+                check_speaker: "System",
+                check_text: "How are you today and what brings you here",
+                gap_ms: 500,
+                expect_match: false,
+                expect_suggested: None,
+            },
+            Case {
+                label: "too-short utterance never matches even if identical",
+                seed_speaker: "System",
+                seed_text: "okay yeah",
+                check_speaker: "Microphone",
+                check_text: "okay yeah",
+                gap_ms: 300,
+                expect_match: false,
+                expect_suggested: None,
+            },
+        ];
+
+        for case in cases {
+            let mut tracker = NearDuplicateTracker::new();
+            let t0 = Instant::now();
+            tracker.record(case.seed_speaker, case.seed_text, t0);
+
+            let t1 = t0 + Duration::from_millis(case.gap_ms);
+            let verdict = tracker.check(case.check_speaker, case.check_text, t1);
+
+            assert_eq!(
+                verdict.is_some(),
+                case.expect_match,
+                "case failed: {}",
+                case.label
+            );
+            if case.expect_match {
+                assert_eq!(
+                    verdict.unwrap().suggested_speaker,
+                    case.expect_suggested.unwrap(),
+                    "case failed: {}",
+                    case.label
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn near_duplicate_reason_string_matches() {
+        assert_eq!(
+            SuspicionReason::NearDuplicateCrossChannel.as_str(),
+            "near_duplicate_cross_channel"
+        );
+    }
+
+    #[test]
+    fn near_duplicate_unknown_speaker_returns_none() {
+        let mut tracker = NearDuplicateTracker::new();
+        let now = Instant::now();
+        tracker.record("System", "tell me about a time you led a big project", now);
+        assert!(tracker
+            .check("Unknown", "tell me about a time you led a big project", now)
+            .is_none());
+    }
+
+    #[test]
+    fn near_duplicate_pruning_drops_stale_entries_on_subsequent_checks() {
+        let mut tracker = NearDuplicateTracker::new();
+        let t0 = Instant::now();
+        tracker.record("System", "why do you want to work here at this company", t0);
+
+        // First check well past the window prunes the stale entry.
+        let t1 = t0 + NEAR_DUPLICATE_WINDOW + Duration::from_millis(200);
+        assert!(tracker
+            .check("Microphone", "why do you want to work here at this company", t1)
+            .is_none());
+
+        // A fresh record + immediate check on the opposite channel still works.
+        tracker.record("System", "why do you want to work here at this company", t1);
+        let t2 = t1 + Duration::from_millis(100);
+        assert!(tracker
+            .check("Microphone", "why do you want to work here at this company", t2)
+            .is_some());
     }
 }
