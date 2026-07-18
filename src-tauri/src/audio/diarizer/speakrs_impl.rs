@@ -286,9 +286,9 @@ pub fn download_models() -> Result<PathBuf, String> {
     });
     match rx.recv_timeout(MODEL_DOWNLOAD_TIMEOUT) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(
-            "Model download timed out after 15 minutes. Check your network and retry.".into(),
-        ),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            Err("Model download timed out after 15 minutes. Check your network and retry.".into())
+        }
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             Err("Model download stopped unexpectedly. Retry from Settings.".into())
         }
