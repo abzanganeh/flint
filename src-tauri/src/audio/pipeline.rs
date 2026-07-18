@@ -50,6 +50,7 @@ use crate::events::{
 
 use crate::audio::audit::{AudioAuditCounters, SuppressionReason};
 use crate::audio::diarizer::{DiarizerManager, SpeakerRole};
+use crate::audio::speaker_classifier::{ClassificationRequest, SpeakerClassifier};
 use crate::audio::speaker_heuristic::{rms_dbfs, PhoneHeuristicState};
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::engine::WhisperEngine;
@@ -65,12 +66,26 @@ use crate::transcription::speaker_suspicion::{self, NearDuplicateTracker, Suspic
 /// command upgrade this to `"heuristic"` or `"user"` respectively.
 const LABEL_SOURCE_CHANNEL: &str = "channel";
 
-/// `label_source` applied when a heuristic (text-shape suspicion, or the
-/// phone-mode RMS+pause heuristic) auto-corrects a chunk's speaker because
-/// its content or timing contradicts the capture channel (e.g. an
-/// interviewer question that landed on the mic, or the user's first-person
-/// speech that bled into the system loopback).
+/// `label_source` applied when a heuristic (text-shape/near-duplicate
+/// suspicion, or the phone-mode RMS+pause heuristic) auto-corrects a chunk's
+/// speaker and the chunk was NOT enqueued for Tier-2/3 LLM confirmation —
+/// either no classifier is configured, or the enqueue policy below decided
+/// this chunk didn't need one.
 const LABEL_SOURCE_HEURISTIC: &str = "heuristic";
+
+/// `label_source` applied when a heuristic auto-corrects a chunk's speaker
+/// AND the chunk has been enqueued onto the Tier-2/3 [`SpeakerClassifier`]
+/// for confirmation (Slice 4). Distinguishes an unconfirmed heuristic guess
+/// from `"llm"` (Slice 5), which means the classifier already returned a
+/// confirmed verdict for this chunk.
+const LABEL_SOURCE_HEURISTIC_PENDING: &str = "heuristic_pending";
+
+/// Phone mode: any utterance at or above this word count is always queued
+/// for Tier-2/3 classification, regardless of what the cheap heuristics
+/// concluded — phone mode has no channel truth at all, so every
+/// long-enough utterance is worth the LLM call. Short utterances stay
+/// heuristic-only to bound API cost.
+const PHONE_CLASSIFIER_MIN_WORDS: usize = 8;
 
 /// Number of `FirstPersonOnSystem` auto-corrections in a session before we warn
 /// the user that their loopback is swallowing their own microphone. Below this
@@ -361,6 +376,7 @@ pub async fn run_audio_pipeline(
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
     diarizer: Option<Arc<SyncMutex<DiarizerManager>>>,
+    speaker_classifier: Option<Arc<SpeakerClassifier>>,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
@@ -407,6 +423,7 @@ pub async fn run_audio_pipeline(
             phone_mode_manual_only,
             &diarizer,
             &rolling_contexts,
+            &speaker_classifier,
         )
         .await
         {
@@ -442,6 +459,7 @@ async fn process_frame(
     phone_mode_manual_only: bool,
     diarizer: &Option<Arc<SyncMutex<DiarizerManager>>>,
     rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
+    speaker_classifier: &Option<Arc<SpeakerClassifier>>,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -683,14 +701,28 @@ async fn process_frame(
         }
     }
 
-    // Slice 3 stub: route the chunk to a Tier-2/3 LLM classifier queue once
-    // one exists. No queue is wired yet (Slice 4) — this only tags which
-    // chunks *would* be enqueued, for observability while that lands.
-    if was_suspicious {
-        tracing::debug!(
-            speaker = %speaker,
-            "chunk flagged suspicious — would enqueue for Tier-2/3 classification"
-        );
+    // Slice 4 enqueue policy: phone mode classifies every long-enough
+    // utterance (no channel truth exists at all); dual-stream mode only
+    // classifies chunks a heuristic already flagged as suspicious.
+    let chunk_id = Uuid::new_v4();
+    let word_count = result.text.split_whitespace().count();
+    let should_enqueue = if phone_mode_manual_only {
+        word_count >= PHONE_CLASSIFIER_MIN_WORDS
+    } else {
+        was_suspicious
+    };
+    if should_enqueue {
+        if let Some(classifier) = speaker_classifier {
+            let enqueued = classifier.enqueue(ClassificationRequest {
+                chunk_id,
+                session_id,
+                text: result.text.clone(),
+                current_speaker: speaker.to_string(),
+            });
+            if enqueued {
+                label_source = LABEL_SOURCE_HEURISTIC_PENDING;
+            }
+        }
     }
 
     // The speaker that actually spoke drives all routing below.
@@ -742,7 +774,8 @@ async fn process_frame(
     }
 
     // ── Step 4b: emit + persist transcript chunk ──────────────────────────
-    let chunk_id = Uuid::new_v4();
+    // `chunk_id` was generated above (Slice 4 enqueue policy) so the
+    // classifier's callback and this persisted row share one identity.
     emit_transcription_chunk(
         app_handle,
         TranscriptionChunkPayload {

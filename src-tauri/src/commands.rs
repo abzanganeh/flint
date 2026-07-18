@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::audio::capture::AudioCapture;
 use crate::audio::diarizer::DiarizerManager;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
+use crate::audio::speaker_classifier::SpeakerClassifier;
 use crate::calibration::{
     calibration_whisper_prompt, device_fingerprint_or_fallback, load_mic_paragraph_text,
     load_system_clip_text, log_audio_quality_calibration, score_mic_calibration, score_transcript,
@@ -1783,6 +1784,31 @@ fn prompts_base_dir() -> PathBuf {
         })
 }
 
+/// Build the Tier-2/3 async speaker classifier for a live session (Slice 4).
+///
+/// Uses the Groq fast tier directly (bypassing the failover manager — this
+/// is a best-effort background confirmation signal, not a critical-path
+/// call, so it has no failover/retry semantics of its own: a missing key or
+/// a failed call simply means chunks stay at their heuristic label).
+/// Returns `None` if no Groq key is configured — phone/dual-stream sessions
+/// still work fine on heuristics alone in that case.
+fn build_speaker_classifier() -> Option<Arc<SpeakerClassifier>> {
+    let provider = stack::resolve_primary_by_name("groq")?;
+    Some(Arc::new(SpeakerClassifier::spawn(
+        provider,
+        prompts_base_dir(),
+        move |result| {
+            // Persistence + `speaker_refined` event wiring lands in Slice 5 —
+            // for now this only proves the queue delivers verdicts end to end.
+            debug!(
+                chunk_id = %result.chunk_id,
+                verdict = ?result.verdict,
+                "speaker classifier verdict received"
+            );
+        },
+    )))
+}
+
 /// Resolve the ggml model path for the given hardware profile.
 ///
 /// Resolution order:
@@ -3080,6 +3106,7 @@ pub async fn start_session(
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+    let speaker_classifier = build_speaker_classifier();
 
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
@@ -3100,6 +3127,7 @@ pub async fn start_session(
         } else {
             None
         },
+        speaker_classifier,
     ));
 
     // Live audio-flow watchdog: warns the user if no audio is captured after
