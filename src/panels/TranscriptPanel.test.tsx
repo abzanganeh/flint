@@ -2,8 +2,10 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import TranscriptPanel, {
+  __relabelImpl,
   __triggerResponseImpl,
   appendLine,
+  applyChunkRelabel,
   linesToPlainText,
   splitIntoSentences,
   type TranscriptLine,
@@ -22,6 +24,7 @@ type StreamHandler = (line: {
   speaker: Speaker;
   timestamp: number;
   labelSource?: string;
+  chunkId?: string;
 }) => void;
 
 const streamHandlerRef: { current: StreamHandler | null } = { current: null };
@@ -35,6 +38,12 @@ vi.mock("../hooks/useTranscriptionStream", () => ({
 vi.mock("../commands", () => ({
   triggerResponse: vi.fn(),
   copyTextToClipboard: vi.fn(),
+  relabelTranscriptChunk: vi.fn(),
+}));
+
+vi.mock("../events", () => ({
+  onTranscriptChunkRelabeled: () => Promise.resolve(() => undefined),
+  onSpeakerRefined: () => Promise.resolve(() => undefined),
 }));
 
 import { copyTextToClipboard } from "../commands";
@@ -43,6 +52,7 @@ function pushChunk(chunk: {
   text: string;
   speaker: Speaker;
   labelSource?: string;
+  chunkId?: string;
 }): void {
   const handler = streamHandlerRef.current;
   if (!handler) throw new Error("transcription stream handler not attached");
@@ -52,6 +62,7 @@ function pushChunk(chunk: {
       speaker: chunk.speaker,
       timestamp: 0,
       labelSource: chunk.labelSource,
+      chunkId: chunk.chunkId,
     });
   });
 }
@@ -59,19 +70,20 @@ function pushChunk(chunk: {
 describe("appendLine aggregation", () => {
   it("merges consecutive same-speaker fragments into one utterance", () => {
     let lines: TranscriptLine[] = [];
-    lines = appendLine(lines, "Tell me about", "System", 1, "channel", nextId);
-    lines = appendLine(lines, "a tight deadline", "System", 2, "channel", nextId);
-    lines = appendLine(lines, "you handled.", "System", 3, "channel", nextId);
+    lines = appendLine(lines, "Tell me about", "System", 1, "channel", "c1", nextId);
+    lines = appendLine(lines, "a tight deadline", "System", 2, "channel", "c2", nextId);
+    lines = appendLine(lines, "you handled.", "System", 3, "channel", "c3", nextId);
 
     expect(lines).toHaveLength(1);
     expect(lines[0].text).toBe("Tell me about a tight deadline you handled.");
     expect(lines[0].speaker).toBe("System");
+    expect(lines[0].chunkIds).toEqual(["c1", "c2", "c3"]);
   });
 
   it("starts a new bubble when the speaker changes", () => {
     let lines: TranscriptLine[] = [];
-    lines = appendLine(lines, "Tell me about yourself.", "System", 1, "channel", nextId);
-    lines = appendLine(lines, "I am an architect", "Microphone", 2, "channel", nextId);
+    lines = appendLine(lines, "Tell me about yourself.", "System", 1, "channel", "c1", nextId);
+    lines = appendLine(lines, "I am an architect", "Microphone", 2, "channel", "c2", nextId);
 
     expect(lines).toHaveLength(2);
     expect(lines[1].speaker).toBe("Microphone");
@@ -80,27 +92,35 @@ describe("appendLine aggregation", () => {
 
   it("does not merge across the merge window", () => {
     let lines: TranscriptLine[] = [];
-    lines = appendLine(lines, "First sentence.", "System", 1, "channel", nextId);
+    lines = appendLine(lines, "First sentence.", "System", 1, "channel", "c1", nextId);
     lines[0].lastArrivalMs = Date.now() - 60_000;
-    lines = appendLine(lines, "Second sentence.", "System", 2, "channel", nextId);
+    lines = appendLine(lines, "Second sentence.", "System", 2, "channel", "c2", nextId);
 
     expect(lines).toHaveLength(2);
   });
 
   it("marks the utterance corrected when any fragment was auto-relabeled", () => {
     let lines: TranscriptLine[] = [];
-    lines = appendLine(lines, "I led the platform", "System", 1, "heuristic", nextId);
+    lines = appendLine(lines, "I led the platform", "System", 1, "heuristic", "c1", nextId);
 
     expect(lines[0].corrected).toBe(true);
   });
 
   it("never merges audio-gap markers", () => {
     let lines: TranscriptLine[] = [];
-    lines = appendLine(lines, "Some answer.", "Microphone", 1, "channel", nextId);
-    lines = appendLine(lines, "[audio gap 3s]", "Microphone", 2, "channel", nextId);
+    lines = appendLine(lines, "Some answer.", "Microphone", 1, "channel", "c1", nextId);
+    lines = appendLine(lines, "[audio gap 3s]", "Microphone", 2, "channel", undefined, nextId);
 
     expect(lines).toHaveLength(2);
     expect(lines[1].text).toBe("[audio gap 3s]");
+  });
+
+  it("applyChunkRelabel updates lines containing the chunk id", () => {
+    let lines: TranscriptLine[] = [];
+    lines = appendLine(lines, "Tell me about yourself.", "System", 1, "heuristic", "abc", nextId);
+    lines = applyChunkRelabel(lines, "abc", "Microphone", "user");
+    expect(lines[0].speaker).toBe("Microphone");
+    expect(lines[0].labelSource).toBe("user");
   });
 });
 
@@ -139,6 +159,7 @@ describe("Q-per-utterance chip", () => {
   beforeEach(() => {
     streamHandlerRef.current = null;
     __triggerResponseImpl.fn = vi.fn().mockResolvedValue(undefined);
+    __relabelImpl.fn = vi.fn().mockResolvedValue(undefined);
     vi.mocked(copyTextToClipboard).mockReset();
     vi.mocked(copyTextToClipboard).mockResolvedValue(undefined);
   });
@@ -198,11 +219,30 @@ describe("Q-per-utterance chip", () => {
 
   it("linesToPlainText formats interviewer and user labels", () => {
     let lines: TranscriptLine[] = [];
-    lines = appendLine(lines, "Tell me about yourself.", "System", 1, "channel", nextId);
-    lines = appendLine(lines, "I am an architect.", "Microphone", 2, "channel", nextId);
+    lines = appendLine(lines, "Tell me about yourself.", "System", 1, "channel", "c1", nextId);
+    lines = appendLine(lines, "I am an architect.", "Microphone", 2, "channel", "c2", nextId);
     expect(linesToPlainText(lines)).toBe(
       "INTERVIEWER: Tell me about yourself.\n\nYOU: I am an architect.",
     );
+  });
+
+  it("swap button invokes relabel for all chunk ids on the line", async () => {
+    const relabel = vi.fn().mockResolvedValue(undefined);
+    __relabelImpl.fn = relabel;
+
+    render(<TranscriptPanel sessionId="sess-1" />);
+    pushChunk({
+      text: "Tell me about yourself.",
+      speaker: "System",
+      chunkId: "chunk-a",
+    });
+
+    const swapButtons = screen.getAllByTestId("speaker-swap-btn");
+    fireEvent.click(swapButtons[0] as HTMLButtonElement);
+
+    await waitFor(() => {
+      expect(relabel).toHaveBeenCalledWith("chunk-a", "Microphone");
+    });
   });
 
   it("copies transcript via native clipboard command", async () => {

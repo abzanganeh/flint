@@ -149,6 +149,20 @@ export const onTranscriptChunkRelabeled = (
     handler(event.payload),
   );
 
+/** Tier-2/3 LLM speaker classifier confirmed a chunk's speaker label. */
+export interface SpeakerRefinedEventPayload {
+  chunk_id: string;
+  speaker: Speaker;
+  source: string;
+}
+
+export const onSpeakerRefined = (
+  handler: (payload: SpeakerRefinedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<SpeakerRefinedEventPayload>("speaker_refined", (event) =>
+    handler(event.payload),
+  );
+
 export const onTurnStarted = (
   handler: (payload: TurnStartedEventPayload) => void,
 ): Promise<UnlistenFn> =>

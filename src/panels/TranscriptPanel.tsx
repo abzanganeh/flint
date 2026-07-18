@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { copyTextToClipboard, triggerResponse } from "../commands";
+import { copyTextToClipboard, relabelTranscriptChunk, triggerResponse } from "../commands";
+import { onSpeakerRefined, onTranscriptChunkRelabeled } from "../events";
 import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
 import type { Speaker } from "../types";
 
@@ -37,6 +38,10 @@ export interface TranscriptLine {
   lastArrivalMs: number;
   /** True when any merged fragment was auto-corrected by the heuristic. */
   corrected: boolean;
+  /** Persisted chunk ids merged into this bubble (for per-line relabel). */
+  chunkIds: string[];
+  /** Most recent label provenance across merged fragments. */
+  labelSource?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -78,6 +83,7 @@ export function appendLine(
   speaker: Speaker,
   timestamp: number,
   labelSource: string | undefined,
+  chunkId: string | undefined,
   nextId: () => number,
 ): TranscriptLine[] {
   const arrival = Date.now();
@@ -94,11 +100,14 @@ export function appendLine(
     arrival - last.lastArrivalMs <= UTTERANCE_MERGE_WINDOW_MS;
 
   if (canMerge) {
+    const mergedIds = chunkId ? [...last.chunkIds, chunkId] : last.chunkIds;
     const merged: TranscriptLine = {
       ...last,
       text: joinFragments(last.text, text),
       lastArrivalMs: arrival,
       corrected: last.corrected || corrected,
+      chunkIds: mergedIds,
+      labelSource: labelSource ?? last.labelSource,
     };
     return [...prev.slice(0, -1), merged];
   }
@@ -112,14 +121,35 @@ export function appendLine(
       timestamp,
       lastArrivalMs: arrival,
       corrected,
+      chunkIds: chunkId ? [chunkId] : [],
+      labelSource,
     },
   ];
   // Drop oldest lines when cap is reached.
   return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
 }
 
+/** Apply a backend relabel to every line that contains `chunkId`. */
+export function applyChunkRelabel(
+  lines: TranscriptLine[],
+  chunkId: string,
+  speaker: Speaker,
+  labelSource: string,
+): TranscriptLine[] {
+  return lines.map((line) => {
+    if (!line.chunkIds.includes(chunkId)) return line;
+    return {
+      ...line,
+      speaker,
+      corrected: labelSource === "heuristic",
+      labelSource,
+    };
+  });
+}
+
 // Keep async dispatch testable without awaiting an internal click handler.
 export const __triggerResponseImpl = { fn: triggerResponse };
+export const __relabelImpl = { fn: relabelTranscriptChunk };
 
 // ── Component ────────────────────────────────────────────────────────────────
 
@@ -134,6 +164,8 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
   const [askError, setAskError] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [swapError, setSwapError] = useState<string | null>(null);
+  const [swappingLineId, setSwappingLineId] = useState<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const askingTimerRef = useRef<number | null>(null);
   // Per-instance counter — avoids shared module-level mutable state.
@@ -146,6 +178,7 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
       speaker: Speaker;
       timestamp: number;
       labelSource?: string;
+      chunkId?: string;
     }) => {
       setLines((prev) =>
         appendLine(
@@ -154,6 +187,7 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
           line.speaker,
           line.timestamp,
           line.labelSource,
+          line.chunkId,
           nextId,
         ),
       );
@@ -162,6 +196,35 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
   );
 
   useTranscriptionStream(onChunk);
+
+  useEffect(() => {
+    let cancelled = false;
+    const cleanups: Array<() => void> = [];
+
+    void Promise.all([
+      onTranscriptChunkRelabeled(({ chunk_id, speaker, label_source }) => {
+        if (cancelled) return;
+        setLines((prev) =>
+          applyChunkRelabel(prev, chunk_id, speaker, label_source),
+        );
+      }),
+      onSpeakerRefined(({ chunk_id, speaker, source }) => {
+        if (cancelled) return;
+        setLines((prev) => applyChunkRelabel(prev, chunk_id, speaker, source));
+      }),
+    ]).then((unsubs) => {
+      if (cancelled) {
+        unsubs.forEach((fn) => fn());
+      } else {
+        cleanups.push(...unsubs);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      cleanups.forEach((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -199,6 +262,34 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
     },
     [sessionId],
   );
+
+  const handleSwapSpeaker = useCallback(async (line: TranscriptLine) => {
+    if (line.chunkIds.length === 0) return;
+    const newSpeaker: Speaker = line.speaker === "System" ? "Microphone" : "System";
+    setSwapError(null);
+    setSwappingLineId(line.id);
+    try {
+      await Promise.all(
+        line.chunkIds.map((chunkId) => __relabelImpl.fn(chunkId, newSpeaker)),
+      );
+      setLines((prev) =>
+        prev.map((entry) =>
+          entry.id === line.id
+            ? {
+                ...entry,
+                speaker: newSpeaker,
+                corrected: false,
+                labelSource: "user",
+              }
+            : entry,
+        ),
+      );
+    } catch (e: unknown) {
+      setSwapError(String(e));
+    } finally {
+      setSwappingLineId(null);
+    }
+  }, []);
 
   const handleCopyTranscript = useCallback(() => {
     setCopyError(null);
@@ -317,6 +408,21 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
         </div>
       )}
 
+      {swapError && (
+        <div
+          data-testid="transcript-swap-error"
+          style={{
+            padding: "6px 12px",
+            color: "#ef4444",
+            fontSize: "11px",
+            borderBottom: "1px solid #1e2028",
+            backgroundColor: "#1a0d0d",
+          }}
+        >
+          {swapError}
+        </div>
+      )}
+
       <div
         style={{
           flex: 1,
@@ -345,6 +451,8 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
             line={line}
             askingKey={askingKey}
             onAsk={handleAsk}
+            onSwap={handleSwapSpeaker}
+            swapping={swappingLineId === line.id}
           />
         ))}
         <div ref={bottomRef} />
@@ -359,17 +467,33 @@ interface TranscriptLineRowProps {
   line: TranscriptLine;
   askingKey: string | null;
   onAsk: (key: string, utterance: string) => void;
+  onSwap: (line: TranscriptLine) => void;
+  swapping: boolean;
 }
 
-const TranscriptLineRow = ({ line, askingKey, onAsk }: TranscriptLineRowProps) => {
+const TranscriptLineRow = ({
+  line,
+  askingKey,
+  onAsk,
+  onSwap,
+  swapping,
+}: TranscriptLineRowProps) => {
   if (isAudioGap(line.text)) {
     return <AudioGapRow text={line.text} />;
   }
 
   const isSystem = line.speaker === "System";
+  const canSwap = line.chunkIds.length > 0;
 
   if (!isSystem) {
-    return <UserBubble line={line} />;
+    return (
+      <UserBubble
+        line={line}
+        canSwap={canSwap}
+        swapping={swapping}
+        onSwap={() => onSwap(line)}
+      />
+    );
   }
 
   const key = String(line.id);
@@ -387,7 +511,16 @@ const TranscriptLineRow = ({ line, askingKey, onAsk }: TranscriptLineRowProps) =
         gap: 2,
       }}
     >
-      <SpeakerLabel isSystem corrected={line.corrected} />
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <SpeakerLabel isSystem corrected={line.corrected} />
+        {canSwap && (
+          <SpeakerSwapButton
+            swapping={swapping}
+            onSwap={() => onSwap(line)}
+            title="Swap speaker label for this line"
+          />
+        )}
+      </div>
       <div
         style={{
           display: "flex",
@@ -480,7 +613,51 @@ const SpeakerLabel = ({ isSystem, corrected }: SpeakerLabelProps) => (
   </span>
 );
 
-const UserBubble = ({ line }: { line: TranscriptLine }) => (
+const SpeakerSwapButton = ({
+  swapping,
+  onSwap,
+  title,
+}: {
+  swapping: boolean;
+  onSwap: () => void;
+  title: string;
+}) => (
+  <button
+    type="button"
+    data-testid="speaker-swap-btn"
+    onClick={onSwap}
+    disabled={swapping}
+    title={title}
+    style={{
+      padding: "0 6px",
+      height: 18,
+      borderRadius: 4,
+      border: "1px solid #1f2937",
+      backgroundColor: "transparent",
+      color: swapping ? "#4b5563" : "#9ca3af",
+      fontSize: 9,
+      fontWeight: 600,
+      letterSpacing: "0.04em",
+      textTransform: "uppercase",
+      cursor: swapping ? "default" : "pointer",
+      lineHeight: 1,
+    }}
+  >
+    {swapping ? "…" : "Swap"}
+  </button>
+);
+
+const UserBubble = ({
+  line,
+  canSwap,
+  swapping,
+  onSwap,
+}: {
+  line: TranscriptLine;
+  canSwap: boolean;
+  swapping: boolean;
+  onSwap: () => void;
+}) => (
   <div
     style={{
       display: "flex",
@@ -489,7 +666,16 @@ const UserBubble = ({ line }: { line: TranscriptLine }) => (
       padding: "2px 12px",
     }}
   >
-    <SpeakerLabel isSystem={false} corrected={line.corrected} />
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <SpeakerLabel isSystem={false} corrected={line.corrected} />
+      {canSwap && (
+        <SpeakerSwapButton
+          swapping={swapping}
+          onSwap={onSwap}
+          title="Swap speaker label for this line"
+        />
+      )}
+    </div>
     <span
       style={{
         color: "#e5e7eb",
