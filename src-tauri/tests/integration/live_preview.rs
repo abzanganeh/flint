@@ -300,7 +300,9 @@ async fn dropping_sender_after_cancelled_preview_closes_channel_without_hanging(
 
     let result = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await;
     assert!(
-        result.expect("recv must not hang after sender drop").is_none(),
+        result
+            .expect("recv must not hang after sender drop")
+            .is_none(),
         "closed, empty channel must yield None"
     );
 }

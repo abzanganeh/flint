@@ -231,18 +231,27 @@ mod tests {
     #[test]
     fn verdict_as_speaker_maps_correctly() {
         assert_eq!(ClassifierVerdict::Interviewer.as_speaker(), Some("System"));
-        assert_eq!(ClassifierVerdict::Candidate.as_speaker(), Some("Microphone"));
+        assert_eq!(
+            ClassifierVerdict::Candidate.as_speaker(),
+            Some("Microphone")
+        );
         assert_eq!(ClassifierVerdict::Uncertain.as_speaker(), None);
     }
 
     #[test]
     fn verdict_parse_is_lenient_and_case_insensitive() {
-        assert_eq!(ClassifierVerdict::parse("Interviewer"), ClassifierVerdict::Interviewer);
+        assert_eq!(
+            ClassifierVerdict::parse("Interviewer"),
+            ClassifierVerdict::Interviewer
+        );
         assert_eq!(
             ClassifierVerdict::parse("  the CANDIDATE  \n"),
             ClassifierVerdict::Candidate
         );
-        assert_eq!(ClassifierVerdict::parse("not sure"), ClassifierVerdict::Uncertain);
+        assert_eq!(
+            ClassifierVerdict::parse("not sure"),
+            ClassifierVerdict::Uncertain
+        );
         assert_eq!(ClassifierVerdict::parse(""), ClassifierVerdict::Uncertain);
     }
 
@@ -268,7 +277,10 @@ mod tests {
         std::fs::write(category.join("groq.txt"), "groq template").unwrap();
 
         assert_eq!(load_prompt(dir.path(), "groq").unwrap(), "groq template");
-        assert_eq!(load_prompt(dir.path(), "ollama").unwrap(), "default template");
+        assert_eq!(
+            load_prompt(dir.path(), "ollama").unwrap(),
+            "default template"
+        );
     }
 
     #[test]
@@ -341,7 +353,8 @@ mod tests {
             provider_name: "mock".to_string(),
         });
 
-        let results: Arc<AsyncMutex<Vec<ClassificationResult>>> = Arc::new(AsyncMutex::new(Vec::new()));
+        let results: Arc<AsyncMutex<Vec<ClassificationResult>>> =
+            Arc::new(AsyncMutex::new(Vec::new()));
         let results_clone = Arc::clone(&results);
         let classifier = SpeakerClassifier::spawn(provider, dir.path().to_path_buf(), move |r| {
             let results = Arc::clone(&results_clone);
@@ -391,6 +404,9 @@ mod tests {
             text: "test".to_string(),
             current_speaker: "System".to_string(),
         });
-        assert!(!accepted, "enqueue onto a closed channel must return false, not panic");
+        assert!(
+            !accepted,
+            "enqueue onto a closed channel must return false, not panic"
+        );
     }
 }

@@ -103,22 +103,10 @@ mod tests {
                 "Tell me about a time you disagreed with a senior engineer.",
                 false,
             ),
-            (
-                "Why do you want to work here?",
-                false,
-            ),
-            (
-                "What are your salary expectations?",
-                false,
-            ),
-            (
-                "How do you handle tight deadlines?",
-                false,
-            ),
-            (
-                "Describe your greatest strength.",
-                false,
-            ),
+            ("Why do you want to work here?", false),
+            ("What are your salary expectations?", false),
+            ("How do you handle tight deadlines?", false),
+            ("Describe your greatest strength.", false),
         ];
 
         for (question, expected) in cases {

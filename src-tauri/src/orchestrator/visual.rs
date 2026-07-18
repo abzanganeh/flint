@@ -23,7 +23,9 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::events::{emit_thread_status, emit_visual_token, ThreadStatusPayload, VisualTokenPayload};
+use crate::events::{
+    emit_thread_status, emit_visual_token, ThreadStatusPayload, VisualTokenPayload,
+};
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 
@@ -239,8 +241,8 @@ fn build_prompt(
     provider_name: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
-    let template =
-        load_prompt("visual", provider_name, prompts_dir).context("failed to load visual prompt")?;
+    let template = load_prompt("visual", provider_name, prompts_dir)
+        .context("failed to load visual prompt")?;
 
     let rag_text = ctx
         .rag_chunks

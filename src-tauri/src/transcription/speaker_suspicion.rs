@@ -120,9 +120,9 @@ impl NearDuplicateTracker {
             "Microphone" => (&self.recent_system, "System"),
             _ => return None,
         };
-        let matched = opposite
-            .iter()
-            .any(|(other_tokens, _)| jaccard(&tokens, other_tokens) >= NEAR_DUPLICATE_JACCARD_THRESHOLD);
+        let matched = opposite.iter().any(|(other_tokens, _)| {
+            jaccard(&tokens, other_tokens) >= NEAR_DUPLICATE_JACCARD_THRESHOLD
+        });
         if !matched {
             return None;
         }
@@ -418,14 +418,22 @@ mod tests {
         // First check well past the window prunes the stale entry.
         let t1 = t0 + NEAR_DUPLICATE_WINDOW + Duration::from_millis(200);
         assert!(tracker
-            .check("Microphone", "why do you want to work here at this company", t1)
+            .check(
+                "Microphone",
+                "why do you want to work here at this company",
+                t1
+            )
             .is_none());
 
         // A fresh record + immediate check on the opposite channel still works.
         tracker.record("System", "why do you want to work here at this company", t1);
         let t2 = t1 + Duration::from_millis(100);
         assert!(tracker
-            .check("Microphone", "why do you want to work here at this company", t2)
+            .check(
+                "Microphone",
+                "why do you want to work here at this company",
+                t2
+            )
             .is_some());
     }
 }

@@ -23,7 +23,9 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::events::{emit_answer_token, emit_thread_status, AnswerTokenPayload, ThreadStatusPayload};
+use crate::events::{
+    emit_answer_token, emit_thread_status, AnswerTokenPayload, ThreadStatusPayload,
+};
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 

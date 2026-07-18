@@ -767,11 +767,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // prevent contaminating future retrievals.
     {
         if should_embed_qa_pair(confidence_score, &answer_text) {
-            let qa_text = format!(
-                "Q: {}\nA: {}",
-                cfg.question_text.trim(),
-                answer_text.trim()
-            );
+            let qa_text = format!("Q: {}\nA: {}", cfg.question_text.trim(), answer_text.trim());
             let embedder = Arc::clone(&cfg.embedder);
             let store = Arc::clone(&cfg.vector_store);
             let session_id = cfg.session_id;

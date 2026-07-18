@@ -645,7 +645,10 @@ mod tests {
                 !entry.answer_response.is_empty(),
                 "answer must be populated"
             );
-            assert!(!entry.visual_response.is_empty(), "visual must be populated");
+            assert!(
+                !entry.visual_response.is_empty(),
+                "visual must be populated"
+            );
         }
     }
 

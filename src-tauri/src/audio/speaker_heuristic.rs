@@ -142,7 +142,12 @@ impl PhoneHeuristicState {
     /// duration]`, and the duration is already known, so subtracting it
     /// recovers the pause without needing to track each utterance's start
     /// time separately.
-    pub fn observe(&mut self, rms_dbfs_value: f32, chunk_duration_ms: u32, now: Instant) -> SpeakerRole {
+    pub fn observe(
+        &mut self,
+        rms_dbfs_value: f32,
+        chunk_duration_ms: u32,
+        now: Instant,
+    ) -> SpeakerRole {
         let pause_before_ms = self
             .last_chunk_end_at
             .map(|prev| {
@@ -283,7 +288,11 @@ mod tests {
         // Candidate starts answering 1.2s after the question ended.
         let t1 = t0 + Duration::from_millis(1_500 + 1_200);
         let role1 = state.observe(-15.0, 2_000, t1);
-        assert_eq!(role1, SpeakerRole::User, "long pause must flip to candidate");
+        assert_eq!(
+            role1,
+            SpeakerRole::User,
+            "long pause must flip to candidate"
+        );
 
         // Whisper's VAD splits the candidate's long answer into a second
         // chunk with almost no gap (100ms) — must NOT flip back.
@@ -303,6 +312,9 @@ mod tests {
         // synthetic u64::MAX pause is never actually exercised by
         // classify_phone_utterance — assert the resulting role anyway to
         // pin the observable behaviour.
-        assert_eq!(state.observe(-50.0, 100, Instant::now()), SpeakerRole::Interviewer);
+        assert_eq!(
+            state.observe(-50.0, 100, Instant::now()),
+            SpeakerRole::Interviewer
+        );
     }
 }
