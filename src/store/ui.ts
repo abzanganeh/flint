@@ -1,7 +1,6 @@
 import { create } from "zustand";
 
 import type {
-  ClarifyingQuestion,
   ConfidenceLevel,
   CostCapState,
   Notification,
@@ -23,8 +22,8 @@ interface UIStore extends UIState {
   togglePanelCollapsed: (id: PanelId) => void;
   setLayoutMode: (mode: "stack" | "grid") => void;
   setFocusedPanel: (focusedPanel: PanelId | null) => void;
-  appendDirectionalToken: (token: string) => void;
-  appendDepthToken: (token: string) => void;
+  appendAnswerToken: (token: string) => void;
+  appendVisualToken: (token: string) => void;
   clearStreamingBuffers: () => void;
   /** Clear panel content when entering LIVE so rehearsal answers do not carry over. */
   resetOrchestratorPanels: () => void;
@@ -34,8 +33,6 @@ interface UIStore extends UIState {
   setDepthPrePrepared: (depthPrePrepared: boolean) => void;
   setDigestSummary: (digestSummary: string | null) => void;
   setLastManualQuestion: (question: string) => void;
-  addClarifyingQuestion: (q: Omit<ClarifyingQuestion, "id">) => void;
-  clearClarifyingQuestions: () => void;
   setRagChunks: (chunks: RagChunk[]) => void;
   setTokenUsage: (usage: TokenUsage) => void;
   accumulateTokenUsage: (
@@ -53,34 +50,31 @@ interface UIStore extends UIState {
   setAnswerNowMode: (answerNowMode: boolean) => void;
 }
 
-// Default panel sizes per layout mode.
-// Stack mode follows FR-4.6: Transcript 20%, Directional 30%, Depth 30%,
-// Clarifying 10%, Context 10% (weights sum to 5).
+// Default panel sizes per layout mode. Four-panel layout (FR-4.6, post
+// Answer/Visual collapse): Transcript 20%, Answer 30%, Visual 30%,
+// Context 20% (weights sum to 5).
 const DEFAULT_STACK_SIZES: PanelLayout["sizes"] = {
   transcript: 1.0,
-  directional: 1.5,
-  depth: 1.5,
-  clarifying: 0.5,
-  context: 0.5,
+  answer: 1.5,
+  visual: 1.5,
+  context: 1.0,
 };
 
-// Grid mode (horizontal): Directional dominant, Transcript and Depth equal,
-// Clarifying + Context narrower side panels.
+// Grid mode (horizontal): Answer dominant, Transcript and Visual equal,
+// Context narrower side panel.
 const DEFAULT_GRID_SIZES: PanelLayout["sizes"] = {
   transcript: 1,
-  directional: 1.5,
-  depth: 1,
-  clarifying: 0.75,
-  context: 0.75,
+  answer: 1.5,
+  visual: 1,
+  context: 1,
 };
 
 const defaultPanelLayout: PanelLayout = {
   sizes: DEFAULT_STACK_SIZES,
   collapsed: {
     transcript: false,
-    directional: false,
-    depth: false,
-    clarifying: false,
+    answer: false,
+    visual: false,
     context: false,
   },
 };
@@ -127,14 +121,13 @@ export const useUIStore = create<UIStore>((set) => ({
   panelLayout: defaultPanelLayout,
   layoutMode: readPersistedLayoutMode(),
   focusedPanel: null,
-  streamingBuffers: { directional: "", depth: "" },
+  streamingBuffers: { answer: "", visual: "" },
   currentQuestion: "",
   turnHistory: [],
   confidenceLevel: null,
   depthPrePrepared: false,
   digestSummary: null,
   lastManualQuestion: "",
-  clarifyingQuestions: [],
   ragChunks: [],
   tokenUsage: defaultTokenUsage,
   costCap: defaultCostCap,
@@ -180,33 +173,32 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setFocusedPanel: (focusedPanel) => set({ focusedPanel }),
 
-  appendDirectionalToken: (token) =>
+  appendAnswerToken: (token) =>
     set((s) => ({
       streamingBuffers: {
         ...s.streamingBuffers,
-        directional: s.streamingBuffers.directional + token,
+        answer: s.streamingBuffers.answer + token,
       },
     })),
 
-  appendDepthToken: (token) =>
+  appendVisualToken: (token) =>
     set((s) => ({
       streamingBuffers: {
         ...s.streamingBuffers,
-        depth: s.streamingBuffers.depth + token,
+        visual: s.streamingBuffers.visual + token,
       },
     })),
 
   clearStreamingBuffers: () =>
     set({
-      streamingBuffers: { directional: "", depth: "" },
+      streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
     }),
 
   resetOrchestratorPanels: () =>
     set({
-      streamingBuffers: { directional: "", depth: "" },
+      streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
-      clarifyingQuestions: [],
       confidenceLevel: null,
       answerNowMode: false,
       currentQuestion: "",
@@ -218,8 +210,7 @@ export const useUIStore = create<UIStore>((set) => ({
   startTurn: (question, turn) =>
     set((s) => {
       const hasContent =
-        s.streamingBuffers.directional.length > 0 ||
-        s.streamingBuffers.depth.length > 0;
+        s.streamingBuffers.answer.length > 0 || s.streamingBuffers.visual.length > 0;
       const archived: TurnCard[] = hasContent
         ? [
             {
@@ -229,8 +220,8 @@ export const useUIStore = create<UIStore>((set) => ({
                   : `${Date.now()}-${Math.random()}`,
               turn: turn - 1,
               question: s.currentQuestion,
-              directional: s.streamingBuffers.directional,
-              depth: s.streamingBuffers.depth,
+              answer: s.streamingBuffers.answer,
+              visual: s.streamingBuffers.visual,
               confidenceLevel: s.confidenceLevel,
             },
             ...s.turnHistory,
@@ -239,10 +230,9 @@ export const useUIStore = create<UIStore>((set) => ({
       return {
         turnHistory: archived,
         currentQuestion: question,
-        streamingBuffers: { directional: "", depth: "" },
+        streamingBuffers: { answer: "", visual: "" },
         confidenceLevel: null,
         depthPrePrepared: false,
-        clarifyingQuestions: [],
         answerNowMode: s.answerNowMode,
       };
     }),
@@ -254,29 +244,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setDigestSummary: (digestSummary) => set({ digestSummary }),
 
   setLastManualQuestion: (lastManualQuestion) => set({ lastManualQuestion }),
-
-  addClarifyingQuestion: (q) =>
-    set((s) => {
-      const norm = q.question.trim().toLowerCase();
-      if (
-        s.clarifyingQuestions.some(
-          (existing) => existing.question.trim().toLowerCase() === norm,
-        )
-      ) {
-        return s;
-      }
-      const id =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random()}`;
-      return {
-        clarifyingQuestions: [...s.clarifyingQuestions, { ...q, id }].sort(
-          (a, b) => a.rank - b.rank,
-        ),
-      };
-    }),
-
-  clearClarifyingQuestions: () => set({ clarifyingQuestions: [] }),
 
   setRagChunks: (ragChunks) => set({ ragChunks }),
 

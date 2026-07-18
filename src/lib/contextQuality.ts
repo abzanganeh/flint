@@ -3,7 +3,7 @@ import type { ConfidenceLevel, RagChunk } from "../types";
 /** RAG score floor used by research chat — chunks below this are weak. */
 export const RAG_SUFFICIENCY_THRESHOLD = 0.45;
 
-/** Minimum directional length before treating an answer as substantive. */
+/** Minimum answer length before treating it as substantive. */
 const MIN_GROUNDED_ANSWER_CHARS = 80;
 
 /** Significant word length for overlap matching. */
@@ -38,14 +38,14 @@ function chunkWordOverlap(response: string, chunkText: string): number {
 }
 
 /**
- * True when the directional answer likely drew on retrieved session context
- * (story, technical prep, profile) — not just JD boilerplate at a high score.
+ * True when the answer likely drew on retrieved session context (story,
+ * technical prep, profile) — not just JD boilerplate at a high score.
  */
 export function isAnswerGroundedInContext(
-  directionalText: string,
+  answerText: string,
   ragChunks: RagChunk[],
 ): boolean {
-  const answer = directionalText.trim();
+  const answer = answerText.trim();
   if (answer.length < MIN_GROUNDED_ANSWER_CHARS || ragChunks.length === 0) {
     return false;
   }
@@ -72,20 +72,20 @@ export function isAnswerGroundedInContext(
 
 /**
  * True when Flint likely answered without a user-specific story in context.
- * Uses orchestrator confidence plus whether the directional answer overlaps RAG.
- * Clarifying questions and grey confidence alone do not imply missing stories.
+ * Uses orchestrator confidence plus whether the answer overlaps RAG.
+ * Grey confidence alone does not imply a missing story.
  */
 export function needsUserContext(
   confidence: ConfidenceLevel | null,
   ragChunks: RagChunk[],
-  directionalText = "",
+  answerText = "",
 ): boolean {
 
   if (confidence === "green") {
     return false;
   }
 
-  if (isAnswerGroundedInContext(directionalText, ragChunks)) {
+  if (isAnswerGroundedInContext(answerText, ragChunks)) {
     return false;
   }
 
@@ -102,10 +102,10 @@ export function needsUserContext(
     return true;
   }
 
-  // Grey = clarifying question emitted; only prompt for more context when the
-  // directional answer is empty or too thin to be story-backed.
+  // Grey = no score applicable; only prompt for more context when the
+  // answer is empty or too thin to be story-backed.
   if (confidence === "grey") {
-    return directionalText.trim().length < MIN_GROUNDED_ANSWER_CHARS;
+    return answerText.trim().length < MIN_GROUNDED_ANSWER_CHARS;
   }
 
   return false;

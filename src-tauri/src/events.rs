@@ -36,19 +36,13 @@ pub struct TurnStartedPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DirectionalTokenPayload {
+pub struct AnswerTokenPayload {
     pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DepthTokenPayload {
+pub struct VisualTokenPayload {
     pub token: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ClarifyingQuestionPayload {
-    pub question: String,
-    pub rank: u8,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,23 +159,33 @@ pub fn emit_transcript_chunk_relabeled<R: Runtime>(
     let _ = app.emit("transcript_chunk_relabeled", payload);
 }
 
+/// Slice 5 (`lpav-s5-speaker-refined-events`) — fired when the async Tier-2/3
+/// LLM speaker classifier ([`crate::audio::speaker_classifier`]) returns a
+/// confirmed verdict for a chunk. `source` is always `"llm"` here; the
+/// frontend uses this to distinguish a classifier-confirmed correction from
+/// the immediate heuristic auto-correct already reflected in the initial
+/// `transcription_chunk` event.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpeakerRefinedPayload {
+    pub chunk_id: String,
+    pub speaker: String,
+    pub source: String,
+}
+
+pub fn emit_speaker_refined<R: Runtime>(app: &AppHandle<R>, payload: SpeakerRefinedPayload) {
+    let _ = app.emit("speaker_refined", payload);
+}
+
 pub fn emit_turn_started<R: Runtime>(app: &AppHandle<R>, payload: TurnStartedPayload) {
     let _ = app.emit("turn_started", payload);
 }
 
-pub fn emit_directional_token<R: Runtime>(app: &AppHandle<R>, payload: DirectionalTokenPayload) {
-    let _ = app.emit("directional_token", payload);
+pub fn emit_answer_token<R: Runtime>(app: &AppHandle<R>, payload: AnswerTokenPayload) {
+    let _ = app.emit("answer_token", payload);
 }
 
-pub fn emit_depth_token<R: Runtime>(app: &AppHandle<R>, payload: DepthTokenPayload) {
-    let _ = app.emit("depth_token", payload);
-}
-
-pub fn emit_clarifying_question<R: Runtime>(
-    app: &AppHandle<R>,
-    payload: ClarifyingQuestionPayload,
-) {
-    let _ = app.emit("clarifying_question", payload);
+pub fn emit_visual_token<R: Runtime>(app: &AppHandle<R>, payload: VisualTokenPayload) {
+    let _ = app.emit("visual_token", payload);
 }
 
 pub fn emit_confidence_score<R: Runtime>(app: &AppHandle<R>, payload: ConfidenceScorePayload) {

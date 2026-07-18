@@ -55,25 +55,27 @@ pub struct TranscriptChunk {
 /// Type of AI response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseType {
-    Directional,
-    Depth,
-    Clarifying,
+    Answer,
+    Visual,
 }
 
 impl ResponseType {
     pub fn as_str(self) -> &'static str {
         match self {
-            ResponseType::Directional => "directional",
-            ResponseType::Depth => "depth",
-            ResponseType::Clarifying => "clarifying",
+            ResponseType::Answer => "answer",
+            ResponseType::Visual => "visual",
         }
     }
 
+    /// Accepts both the current values and the pre-lpav names so rows
+    /// persisted before the Answer/Visual rename still load correctly.
+    /// Legacy `"clarifying"` rows fold into `Answer` — that thread's
+    /// behavior was absorbed into Answer in slice 18, so there is no
+    /// separate bucket to preserve it under.
     fn from_str(s: &str) -> Option<Self> {
         match s {
-            "directional" => Some(Self::Directional),
-            "depth" => Some(Self::Depth),
-            "clarifying" => Some(Self::Clarifying),
+            "answer" | "directional" | "clarifying" => Some(Self::Answer),
+            "visual" | "depth" => Some(Self::Visual),
             _ => None,
         }
     }
@@ -868,6 +870,26 @@ impl SessionPersistence {
                 params![new_speaker, chunk_id.to_string()],
             )
             .context("update transcript chunk speaker")?;
+        Ok(updated > 0)
+    }
+
+    /// Slice 5 (`lpav-s5-speaker-refined-events`) — the Tier-2/3 LLM speaker
+    /// classifier confirmed (or corrected) a chunk's speaker. Sets
+    /// `label_source = 'llm'`, which outranks `'channel'` / `'heuristic'` /
+    /// `'heuristic_pending'` but is itself outranked only by a manual `'user'`
+    /// relabel. Returns `Ok(false)` if no row matched (e.g. the session ended
+    /// before the async classification landed).
+    pub fn confirm_transcript_chunk_speaker(&self, chunk_id: Uuid, speaker: &str) -> Result<bool> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let updated = conn
+            .execute(
+                "UPDATE transcript_chunks
+                    SET speaker = ?1,
+                        label_source = 'llm'
+                  WHERE id = ?2",
+                params![speaker, chunk_id.to_string()],
+            )
+            .context("update transcript chunk speaker (classifier confirmed)")?;
         Ok(updated > 0)
     }
 
@@ -2801,7 +2823,7 @@ mod tests {
         Response {
             id: Uuid::new_v4(),
             session_id,
-            response_type: ResponseType::Directional,
+            response_type: ResponseType::Answer,
             content: "A concise directional answer.".to_string(),
             confidence: 0.85,
         }
@@ -2943,6 +2965,64 @@ mod tests {
             .relabel_transcript_chunk(Uuid::new_v4(), "System")
             .unwrap();
         assert!(!updated);
+    }
+
+    #[test]
+    fn confirm_transcript_chunk_speaker_round_trip() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let chunk = sample_chunk(sid, 1234, "I worked on the identity platform.");
+        db.write_transcript_chunk(&chunk).unwrap();
+
+        let updated = db
+            .confirm_transcript_chunk_speaker(chunk.id, "Microphone")
+            .unwrap();
+        assert!(updated);
+
+        let conn = db.db.lock().unwrap();
+        let (speaker, label_source): (String, String) = conn
+            .query_row(
+                "SELECT speaker, label_source FROM transcript_chunks WHERE id = ?1",
+                params![chunk.id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(speaker, "Microphone");
+        assert_eq!(label_source, "llm");
+    }
+
+    #[test]
+    fn confirm_transcript_chunk_speaker_returns_false_for_missing_id() {
+        let db = new_db();
+        let updated = db
+            .confirm_transcript_chunk_speaker(Uuid::new_v4(), "System")
+            .unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn user_relabel_after_llm_confirmation_still_wins() {
+        // A manual relabel must always be able to override a classifier
+        // verdict — 'user' outranks 'llm' in the label_source hierarchy.
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        let chunk = sample_chunk(sid, 1234, "I worked on the identity platform.");
+        db.write_transcript_chunk(&chunk).unwrap();
+
+        db.confirm_transcript_chunk_speaker(chunk.id, "System")
+            .unwrap();
+        db.relabel_transcript_chunk(chunk.id, "Microphone").unwrap();
+
+        let conn = db.db.lock().unwrap();
+        let (speaker, label_source): (String, String) = conn
+            .query_row(
+                "SELECT speaker, label_source FROM transcript_chunks WHERE id = ?1",
+                params![chunk.id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(speaker, "Microphone");
+        assert_eq!(label_source, "user");
     }
 
     #[test]

@@ -20,9 +20,8 @@ const renderOverlay = () =>
   render(
     <OverlayLayout
       transcript={<div data-testid="slot-transcript">T</div>}
-      directional={<div data-testid="slot-directional">D</div>}
-      depth={<div data-testid="slot-depth">P</div>}
-      clarifying={<div data-testid="slot-clarifying">C</div>}
+      answer={<div data-testid="slot-answer">A</div>}
+      visual={<div data-testid="slot-visual">V</div>}
       context={<div data-testid="slot-context">X</div>}
     />,
   );
@@ -33,16 +32,14 @@ const resetStore = (): void => {
       panelLayout: {
         sizes: {
           transcript: 1,
-          directional: 1.5,
-          depth: 1,
-          clarifying: 0.75,
-          context: 0.75,
+          answer: 1.5,
+          visual: 1.5,
+          context: 1,
         },
         collapsed: {
           transcript: false,
-          directional: false,
-          depth: false,
-          clarifying: false,
+          answer: false,
+          visual: false,
           context: false,
         },
       },
@@ -57,25 +54,23 @@ describe("OverlayLayout viewport rendering", () => {
     resetStore();
   });
 
-  it("renders all five panels at 1920x1080", () => {
+  it("renders all four panels at 1920x1080", () => {
     setViewport(1920, 1080);
     renderOverlay();
 
     expect(screen.getByTestId("slot-transcript")).toBeDefined();
-    expect(screen.getByTestId("slot-directional")).toBeDefined();
-    expect(screen.getByTestId("slot-depth")).toBeDefined();
-    expect(screen.getByTestId("slot-clarifying")).toBeDefined();
+    expect(screen.getByTestId("slot-answer")).toBeDefined();
+    expect(screen.getByTestId("slot-visual")).toBeDefined();
     expect(screen.getByTestId("slot-context")).toBeDefined();
   });
 
-  it("renders all five panels at 2560x1440", () => {
+  it("renders all four panels at 2560x1440", () => {
     setViewport(2560, 1440);
     renderOverlay();
 
     expect(screen.getByTestId("slot-transcript")).toBeDefined();
-    expect(screen.getByTestId("slot-directional")).toBeDefined();
-    expect(screen.getByTestId("slot-depth")).toBeDefined();
-    expect(screen.getByTestId("slot-clarifying")).toBeDefined();
+    expect(screen.getByTestId("slot-answer")).toBeDefined();
+    expect(screen.getByTestId("slot-visual")).toBeDefined();
     expect(screen.getByTestId("slot-context")).toBeDefined();
   });
 
@@ -95,11 +90,11 @@ describe("OverlayLayout viewport rendering", () => {
     renderOverlay();
 
     act(() => {
-      useUIStore.getState().togglePanelCollapsed("clarifying");
+      useUIStore.getState().togglePanelCollapsed("visual");
     });
 
-    expect(useUIStore.getState().panelLayout.collapsed.clarifying).toBe(true);
+    expect(useUIStore.getState().panelLayout.collapsed.visual).toBe(true);
     // Children stay mounted so orchestrator stream listeners are not dropped.
-    expect(screen.getByTestId("slot-clarifying")).toBeDefined();
+    expect(screen.getByTestId("slot-visual")).toBeDefined();
   });
 });

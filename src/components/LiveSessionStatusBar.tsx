@@ -1,8 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getProviderPriority, signalQuestionEnded } from "../commands";
 import {
-  onDirectionalToken,
+  getInterviewerSpanPreview,
+  getProviderPriority,
+  signalQuestionEnded,
+} from "../commands";
+import {
+  onAnswerToken,
   onFailoverTriggered,
   onPrimaryRestored,
   onThreadStatus,
@@ -11,7 +15,8 @@ import {
 import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
 import { useUIStore } from "../store/ui";
 
-const ROLLING_WINDOW_MS = 30_000;
+const SPAN_POLL_MS = 750;
+const PHONE_FALLBACK_WINDOW_MS = 30_000;
 const Q_FLASH_MS = 450;
 const PROCESSING_IDLE_MS = 1_500;
 
@@ -34,9 +39,8 @@ function providerDisplayName(name: string): string {
   return labels[name] ?? name;
 }
 
-interface RollingLine {
+interface FallbackLine {
   text: string;
-  /** Wall-clock ms when the chunk arrived — used for the 30s rolling window. */
   receivedAt: number;
 }
 
@@ -47,7 +51,9 @@ const LiveSessionStatusBar = ({
   const [activeProvider, setActiveProvider] = useState("groq");
   const [failoverActive, setFailoverActive] = useState(false);
   const [detectionPhase, setDetectionPhase] = useState<DetectionPhase>("listening");
-  const [systemLines, setSystemLines] = useState<RollingLine[]>([]);
+  const [spanText, setSpanText] = useState("");
+  const [uncertainSpeaker, setUncertainSpeaker] = useState(false);
+  const [fallbackLines, setFallbackLines] = useState<FallbackLine[]>([]);
   const [qFlash, setQFlash] = useState(false);
   const [capturedPreview, setCapturedPreview] = useState<string | null>(null);
   const [qError, setQError] = useState<string | null>(null);
@@ -56,6 +62,16 @@ const LiveSessionStatusBar = ({
   const setLastManualQuestion = useUIStore((s) => s.setLastManualQuestion);
   const pushNotification = useUIStore((s) => s.pushNotification);
 
+  const refreshSpanPreview = useCallback(async () => {
+    try {
+      const preview = await getInterviewerSpanPreview(sessionId);
+      setSpanText(preview.text);
+      setUncertainSpeaker(preview.uncertainSpeaker);
+    } catch {
+      // Non-fatal — preview degrades to empty/fallback.
+    }
+  }, [sessionId]);
+
   useEffect(() => {
     void getProviderPriority()
       .then((order) => {
@@ -63,6 +79,14 @@ const LiveSessionStatusBar = ({
       })
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    void refreshSpanPreview();
+    const id = window.setInterval(() => {
+      void refreshSpanPreview();
+    }, SPAN_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [refreshSpanPreview]);
 
   useEffect(() => {
     const unsubs: Array<Promise<() => void>> = [
@@ -79,12 +103,15 @@ const LiveSessionStatusBar = ({
         setCapturedPreview(question);
         setLastManualQuestion(question);
         setQError(null);
+        setSpanText("");
+        setUncertainSpeaker(false);
+        setFallbackLines([]);
       }),
-      onDirectionalToken(() => {
+      onAnswerToken(() => {
         setDetectionPhase("generating");
       }),
       onThreadStatus(({ thread, status }) => {
-        if (thread === "directional" && status === "idle") {
+        if (thread === "answer" && status === "idle") {
           setDetectionPhase("listening");
         }
       }),
@@ -113,27 +140,32 @@ const LiveSessionStatusBar = ({
   const onSystemChunk = useCallback(
     (line: { text: string; speaker: string; timestamp: number }) => {
       if (line.speaker !== "System") return;
+      void refreshSpanPreview();
+
+      if (!phoneCallMode) return;
+
       const receivedAt = Date.now();
-      const cutoff = receivedAt - ROLLING_WINDOW_MS;
-      setSystemLines((prev) => {
+      const cutoff = receivedAt - PHONE_FALLBACK_WINDOW_MS;
+      setFallbackLines((prev) => {
         const next = [...prev, { text: line.text, receivedAt }];
         return next.filter((entry) => entry.receivedAt >= cutoff);
       });
+
       setDetectionPhase("processing");
       if (processingTimerRef.current) clearTimeout(processingTimerRef.current);
       processingTimerRef.current = setTimeout(() => {
         setDetectionPhase((phase) => (phase === "processing" ? "listening" : phase));
       }, PROCESSING_IDLE_MS);
     },
-    [],
+    [phoneCallMode, refreshSpanPreview],
   );
 
   useTranscriptionStream(onSystemChunk);
 
-  const rollingText = useMemo(
-    () => systemLines.map((line) => line.text).join(" "),
-    [systemLines],
-  );
+  const fallbackText = fallbackLines.map((line) => line.text).join(" ");
+  const usePhoneFallback =
+    phoneCallMode && uncertainSpeaker && spanText.trim().length === 0 && fallbackText.length > 0;
+  const displayText = usePhoneFallback ? fallbackText : spanText;
 
   /** Drain the backend System transcript buffer — authoritative for Q/Ctrl+Q. */
   const fireManualQuestion = useCallback(async () => {
@@ -143,6 +175,9 @@ const LiveSessionStatusBar = ({
     window.setTimeout(() => setQFlash(false), Q_FLASH_MS);
     try {
       await signalQuestionEnded(sessionId);
+      setSpanText("");
+      setUncertainSpeaker(false);
+      setFallbackLines([]);
     } catch (err: unknown) {
       const message = String(err);
       setQError(message);
@@ -163,7 +198,7 @@ const LiveSessionStatusBar = ({
         : detectionPhase === "generating"
           ? "Generating response…"
           : phoneCallMode
-            ? "Phone mode — press Q when interviewer finishes"
+            ? "Phone mode — press Ask now when interviewer finishes"
             : "Listening…";
 
   const providerDotClass = failoverActive
@@ -185,15 +220,23 @@ const LiveSessionStatusBar = ({
     <div className="live-status-bar" data-testid="live-session-status-bar">
       <div className="live-status-bar__transcript">
         <span className="live-status-bar__transcript-label">
-          {phoneCallMode ? "Last 30s (interviewer audio)" : "Last 30s (interviewer)"}
+          {phoneCallMode ? "Interviewer span (phone)" : "Interviewer span"}
+          {uncertainSpeaker && (
+            <span
+              data-testid="live-uncertain-speaker-hint"
+              style={{ marginLeft: 6, color: "#f59e0b", textTransform: "none" }}
+            >
+              (uncertain speaker)
+            </span>
+          )}
         </span>
         <div className="live-status-bar__transcript-body" data-testid="live-rolling-transcript">
-          {rollingText ? (
-            rollingText
+          {displayText ? (
+            displayText
           ) : (
             <span className="live-status-bar__transcript-empty">
               {phoneCallMode
-                ? "Waiting for audio… press Q when the interviewer finishes their question"
+                ? "Waiting for audio… press Ask now when the interviewer finishes their question"
                 : "Waiting for interviewer audio…"}
             </span>
           )}
@@ -227,7 +270,8 @@ const LiveSessionStatusBar = ({
           title="Mark question ended — sends captured interviewer speech to AI (Ctrl+Q)"
           onClick={() => void fireManualQuestion()}
         >
-          Q
+          <span className="live-q-button__label">Ask now</span>
+          <kbd className="live-q-button__keycap">Ctrl+Q</kbd>
         </button>
       </div>
     </div>

@@ -7,6 +7,7 @@ export enum SessionState {
   REHEARSING = "REHEARSING",
   MOCK_INTERVIEW = "MOCK_INTERVIEW",
   READY = "READY",
+  LIVE_PREVIEW = "LIVE_PREVIEW",
   LIVE = "LIVE",
   PAUSED = "PAUSED",
   ENDING = "ENDING",
@@ -15,12 +16,7 @@ export enum SessionState {
   RECOVERING = "RECOVERING",
 }
 
-export type PanelId =
-  | "transcript"
-  | "directional"
-  | "depth"
-  | "clarifying"
-  | "context";
+export type PanelId = "transcript" | "answer" | "visual" | "context";
 
 export type Speaker = "System" | "Microphone";
 
@@ -43,12 +39,6 @@ export interface Notification {
   id: string;
   message: string;
   level: "info" | "warn" | "error";
-}
-
-export interface ClarifyingQuestion {
-  id: string;
-  question: string;
-  rank: number;
 }
 
 export interface RagChunk {
@@ -79,8 +69,8 @@ export interface TurnCard {
   id: string;
   turn: number;
   question: string;
-  directional: string;
-  depth: string;
+  answer: string;
+  visual: string;
   confidenceLevel: ConfidenceLevel | null;
 }
 
@@ -89,8 +79,8 @@ export interface UIState {
   layoutMode: "stack" | "grid";
   focusedPanel: PanelId | null;
   streamingBuffers: {
-    directional: string;
-    depth: string;
+    answer: string;
+    visual: string;
   };
   /** Question heading the answer currently streaming into the buffers. */
   currentQuestion: string;
@@ -100,7 +90,6 @@ export interface UIState {
   depthPrePrepared: boolean;
   digestSummary: string | null;
   lastManualQuestion: string;
-  clarifyingQuestions: ClarifyingQuestion[];
   ragChunks: RagChunk[];
   tokenUsage: TokenUsage;
   costCap: CostCapState;

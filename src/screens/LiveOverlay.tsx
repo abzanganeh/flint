@@ -1,6 +1,10 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 
 import SessionContextBadges from "../components/SessionContextBadges";
+import FirstRunLiveModal, {
+  isFirstRunLiveModalDismissed,
+} from "../components/FirstRunLiveModal";
+import LiveHelpDrawer from "../components/LiveHelpDrawer";
 import LiveSessionStatusBar from "../components/LiveSessionStatusBar";
 import OverlayLayout from "../components/OverlayLayout";
 import MicQualityBadge from "../components/MicQualityBadge";
@@ -25,9 +29,8 @@ import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useTokenUsage } from "../hooks/useTokenUsage";
-import DirectionalPanel from "../panels/DirectionalPanel";
-import DepthPanel from "../panels/DepthPanel";
-import ClarifyingPanel from "../panels/ClarifyingPanel";
+import AnswerPanel from "../panels/AnswerPanel";
+import VisualPanel from "../panels/VisualPanel";
 import ContextPanel from "../panels/ContextPanel";
 import TranscriptPanel from "../panels/TranscriptPanel";
 import { useUIStore } from "../store/ui";
@@ -48,6 +51,10 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
   const [phoneCallMode, setPhoneCallMode] = useState(false);
   const [headphoneGate, setHeadphoneGate] = useState<HeadphoneGateStatusDto | null>(null);
   const [diarizationStatus, setDiarizationStatus] = useState<DiarizationStatusDto | null>(null);
+  const [showFirstRunLiveModal, setShowFirstRunLiveModal] = useState(
+    () => !isFirstRunLiveModalDismissed(),
+  );
+  const [helpOpen, setHelpOpen] = useState(false);
   const lastManualQuestion = useUIStore((s) => s.lastManualQuestion);
 
   useTokenUsage();
@@ -282,6 +289,11 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
 
   return (
     <PanicRestoreShell>
+    <>
+      {showFirstRunLiveModal && (
+        <FirstRunLiveModal onDismiss={() => setShowFirstRunLiveModal(false)} />
+      )}
+      <LiveHelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
     <div
       data-testid="live-overlay"
       style={{
@@ -320,6 +332,14 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <button
             type="button"
+            data-testid="live-help-button"
+            onClick={() => setHelpOpen(true)}
+            style={toolbarButtonStyle}
+          >
+            Help
+          </button>
+          <button
+            type="button"
             data-testid="live-back-to-setup-button"
             disabled={exiting}
             onClick={() => void handleReturnToSetup()}
@@ -349,7 +369,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
           }}
         >
           Phone interview mode: one audio channel. Labels are best-effort — press{" "}
-          <strong>Q</strong> (or Ctrl+Q) when the <em>interviewer</em> finishes their question,
+          <strong>Ask now</strong> (Ctrl+Q) when the <em>interviewer</em> finishes their question,
           not when you speak. Use headphones in normal mode if you hear echo.
         </div>
       )}
@@ -437,9 +457,8 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       <div style={{ flex: 1, overflow: "hidden" }}>
         <OverlayLayout
           transcript={<TranscriptPanel sessionId={sessionId} />}
-          directional={<DirectionalPanel sessionId={sessionId} />}
-          depth={<DepthPanel />}
-          clarifying={<ClarifyingPanel />}
+          answer={<AnswerPanel sessionId={sessionId} />}
+          visual={<VisualPanel sessionId={sessionId} />}
           context={<ContextPanel sessionId={sessionId} />}
         />
       </div>
@@ -448,6 +467,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       <LiveSessionStatusBar sessionId={sessionId} phoneCallMode={phoneCallMode} />
       <MicQualityBadge />
     </div>
+    </>
     </PanicRestoreShell>
   );
 };

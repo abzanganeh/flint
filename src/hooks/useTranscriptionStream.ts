@@ -7,6 +7,8 @@ export interface TranscriptionLine {
   text: string;
   speaker: Speaker;
   timestamp: number;
+  /** Persisted chunk id — absent for synthetic markers (audio gaps). */
+  chunkId?: string;
   /** Provenance of the speaker label: "channel" | "heuristic" | "user". */
   labelSource?: string;
 }
@@ -25,8 +27,14 @@ function dispatchLine(line: TranscriptionLine): void {
 }
 
 async function attachTranscriptionListener(): Promise<() => void> {
-  return onTranscriptionChunk(({ text, speaker, timestamp, label_source }) => {
-    dispatchLine({ text, speaker, timestamp, labelSource: label_source });
+  return onTranscriptionChunk(({ text, speaker, timestamp, chunk_id, label_source }) => {
+    dispatchLine({
+      text,
+      speaker,
+      timestamp,
+      chunkId: chunk_id,
+      labelSource: label_source,
+    });
   });
 }
 

@@ -2,23 +2,26 @@
 //!
 //! These metrics complement the LLM judge (`crate::judge`) and run on every
 //! response. They cover the "objective" half of the eval criteria from
-//! design doc §20: conciseness, depth structure, and latency.
+//! design doc §20: answer conciseness, visual structure, and latency.
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum sentences a directional response may contain.
-const DIRECTIONAL_MAX_SENTENCES: usize = 3;
+/// Maximum sentences an Answer thread response may contain. Matches the
+/// "Maximum 4 sentences" instruction in `prompts/answer/*.txt` — the
+/// mandatory trailing "Follow-up:" line (slice 17) is itself one sentence,
+/// so this is one higher than the retired Directional thread's cap of 3.
+const ANSWER_MAX_SENTENCES: usize = 4;
 
-/// Approximate inverted-pyramid heuristic: the first paragraph should be
-/// the shortest (the punchline), and subsequent paragraphs may expand.
-const DEPTH_MIN_PARAGRAPHS: usize = 2;
+/// A rendered diagram or code fence below this length is almost certainly a
+/// truncated stream or an empty block, not a usable visual.
+const MIN_VISUAL_BLOCK_CHARS: usize = 15;
 
 /// Result of all rule-based metrics for a single (question, variant)
 /// response. Stored alongside judge scores in the per-row report.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RuleScores {
-    pub directional_conciseness: ConcisenessOutcome,
-    pub depth_structure: StructureOutcome,
+    pub answer_conciseness: ConcisenessOutcome,
+    pub visual_structure: VisualStructureOutcome,
     pub latency: LatencyOutcome,
 }
 
@@ -28,10 +31,15 @@ pub struct ConcisenessOutcome {
     pub passed: bool,
 }
 
+/// Visual thread's contract is a single complete fenced block (Mermaid
+/// diagram or code) — unlike the retired Depth thread's free-form prose,
+/// there's no paragraph structure to score. This checks the fence itself
+/// extracted, closed, and non-trivial.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct StructureOutcome {
-    pub paragraphs: usize,
-    pub follows_inverted_pyramid: bool,
+pub struct VisualStructureOutcome {
+    pub has_fenced_block: bool,
+    pub block_chars: usize,
+    pub passed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -65,39 +73,40 @@ pub fn count_sentences(text: &str) -> usize {
     count.max(1)
 }
 
-pub fn score_conciseness(directional_response: &str) -> ConcisenessOutcome {
-    let sentences = count_sentences(directional_response);
+pub fn score_conciseness(answer_response: &str) -> ConcisenessOutcome {
+    let sentences = count_sentences(answer_response);
     ConcisenessOutcome {
         sentences,
-        passed: sentences <= DIRECTIONAL_MAX_SENTENCES,
+        passed: sentences <= ANSWER_MAX_SENTENCES,
     }
 }
 
-pub fn score_structure(depth_response: &str) -> StructureOutcome {
-    let paragraphs: Vec<&str> = depth_response
-        .split("\n\n")
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-        .collect();
-
-    let n = paragraphs.len();
-    let follows_inverted_pyramid = if n < DEPTH_MIN_PARAGRAPHS {
-        false
-    } else {
-        let first_len = paragraphs[0].len();
-        let rest_avg = paragraphs[1..]
-            .iter()
-            .map(|p| p.len())
-            .sum::<usize>()
-            .checked_div(n - 1)
-            .unwrap_or(0);
-        first_len <= rest_avg
-    };
-
-    StructureOutcome {
-        paragraphs: n,
-        follows_inverted_pyramid,
+/// Mirrors the live orchestrator's fence detection (`orchestrator::visual`)
+/// so the eval harness scores the same contract the app actually renders:
+/// exactly one fenced block, fully closed.
+pub fn score_visual_structure(visual_response: &str) -> VisualStructureOutcome {
+    let block = extract_fenced_block(visual_response);
+    let block_chars = block.map(str::len).unwrap_or(0);
+    let has_fenced_block = block.is_some();
+    VisualStructureOutcome {
+        has_fenced_block,
+        block_chars,
+        passed: has_fenced_block && block_chars >= MIN_VISUAL_BLOCK_CHARS,
     }
+}
+
+fn extract_fenced_block(buffer: &str) -> Option<&str> {
+    const FENCE: &str = "```";
+    let start = buffer.find(FENCE)?;
+    let after_open = start + FENCE.len();
+    let close_offset = buffer[after_open..].find(FENCE)?;
+    let after_lang = buffer[after_open..].find('\n').map(|i| after_open + i + 1);
+    let content_start = after_lang.unwrap_or(after_open);
+    let content_end = after_open + close_offset;
+    if content_start >= content_end {
+        return Some("");
+    }
+    Some(buffer[content_start..content_end].trim())
 }
 
 pub fn score_latency(ttft_ms: u64, stream_complete_ms: u64) -> LatencyOutcome {
@@ -131,29 +140,46 @@ mod tests {
     }
 
     #[test]
-    fn score_conciseness_passes_for_three_sentences() {
-        let out = score_conciseness("First. Second. Third.");
-        assert_eq!(out.sentences, 3);
+    fn score_conciseness_passes_for_four_sentences() {
+        // Conclusion + up to 2 reasoning sentences + the mandatory
+        // "Follow-up:" line — the Answer prompt's own stated ceiling.
+        let out = score_conciseness("First. Second. Third. Follow-up: Fourth?");
+        assert_eq!(out.sentences, 4);
         assert!(out.passed);
     }
 
     #[test]
-    fn score_conciseness_fails_for_four_sentences() {
-        let out = score_conciseness("One. Two. Three. Four.");
+    fn score_conciseness_fails_for_five_sentences() {
+        let out = score_conciseness("One. Two. Three. Four. Five.");
         assert!(!out.passed);
     }
 
     #[test]
-    fn score_structure_flags_single_paragraph_as_not_inverted() {
-        let out = score_structure("just one paragraph");
-        assert!(!out.follows_inverted_pyramid);
+    fn score_visual_structure_fails_when_no_fenced_block_present() {
+        let out = score_visual_structure("just some prose, no fence anywhere");
+        assert!(!out.has_fenced_block);
+        assert!(!out.passed);
     }
 
     #[test]
-    fn score_structure_passes_when_first_paragraph_is_shortest() {
-        let depth = "Short summary.\n\nLonger second paragraph with much more detail and context.";
-        let out = score_structure(depth);
-        assert!(out.follows_inverted_pyramid);
+    fn score_visual_structure_passes_for_a_closed_mermaid_fence() {
+        let out = score_visual_structure("```mermaid\nflowchart TD\nA-->B\n```");
+        assert!(out.has_fenced_block);
+        assert!(out.passed);
+    }
+
+    #[test]
+    fn score_visual_structure_fails_for_an_unclosed_fence() {
+        let out = score_visual_structure("```mermaid\nflowchart TD\nA-->B");
+        assert!(!out.has_fenced_block);
+        assert!(!out.passed);
+    }
+
+    #[test]
+    fn score_visual_structure_fails_for_a_trivially_short_block() {
+        let out = score_visual_structure("```\nx\n```");
+        assert!(out.has_fenced_block);
+        assert!(!out.passed);
     }
 
     #[test]

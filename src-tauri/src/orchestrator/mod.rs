@@ -1,4 +1,5 @@
-//! Orchestration layer: directional/depth/clarifying response threads,
+//! Orchestration layer: response threads (answer/visual, replacing the
+//! retired directional/depth/clarifying threads as of `lpav` slice 28),
 //! pre-warm cache, and session lifecycle management.
 //!
 //! Reference: design doc §8 (System Architecture), `.cursor/rules` flint-core
@@ -6,9 +7,9 @@
 //!
 //! ## Concurrency contract
 //!
-//! All three response threads are spawned via `tokio::spawn` in a single
-//! statement — there is NO `.await` between spawns. One thread failing never
-//! affects the others.
+//! The answer and visual response threads are spawned via `tokio::spawn` in
+//! a single statement — there is NO `.await` between spawns. One thread
+//! failing never affects the other.
 //!
 //! ## Silence debounce
 //!
@@ -16,10 +17,10 @@
 //! If a new question arrives within that window the timer resets and the older
 //! question is discarded. This prevents double-firing on split utterances.
 
-pub mod clarifying;
-pub mod depth;
-pub mod directional;
+pub mod answer;
 pub mod prewarm;
+pub mod visual;
+pub mod visual_classifier;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,10 +84,10 @@ pub struct OrchestrationContext {
     pub from_preferred: bool,
     /// Saved preferred answer text when present (used for prompt hints during generation).
     pub preferred_answer: String,
-    /// Cached directional text when pre-warm cache hit (≥ 0.85 cosine).
-    pub cached_directional: Option<String>,
-    /// Cached depth text when pre-warm cache hit.
-    pub cached_depth: Option<String>,
+    /// Cached answer text when pre-warm cache hit (≥ 0.85 cosine).
+    pub cached_answer: Option<String>,
+    /// Cached visual text when pre-warm cache hit.
+    pub cached_visual: Option<String>,
     /// Per-turn cancellation flag — set by `cancel_inference`.
     pub turn_cancel: TurnCancelFlag,
     /// 1-indexed turn number in the current session.
@@ -121,6 +122,14 @@ fn mean_rag_score(chunks: &[ScoredChunk]) -> f32 {
     let top = chunks.iter().take(3);
     let sum: f32 = top.map(|c| c.score).sum();
     sum / chunks.len().min(3) as f32
+}
+
+/// Gate for the fire-and-forget Q&A embedding (step 7b). Only the Answer
+/// thread's output feeds this decision — Visual output is never embedded
+/// for Q&A recall, since it is diagram/code shaped rather than a reusable
+/// spoken answer.
+fn should_embed_qa_pair(confidence_score: f32, answer_text: &str) -> bool {
+    confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD && !answer_text.trim().is_empty()
 }
 
 /// Collapse the nested `JoinError`/thread `Result` into a plain text payload.
@@ -177,24 +186,6 @@ fn collect_thread_text<R: Runtime>(
     }
 }
 
-fn collect_clarifying(
-    result: std::result::Result<Result<Option<String>>, tokio::task::JoinError>,
-    session_id: Uuid,
-) -> bool {
-    match result {
-        Ok(Ok(Some(_))) => true,
-        Ok(Ok(None)) => false,
-        Ok(Err(e)) => {
-            log_thread_failed(session_id, "clarifying", &e);
-            false
-        }
-        Err(join_err) => {
-            log_thread_panicked(session_id, "clarifying", &join_err);
-            false
-        }
-    }
-}
-
 fn emit_thread_error<R: Runtime>(app: &AppHandle<R>, thread: &str) {
     emit_thread_status(
         app,
@@ -229,8 +220,8 @@ fn log_confidence_computed(
     info!(
         session_id = %session_id,
         turn = turn,
-        event = "directional_thread_complete",
-        thread_type = "directional",
+        event = "answer_thread_complete",
+        thread_type = "answer",
         confidence = confidence_score,
         level = %confidence_level.as_str(),
         provider = %provider,
@@ -352,6 +343,10 @@ pub async fn run_orchestrator<R: Runtime>(
             persistence: Arc::clone(&config.persistence),
             cost_tracker: Arc::clone(&config.cost_tracker),
             usage_category: "live_turn".to_string(),
+            force_visual: matches!(
+                question.source,
+                crate::audio::pipeline::DetectedQuestionSource::VisualManual
+            ),
         };
 
         let span = info_span!(
@@ -382,6 +377,7 @@ fn is_valid_question_source(source: crate::audio::pipeline::DetectedQuestionSour
         DetectedQuestionSource::System
             | DetectedQuestionSource::PhoneManual
             | DetectedQuestionSource::UserTriggered
+            | DetectedQuestionSource::VisualManual
     )
 }
 
@@ -422,6 +418,12 @@ struct OrchestratorTurnConfig {
     cost_tracker: Arc<crate::cost::CostTracker>,
     /// Phase 5.5.7 — activity category for the usage widget.
     usage_category: String,
+    /// `lpav-s21-orchestrator-two-thread` — bypasses `visual_classifier`
+    /// when the question came from `trigger_visual_response`
+    /// (`DetectedQuestionSource::VisualManual`). Always `false` for
+    /// rehearsal turns dispatched via [`dispatch_turn`] — manual Visual
+    /// triggering is LIVE-only (slice 20).
+    force_visual: bool,
 }
 
 async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
@@ -490,27 +492,27 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     } else {
         let cache = cfg.prewarm_cache.lock().await;
         cache.lookup(&embedding).and_then(|e| {
-            let dir = if is_plausible_cached_response(&e.directional_response) {
-                e.directional_response.clone()
+            let ans = if is_plausible_cached_response(&e.answer_response) {
+                e.answer_response.clone()
             } else {
                 String::new()
             };
-            let dep = if is_plausible_cached_response(&e.depth_response) {
-                e.depth_response.clone()
+            let vis = if is_plausible_cached_response(&e.visual_response) {
+                e.visual_response.clone()
             } else {
                 String::new()
             };
-            if dir.is_empty() && dep.is_empty() {
+            if ans.is_empty() && vis.is_empty() {
                 None
             } else {
-                Some((dir, dep))
+                Some((ans, vis))
             }
         })
     };
 
     let from_cache = cache_hit.is_some();
-    let (cached_directional, cached_depth) = match cache_hit {
-        Some((dir, dep)) => (Some(dir), Some(dep)),
+    let (cached_answer, cached_visual) = match cache_hit {
+        Some((ans, vis)) => (Some(ans), Some(vis)),
         None => (None, None),
     };
     if from_preferred {
@@ -596,56 +598,73 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         from_cache,
         from_preferred,
         preferred_answer: preferred_answer.clone(),
-        cached_directional,
-        cached_depth,
+        cached_answer,
+        cached_visual,
         turn_cancel: Arc::clone(&cfg.turn_cancel),
         turn_number: cfg.turn_number,
     };
 
-    // ── 5. Spawn three threads concurrently ───────────────────────────────
-    // RULE: no .await between spawns — all three are dispatched simultaneously.
+    // ── 5. Spawn Answer + Visual concurrently ─────────────────────────────
+    // RULE: no .await between spawns — both are dispatched simultaneously
+    // when Visual fires. The retired Clarifying thread is no longer spawned
+    // here (its job is absorbed into the Answer prompt, slice 18); the
+    // module itself was deleted end-to-end in slice 28.
     let dir_ctx = ctx.clone();
     let dep_ctx = ctx.clone();
-    let cla_ctx = ctx.clone();
 
     let dir_app = app.clone();
     let dep_app = app.clone();
-    let cla_app = app.clone();
 
     let dir_failover = Arc::clone(&cfg.failover);
     let dep_failover = Arc::clone(&cfg.failover);
-    let cla_failover = Arc::clone(&cfg.failover);
 
     let dir_prompts = cfg.prompts_dir.clone();
     let dep_prompts = cfg.prompts_dir.clone();
-    let cla_prompts = cfg.prompts_dir.clone();
 
     let dir_task = tokio::spawn(async move {
-        directional::run_directional(dir_ctx, dir_failover, &dir_prompts, dir_app).await
+        answer::run_answer(dir_ctx, dir_failover, &dir_prompts, dir_app).await
     });
 
-    let dep_task = tokio::spawn(async move {
-        depth::run_depth(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+    // Visual only fires when the cheap classifier judges the question likely
+    // to benefit from a diagram, or the user forced it via
+    // `trigger_visual_response` (DetectedQuestionSource::VisualManual).
+    let needs_visual = cfg.force_visual || visual_classifier::needs_visual(&cfg.question_text);
+    let dep_task = needs_visual.then(|| {
+        tokio::spawn(async move {
+            visual::run_visual(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+        })
     });
 
-    let cla_task = tokio::spawn(async move {
-        clarifying::run_clarifying(cla_ctx, cla_failover, &cla_prompts, cla_app).await
-    });
+    // Collect results — one thread failing never crashes the other.
+    let (dir_result, dep_result) = match dep_task {
+        Some(dep_task) => {
+            let (d, v) = tokio::join!(dir_task, dep_task);
+            (d, Some(v))
+        }
+        None => (dir_task.await, None),
+    };
 
-    // Collect results — one thread failing never crashes the others.
-    let (dir_result, dep_result, _cla_result) = tokio::join!(dir_task, dep_task, cla_task);
+    let (answer_text, dir_err) = collect_thread_text(dir_result, cfg.session_id, "answer", &app);
+    let (visual_text, dep_err) = match dep_result {
+        Some(result) => collect_thread_text(result, cfg.session_id, "visual", &app),
+        None => {
+            emit_thread_status(
+                &app,
+                ThreadStatusPayload {
+                    thread: "visual".to_string(),
+                    status: "idle".to_string(),
+                },
+            );
+            (String::new(), None)
+        }
+    };
 
-    let (directional_text, dir_err) =
-        collect_thread_text(dir_result, cfg.session_id, "directional", &app);
-    let (depth_text, dep_err) = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
-    let clarifying_emitted = collect_clarifying(_cla_result, cfg.session_id);
-
-    if directional_text.trim().is_empty() {
+    if answer_text.trim().is_empty() {
         let detail = dir_err
             .or(dep_err)
             .unwrap_or_else(|| "unknown inference failure".to_string());
         anyhow::bail!(
-            "No directional answer was generated. Groq may be rate-limited (free tier: ~3 \
+            "No answer was generated. Groq may be rate-limited (free tier: ~3 \
              parallel calls per question). Add an OpenRouter key in Settings → API Keys for cloud \
              fallback, or run `ollama serve` and `ollama pull llama3.1:8b`. Detail: {detail}"
         );
@@ -653,16 +672,11 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
     // Confidence is computed once and reused by both the UI event (step 6)
-    // and the Q&A embedding gate (step 7b).
-    let (confidence_score, confidence_level) = if clarifying_emitted {
-        emit_confidence_score(
-            &app,
-            ConfidenceScorePayload {
-                level: ConfidenceLevel::Grey.as_str().to_string(),
-            },
-        );
-        (0.0_f32, ConfidenceLevel::Grey)
-    } else {
+    // and the Q&A embedding gate (step 7b). Previously short-circuited to a
+    // fixed Grey level when the (now-retired) Clarifying thread produced a
+    // question; the Answer thread's prompt now handles ambiguity inline
+    // (slice 18), so confidence is always computed from the answer text.
+    let (confidence_score, confidence_level) = {
         let rag_texts: Vec<String> = rag_chunks
             .iter()
             .take(3)
@@ -671,7 +685,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 
         let signals = ConfidenceSignals {
             rag_grounding,
-            response_text: directional_text.clone(),
+            response_text: answer_text.clone(),
             rag_texts,
             provider_name: cfg.failover.active_provider_name().to_string(),
             cache_stale: from_cache && cfg.turn_number > 3,
@@ -731,20 +745,20 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     persist_thread_response(
         &cfg.persistence,
         cfg.session_id,
-        ResponseType::Directional,
-        &directional_text,
+        ResponseType::Answer,
+        &answer_text,
         confidence_score,
     );
     persist_thread_response(
         &cfg.persistence,
         cfg.session_id,
-        ResponseType::Depth,
-        &depth_text,
+        ResponseType::Visual,
+        &visual_text,
         confidence_score,
     );
 
     // ── 7b. Quality-gated Q&A embedding ──────────────────────────────────
-    // If the directional answer reached confidence ≥ QA_EMBED_CONFIDENCE_THRESHOLD
+    // If the Answer thread's output reached confidence ≥ QA_EMBED_CONFIDENCE_THRESHOLD
     // (green or blue), embed the Q&A pair into the session's Q&A vector store
     // so it can be retrieved as a supplemental slot in future turns.
     //
@@ -752,16 +766,8 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // the turn. Low-confidence answers (amber/grey/red) are skipped to
     // prevent contaminating future retrievals.
     {
-        let should_embed = !clarifying_emitted
-            && confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD
-            && !directional_text.trim().is_empty();
-
-        if should_embed {
-            let qa_text = format!(
-                "Q: {}\nA: {}",
-                cfg.question_text.trim(),
-                directional_text.trim()
-            );
+        if should_embed_qa_pair(confidence_score, &answer_text) {
+            let qa_text = format!("Q: {}\nA: {}", cfg.question_text.trim(), answer_text.trim());
             let embedder = Arc::clone(&cfg.embedder);
             let store = Arc::clone(&cfg.vector_store);
             let session_id = cfg.session_id;
@@ -808,8 +814,8 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         let mut mem = cfg.memory.lock().await;
         mem.push_turn(Turn::new(
             cfg.question_text.clone(),
-            directional_text.clone(),
-            depth_text.clone(),
+            answer_text.clone(),
+            visual_text.clone(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -822,7 +828,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // into every call. It overestimates slightly, which is the safer side
     // to err on for a hard cost cap.
     let turn_input = (cfg.question_text.len() as u64 + 500) / 4;
-    let turn_output = (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
+    let turn_output = (answer_text.len() as u64 + visual_text.len() as u64 + 500) / 4;
     let total = turn_input + turn_output;
     let cost_estimate = total as f64 * 0.0000002;
     emit_token_usage_update(
@@ -913,6 +919,10 @@ pub async fn dispatch_turn<R: Runtime>(
             persistence,
             cost_tracker,
             usage_category: "rehearsal_turn".to_string(),
+            // Manual Visual triggering (`trigger_visual_response`) is
+            // LIVE-only (slice 20) — rehearsal turns always defer to the
+            // classifier.
+            force_visual: false,
         },
         app,
     )
@@ -937,11 +947,11 @@ mod tests {
     #[test]
     fn load_prompt_falls_back_to_default() {
         let dir = tempfile::tempdir().unwrap();
-        let category = dir.path().join("directional");
+        let category = dir.path().join("answer");
         std::fs::create_dir_all(&category).unwrap();
         std::fs::write(category.join("default.txt"), "default template").unwrap();
 
-        let result = load_prompt("directional", "nonexistent_provider", dir.path());
+        let result = load_prompt("answer", "nonexistent_provider", dir.path());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "default template");
     }
@@ -949,22 +959,22 @@ mod tests {
     #[test]
     fn load_prompt_uses_provider_specific_file() {
         let dir = tempfile::tempdir().unwrap();
-        let category = dir.path().join("directional");
+        let category = dir.path().join("answer");
         std::fs::create_dir_all(&category).unwrap();
         std::fs::write(category.join("default.txt"), "default").unwrap();
         std::fs::write(category.join("groq.txt"), "groq variant").unwrap();
 
-        let result = load_prompt("directional", "groq", dir.path());
+        let result = load_prompt("answer", "groq", dir.path());
         assert_eq!(result.unwrap(), "groq variant");
     }
 
     #[test]
     fn load_prompt_errors_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let category = dir.path().join("directional");
+        let category = dir.path().join("answer");
         std::fs::create_dir_all(&category).unwrap();
 
-        assert!(load_prompt("directional", "any", dir.path()).is_err());
+        assert!(load_prompt("answer", "any", dir.path()).is_err());
     }
 
     #[test]
@@ -996,6 +1006,59 @@ mod tests {
     #[test]
     fn mean_rag_score_empty_returns_zero() {
         assert_eq!(mean_rag_score(&[]), 0.0);
+    }
+
+    #[test]
+    fn should_embed_qa_pair_fires_on_high_confidence_answer_text() {
+        assert!(should_embed_qa_pair(
+            QA_EMBED_CONFIDENCE_THRESHOLD,
+            "A grounded answer."
+        ));
+        assert!(should_embed_qa_pair(0.9, "A grounded answer."));
+    }
+
+    #[test]
+    fn should_embed_qa_pair_skips_below_threshold() {
+        let just_under = QA_EMBED_CONFIDENCE_THRESHOLD - 0.01;
+        assert!(!should_embed_qa_pair(just_under, "A grounded answer."));
+    }
+
+    #[test]
+    fn should_embed_qa_pair_skips_empty_answer_text() {
+        assert!(!should_embed_qa_pair(0.95, ""));
+        assert!(!should_embed_qa_pair(0.95, "   "));
+    }
+
+    /// Slice 17 (`lpav-s17-prompts-answer-visual`) — the Answer + Visual
+    /// prompt artifacts must exist on disk before either thread can load
+    /// them; the gpt/claude/llama variants are the task's minimum bar.
+    #[test]
+    fn answer_and_visual_prompts_exist_on_disk() {
+        let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+        for category in ["answer", "visual"] {
+            for provider in ["default", "gpt", "claude", "llama"] {
+                let path = prompts_dir.join(category).join(format!("{provider}.txt"));
+                assert!(path.exists(), "missing prompt file: {}", path.display());
+            }
+        }
+    }
+
+    #[test]
+    fn load_prompt_answer_loads_from_real_prompts_dir() {
+        let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+        let template =
+            load_prompt("answer", "groq", &prompts_dir).expect("answer prompt must load");
+        assert!(template.contains("{question}"));
+        assert!(template.contains("Follow-up"));
+    }
+
+    #[test]
+    fn load_prompt_visual_loads_from_real_prompts_dir() {
+        let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+        let template =
+            load_prompt("visual", "groq", &prompts_dir).expect("visual prompt must load");
+        assert!(template.contains("{question}"));
+        assert!(template.to_lowercase().contains("fenced"));
     }
 
     #[tokio::test]
@@ -1031,6 +1094,9 @@ mod tests {
         ));
         assert!(is_valid_question_source(
             DetectedQuestionSource::UserTriggered
+        ));
+        assert!(is_valid_question_source(
+            DetectedQuestionSource::VisualManual
         ));
     }
 

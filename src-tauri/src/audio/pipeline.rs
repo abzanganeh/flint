@@ -49,7 +49,9 @@ use crate::events::{
 };
 
 use crate::audio::audit::{AudioAuditCounters, SuppressionReason};
-use crate::audio::diarizer::DiarizerManager;
+use crate::audio::diarizer::{DiarizerManager, SpeakerRole};
+use crate::audio::speaker_classifier::{ClassificationRequest, SpeakerClassifier};
+use crate::audio::speaker_heuristic::{rms_dbfs, PhoneHeuristicState};
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
@@ -57,18 +59,33 @@ use crate::transcription::hybrid::{
 };
 use crate::transcription::rolling_context::ChannelRollingContexts;
 use crate::transcription::sanitizer::sanitize_live_transcript;
-use crate::transcription::speaker_suspicion::{self, SuspicionReason};
+use crate::transcription::speaker_suspicion::{self, NearDuplicateTracker, SuspicionReason};
 
 /// Default `label_source` value applied to every chunk emitted from this
 /// pipeline. The suspicion detector and the manual `relabel_transcript_chunk`
 /// command upgrade this to `"heuristic"` or `"user"` respectively.
 const LABEL_SOURCE_CHANNEL: &str = "channel";
 
-/// `label_source` applied when the suspicion detector auto-corrects a chunk's
-/// speaker because its content contradicts the capture channel (e.g. an
-/// interviewer question that landed on the mic, or the user's first-person
-/// speech that bled into the system loopback).
+/// `label_source` applied when a heuristic (text-shape/near-duplicate
+/// suspicion, or the phone-mode RMS+pause heuristic) auto-corrects a chunk's
+/// speaker and the chunk was NOT enqueued for Tier-2/3 LLM confirmation —
+/// either no classifier is configured, or the enqueue policy below decided
+/// this chunk didn't need one.
 const LABEL_SOURCE_HEURISTIC: &str = "heuristic";
+
+/// `label_source` applied when a heuristic auto-corrects a chunk's speaker
+/// AND the chunk has been enqueued onto the Tier-2/3 [`SpeakerClassifier`]
+/// for confirmation (Slice 4). Distinguishes an unconfirmed heuristic guess
+/// from `"llm"` (Slice 5), which means the classifier already returned a
+/// confirmed verdict for this chunk.
+const LABEL_SOURCE_HEURISTIC_PENDING: &str = "heuristic_pending";
+
+/// Phone mode: any utterance at or above this word count is always queued
+/// for Tier-2/3 classification, regardless of what the cheap heuristics
+/// concluded — phone mode has no channel truth at all, so every
+/// long-enough utterance is worth the LLM call. Short utterances stay
+/// heuristic-only to bound API cost.
+const PHONE_CLASSIFIER_MIN_WORDS: usize = 8;
 
 /// Number of `FirstPersonOnSystem` auto-corrections in a session before we warn
 /// the user that their loopback is swallowing their own microphone. Below this
@@ -104,6 +121,11 @@ pub enum DetectedQuestionSource {
     PhoneManual,
     /// React-side `trigger_response` — the user typed or pasted a question.
     UserTriggered,
+    /// React-side `trigger_visual_response` (`lpav-s20-visual-classifier`) —
+    /// the user manually asked for a diagram on the current/last question,
+    /// bypassing the Visual-need classifier. Wired into the two-thread
+    /// dispatch in slice 21.
+    VisualManual,
     /// Microphone — must NEVER reach the orchestrator. Reserved as a sentinel
     /// for tests / defensive checks.
     Microphone,
@@ -268,7 +290,11 @@ impl CrossChannelDedup {
     }
 }
 
-fn tokenize_for_echo(text: &str) -> Vec<String> {
+/// Tokenize text for near-duplicate comparison. Shared with
+/// [`crate::transcription::speaker_suspicion::NearDuplicateTracker`] (Slice 3)
+/// so both the hard 500ms echo-suppression window here and the wider 1.5s
+/// suspicion window there agree on what counts as "the same words".
+pub(crate) fn tokenize_for_echo(text: &str) -> Vec<String> {
     text.to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -276,7 +302,7 @@ fn tokenize_for_echo(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn jaccard(a: &[String], b: &[String]) -> f32 {
+pub(crate) fn jaccard(a: &[String], b: &[String]) -> f32 {
     use std::collections::HashSet;
     if a.is_empty() || b.is_empty() {
         return 0.0;
@@ -355,10 +381,13 @@ pub async fn run_audio_pipeline(
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
     diarizer: Option<Arc<SyncMutex<DiarizerManager>>>,
+    speaker_classifier: Option<Arc<SpeakerClassifier>>,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
     let dedup = SyncMutex::new(CrossChannelDedup::default());
+    let near_duplicate = SyncMutex::new(NearDuplicateTracker::new());
+    let phone_heuristic = SyncMutex::new(PhoneHeuristicState::new());
     let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
 
     loop {
@@ -391,12 +420,15 @@ pub async fn run_audio_pipeline(
             &question_tx,
             &persistence,
             &dedup,
+            &near_duplicate,
+            &phone_heuristic,
             &mic_quality,
             &audit,
             echo_suppression_enabled,
             phone_mode_manual_only,
             &diarizer,
             &rolling_contexts,
+            &speaker_classifier,
         )
         .await
         {
@@ -424,12 +456,15 @@ async fn process_frame(
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
     dedup: &SyncMutex<CrossChannelDedup>,
+    near_duplicate: &SyncMutex<NearDuplicateTracker>,
+    phone_heuristic: &SyncMutex<PhoneHeuristicState>,
     mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
     audit: &Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
     phone_mode_manual_only: bool,
     diarizer: &Option<Arc<SyncMutex<DiarizerManager>>>,
     rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
+    speaker_classifier: &Option<Arc<SpeakerClassifier>>,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -485,6 +520,12 @@ async fn process_frame(
 
     // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
     let chunk_duration_ms = chunk.duration_ms;
+    // Sampled here (before Whisper) rather than after transcription — the
+    // phone-mode pause estimate below must not be inflated by inference
+    // latency. RMS is computed from the raw utterance buffer since `chunk`
+    // is moved into the blocking closure below and unavailable afterward.
+    let chunk_ready_at = Instant::now();
+    let chunk_rms_dbfs = rms_dbfs(&chunk.samples);
     let rolling_context = {
         let guard = rolling_contexts
             .lock()
@@ -527,6 +568,11 @@ async fn process_frame(
     }
 
     let now = Instant::now();
+    let channel_speaker = match source {
+        AudioSource::System => "System",
+        AudioSource::Microphone => "Microphone",
+    };
+
     if echo_suppression_enabled {
         let mut guard = match dedup.lock() {
             Ok(g) => g,
@@ -573,6 +619,14 @@ async fn process_frame(
         }
         guard.record(source, &result.text, now);
     }
+    // Wider (1.5s) near-duplicate window — dual-stream only (Slice 3). Phone
+    // mode routes everything onto one physical channel, so there is no
+    // "opposite channel" for loopback bleed to survive onto.
+    if echo_suppression_enabled {
+        if let Ok(mut guard) = near_duplicate.lock() {
+            guard.record(channel_speaker, &result.text, now);
+        }
+    }
 
     if let Ok(mut guard) = rolling_contexts.lock() {
         guard.append(source, &result.text);
@@ -587,18 +641,31 @@ async fn process_frame(
     // question detection, summary) sees the speaker that actually spoke.
     // Phone-call mode collapses both speakers onto one channel, so the
     // heuristic is meaningless there and only runs in dual-stream mode.
-    let channel_speaker = match source {
-        AudioSource::System => "System",
-        AudioSource::Microphone => "Microphone",
-    };
     let mut speaker = channel_speaker;
     let mut label_source = LABEL_SOURCE_CHANNEL;
+    // True when a heuristic (text-shape or near-duplicate suspicion)
+    // overrode the channel label this chunk — Slice 4 will use this to
+    // decide which chunks are worth a Tier-2/3 LLM confirmation call.
+    let mut was_suspicious = false;
 
     // Dual-stream: channel is usually reliable; heuristics catch bleed.
     // Phone mode: all audio arrives on System — heuristics are the only way
     // to distinguish interviewer questions from the user's answers.
     if echo_suppression_enabled || phone_mode_manual_only {
-        if let Some(verdict) = speaker_suspicion::evaluate(channel_speaker, &result.text) {
+        let text_shape_verdict = speaker_suspicion::evaluate(channel_speaker, &result.text);
+        let verdict = text_shape_verdict.or_else(|| {
+            if echo_suppression_enabled {
+                near_duplicate
+                    .lock()
+                    .ok()
+                    .and_then(|mut guard| guard.check(channel_speaker, &result.text, now))
+            } else {
+                None
+            }
+        });
+
+        if let Some(verdict) = verdict {
+            was_suspicious = true;
             match verdict.reason {
                 SuspicionReason::QuestionShapeOnMic => audit.record_suspicion_question_on_mic(),
                 SuspicionReason::FirstPersonOnSystem => {
@@ -607,6 +674,7 @@ async fn process_frame(
                         maybe_warn_mixed_source(app_handle, dedup);
                     }
                 }
+                SuspicionReason::NearDuplicateCrossChannel => {}
             }
             tracing::info!(
                 from = %channel_speaker,
@@ -620,6 +688,45 @@ async fn process_frame(
                 "Microphone"
             };
             label_source = LABEL_SOURCE_HEURISTIC;
+        } else if phone_mode_manual_only {
+            // Phone mode has no channel truth at all (both speakers arrive
+            // on the same mixed audio) — when the text-shape check above
+            // stays silent, fall back to the RMS+pause turn-taking
+            // heuristic, the only signal available (Slice 2).
+            let role = phone_heuristic
+                .lock()
+                .map(|mut guard| guard.observe(chunk_rms_dbfs, chunk_duration_ms, chunk_ready_at))
+                .unwrap_or(SpeakerRole::Unknown);
+            speaker = match role {
+                SpeakerRole::Interviewer => "System",
+                SpeakerRole::User => "Microphone",
+                SpeakerRole::Unknown => channel_speaker,
+            };
+            label_source = LABEL_SOURCE_HEURISTIC;
+        }
+    }
+
+    // Slice 4 enqueue policy: phone mode classifies every long-enough
+    // utterance (no channel truth exists at all); dual-stream mode only
+    // classifies chunks a heuristic already flagged as suspicious.
+    let chunk_id = Uuid::new_v4();
+    let word_count = result.text.split_whitespace().count();
+    let should_enqueue = if phone_mode_manual_only {
+        word_count >= PHONE_CLASSIFIER_MIN_WORDS
+    } else {
+        was_suspicious
+    };
+    if should_enqueue {
+        if let Some(classifier) = speaker_classifier {
+            let enqueued = classifier.enqueue(ClassificationRequest {
+                chunk_id,
+                session_id,
+                text: result.text.clone(),
+                current_speaker: speaker.to_string(),
+            });
+            if enqueued {
+                label_source = LABEL_SOURCE_HEURISTIC_PENDING;
+            }
         }
     }
 
@@ -672,7 +779,8 @@ async fn process_frame(
     }
 
     // ── Step 4b: emit + persist transcript chunk ──────────────────────────
-    let chunk_id = Uuid::new_v4();
+    // `chunk_id` was generated above (Slice 4 enqueue policy) so the
+    // classifier's callback and this persisted row share one identity.
     emit_transcription_chunk(
         app_handle,
         TranscriptionChunkPayload {
@@ -742,7 +850,7 @@ async fn process_frame(
         let mut buf = system_buffer
             .lock()
             .map_err(|_| anyhow::anyhow!("system transcript buffer mutex poisoned"))?;
-        buf.append(&result.text);
+        buf.append_chunk(&result.text, Some(chunk_id.to_string()), label_source);
     }
 
     if phone_mode_manual_only {

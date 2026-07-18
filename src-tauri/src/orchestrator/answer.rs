@@ -1,7 +1,15 @@
-//! Directional response thread (design doc §8, task 4.7).
+//! Answer response thread (design doc §8, task 4.7; `lpav-s18-answer-thread`).
 //!
 //! Fires on every `System`-source question. Target TTFT < 800ms (P95 < 900ms).
-//! Prompt loaded from `/prompts/directional/{provider}.txt` or `default.txt`.
+//! Prompt loaded from `/prompts/answer/{provider}.txt` or `default.txt`.
+//!
+//! Renamed from `directional.rs` — the Answer thread now also absorbs the
+//! retired Clarifying thread's job: rather than spawning a second LLM call to
+//! generate a standalone clarifying question, the `/prompts/answer/` template
+//! instructs the model to state its best-guess interpretation of an ambiguous
+//! question directly in the conclusion and always answer (see slice 17). The
+//! old `clarifying.rs` module — unspawned since slice 21 — was deleted end
+//! to end in slice 28.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -16,19 +24,19 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::events::{
-    emit_directional_token, emit_thread_status, DirectionalTokenPayload, ThreadStatusPayload,
+    emit_answer_token, emit_thread_status, AnswerTokenPayload, ThreadStatusPayload,
 };
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 
 use super::{load_prompt, OrchestrationContext};
 
-/// Execute the directional response thread.
+/// Execute the Answer response thread.
 ///
-/// Streams tokens to the React layer via `directional_token` events.
+/// Streams tokens to the React layer via `answer_token` events.
 /// Returns the full assembled response text (for confidence scoring and
 /// memory recording).
-pub async fn run_directional<R: Runtime>(
+pub async fn run_answer<R: Runtime>(
     ctx: OrchestrationContext,
     failover: Arc<FailoverManager>,
     prompts_dir: &Path,
@@ -38,8 +46,8 @@ pub async fn run_directional<R: Runtime>(
     let provider_name = failover.active_provider_name().to_string();
 
     // Pre-warm / preferred hit — serve cached response without an LLM round-trip.
-    if let Some(cached) = ctx.cached_directional {
-        let text = emit_cached_directional_tokens(&cached, &app, &ctx.turn_cancel);
+    if let Some(cached) = ctx.cached_answer {
+        let text = emit_cached_answer_tokens(&cached, &app, &ctx.turn_cancel);
         let ttft_ms = ttft_start.elapsed().as_millis() as u64;
         if ctx.from_preferred {
             log_preferred_served(ctx.session_id, ttft_ms, &provider_name);
@@ -49,7 +57,7 @@ pub async fn run_directional<R: Runtime>(
         emit_thread_status(
             &app,
             ThreadStatusPayload {
-                thread: "directional".to_string(),
+                thread: "answer".to_string(),
                 status: "ok".to_string(),
             },
         );
@@ -68,7 +76,7 @@ pub async fn run_directional<R: Runtime>(
     let mut stream = failover
         .complete_stream(prompt, config, &app, estimated_tokens)
         .await
-        .context("directional stream failed")?;
+        .context("answer stream failed")?;
 
     let mut full_response = String::new();
     let mut first_token = true;
@@ -89,14 +97,14 @@ pub async fn run_directional<R: Runtime>(
                     first_token = false;
                 }
                 full_response.push_str(&token);
-                emit_directional_token(&app, DirectionalTokenPayload { token });
+                emit_answer_token(&app, AnswerTokenPayload { token });
             }
-            Ok(Some(Err(e))) => return Err(e).context("directional token error"),
+            Ok(Some(Err(e))) => return Err(e).context("answer token error"),
             Ok(None) => break,
             Err(_) => {
                 warn!(
                     session_id = %ctx.session_id,
-                    "directional stream stalled — returning partial response"
+                    "answer stream stalled — returning partial response"
                 );
                 break;
             }
@@ -109,7 +117,7 @@ pub async fn run_directional<R: Runtime>(
     emit_thread_status(
         &app,
         ThreadStatusPayload {
-            thread: "directional".to_string(),
+            thread: "answer".to_string(),
             status: "ok".to_string(),
         },
     );
@@ -117,8 +125,8 @@ pub async fn run_directional<R: Runtime>(
     Ok(full_response)
 }
 
-/// Emit cached text word-by-word as `directional_token` events for incremental UI rendering.
-fn emit_cached_directional_tokens<R: Runtime>(
+/// Emit cached text word-by-word as `answer_token` events for incremental UI rendering.
+fn emit_cached_answer_tokens<R: Runtime>(
     text: &str,
     app: &AppHandle<R>,
     cancel: &Arc<std::sync::atomic::AtomicBool>,
@@ -127,9 +135,9 @@ fn emit_cached_directional_tokens<R: Runtime>(
         if cancel.load(Ordering::Acquire) {
             break;
         }
-        emit_directional_token(
+        emit_answer_token(
             app,
-            DirectionalTokenPayload {
+            AnswerTokenPayload {
                 token: word.to_string(),
             },
         );
@@ -142,41 +150,41 @@ fn emit_cached_directional_tokens<R: Runtime>(
 fn log_cache_served(session_id: Uuid, ttft_ms: u64, provider: &str) {
     info!(
         session_id = %session_id,
-        event = "directional_thread_complete",
-        thread_type = "directional",
+        event = "answer_thread_complete",
+        thread_type = "answer",
         ttft_ms,
         stream_complete_ms = ttft_ms,
         provider = %provider,
         cache_hit = true,
         model = %provider,
-        "directional served from pre-warm cache"
+        "answer served from pre-warm cache"
     );
 }
 
 fn log_preferred_served(session_id: Uuid, ttft_ms: u64, provider: &str) {
     info!(
         session_id = %session_id,
-        event = "directional_thread_complete",
-        thread_type = "directional",
+        event = "answer_thread_complete",
+        thread_type = "answer",
         ttft_ms,
         stream_complete_ms = ttft_ms,
         provider = %provider,
         cache_hit = true,
         preferred_hit = true,
         model = %provider,
-        "directional served from preferred answer"
+        "answer served from preferred answer"
     );
 }
 
 fn log_first_token(session_id: Uuid, ttft_ms: u64, provider: &str) {
     info!(
         session_id = %session_id,
-        event = "directional_ttft",
-        thread_type = "directional",
+        event = "answer_ttft",
+        thread_type = "answer",
         ttft_ms,
         provider = %provider,
         model = %provider,
-        "directional first token"
+        "answer first token"
     );
 }
 
@@ -184,20 +192,20 @@ fn log_ttft_breach(session_id: Uuid, ttft_ms: u64) {
     warn!(
         session_id = %session_id,
         ttft_ms,
-        "directional TTFT > 900ms — NFR breach"
+        "answer TTFT > 900ms — NFR breach"
     );
 }
 
 fn log_complete(session_id: Uuid, stream_ms: u64, provider: &str, cache_hit: bool) {
     info!(
         session_id = %session_id,
-        event = "directional_thread_complete",
-        thread_type = "directional",
+        event = "answer_thread_complete",
+        thread_type = "answer",
         stream_complete_ms = stream_ms,
         provider = %provider,
         model = %provider,
         cache_hit = cache_hit,
-        "directional thread finished"
+        "answer thread finished"
     );
 }
 
@@ -206,8 +214,8 @@ fn build_prompt(
     provider_name: &str,
     prompts_dir: &Path,
 ) -> Result<String> {
-    let template = load_prompt("directional", provider_name, prompts_dir)
-        .context("failed to load directional prompt")?;
+    let template = load_prompt("answer", provider_name, prompts_dir)
+        .context("failed to load answer prompt")?;
 
     let rag_text = ctx
         .rag_chunks

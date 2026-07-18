@@ -1,15 +1,17 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import LiveSessionStatusBar from "./LiveSessionStatusBar";
 
 const signalQuestionEnded = vi.fn();
+const getInterviewerSpanPreview = vi.fn();
 const getProviderPriority = vi.fn();
 const setLastManualQuestion = vi.fn();
 const pushNotification = vi.fn();
 
 vi.mock("../commands", () => ({
   signalQuestionEnded: (...args: unknown[]) => signalQuestionEnded(...args),
+  getInterviewerSpanPreview: (...args: unknown[]) => getInterviewerSpanPreview(...args),
   getProviderPriority: () => getProviderPriority(),
 }));
 
@@ -37,8 +39,8 @@ vi.mock("../events", () => ({
     handlers.turnStarted = handler;
     return Promise.resolve(() => undefined);
   },
-  onDirectionalToken: (handler: (payload: unknown) => void) => {
-    handlers.directional = handler;
+  onAnswerToken: (handler: (payload: unknown) => void) => {
+    handlers.answer = handler;
     return Promise.resolve(() => undefined);
   },
   onThreadStatus: (handler: (payload: unknown) => void) => {
@@ -58,6 +60,10 @@ describe("LiveSessionStatusBar", () => {
     vi.clearAllMocks();
     getProviderPriority.mockResolvedValue(["groq", "deepseek"]);
     signalQuestionEnded.mockResolvedValue(undefined);
+    getInterviewerSpanPreview.mockResolvedValue({
+      text: "Tell me about yourself.",
+      uncertainSpeaker: false,
+    });
     Object.keys(handlers).forEach((key) => delete handlers[key]);
   });
 
@@ -76,30 +82,49 @@ describe("LiveSessionStatusBar", () => {
     expect(screen.getByTestId("live-provider-badge").textContent).toContain("DeepSeek");
   });
 
-  it("shows rolling transcript from system chunks using wall-clock window", async () => {
+  it("shows backend interviewer span preview instead of a blind 30s window", async () => {
     render(<LiveSessionStatusBar sessionId="session-1" />);
-    await act(async () => {
-      handlers.transcription?.({
-        text: "Tell me about yourself.",
-        speaker: "System",
-        // Backend sends session-relative ms — must not break the rolling window.
-        timestamp: 4_200,
-      });
+    await waitFor(() => {
+      expect(getInterviewerSpanPreview).toHaveBeenCalledWith("session-1");
     });
     expect(screen.getByTestId("live-rolling-transcript").textContent).toContain(
       "Tell me about yourself.",
     );
   });
 
-  it("flashes Q button and calls signalQuestionEnded on click", async () => {
-    render(<LiveSessionStatusBar sessionId="session-1" />);
+  it("shows uncertain speaker hint in phone mode", async () => {
+    getInterviewerSpanPreview.mockResolvedValue({
+      text: "Why this role?",
+      uncertainSpeaker: true,
+    });
+    render(<LiveSessionStatusBar sessionId="session-1" phoneCallMode />);
+    await waitFor(() => {
+      expect(screen.getByTestId("live-uncertain-speaker-hint").textContent).toContain(
+        "uncertain speaker",
+      );
+    });
+  });
+
+  it("uses phone-mode 30s fallback only when span is empty and speaker uncertain", async () => {
+    getInterviewerSpanPreview.mockResolvedValue({ text: "", uncertainSpeaker: true });
+    render(<LiveSessionStatusBar sessionId="session-1" phoneCallMode />);
     await act(async () => {
       handlers.transcription?.({
-        text: "Why this role?",
+        text: "Fallback interviewer line.",
         speaker: "System",
-        timestamp: 9_000,
+        timestamp: 1_000,
       });
     });
+    await waitFor(() => {
+      expect(screen.getByTestId("live-rolling-transcript").textContent).toContain(
+        "Fallback interviewer line.",
+      );
+    });
+  });
+
+  it("flashes Q button and calls signalQuestionEnded on click", async () => {
+    render(<LiveSessionStatusBar sessionId="session-1" />);
+    await waitFor(() => expect(getInterviewerSpanPreview).toHaveBeenCalled());
 
     await act(async () => {
       fireEvent.click(screen.getByTestId("live-q-button"));
@@ -107,6 +132,7 @@ describe("LiveSessionStatusBar", () => {
 
     expect(signalQuestionEnded).toHaveBeenCalledWith("session-1");
     expect(screen.getByTestId("live-q-button").className).toContain("live-q-button--flash");
+    expect(screen.getByTestId("live-q-button").textContent).toContain("Ask now");
   });
 
   it("surfaces backend errors when signalQuestionEnded fails", async () => {

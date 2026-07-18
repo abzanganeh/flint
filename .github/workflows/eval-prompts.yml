@@ -2,7 +2,7 @@ name: Eval Prompts
 
 # Runs the Flint eval harness whenever a prompt file is touched.
 # Enforces the regression gate from .cursor/rules/flint-performance.mdc:
-#   - directional conciseness pass rate >= 95%
+#   - answer conciseness pass rate >= 95%
 #   - no per-domain relevance score below 0.7
 #   - win rate >= 50% vs the stored baseline
 #

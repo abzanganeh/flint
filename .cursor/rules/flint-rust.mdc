@@ -19,12 +19,12 @@ alwaysApply: false
 ```rust
 tracing::info!(
     session_id = %session_id,
-    event = "directional_thread_complete",
+    event = "answer_thread_complete",
     ttft_ms = ttft,
     provider = %provider_name,
     cache_hit = was_cache_hit,
     confidence = confidence_score,
-    "directional thread finished"
+    "answer thread finished"
 );
 ```
 

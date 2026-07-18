@@ -1,6 +1,6 @@
 /**
  * Shared presentation pieces for per-question answer cards. QuestionHeading
- * labels the live answer in the Directional and Depth panels; HistoryCard
+ * labels the live answer in the Answer and Visual panels; HistoryCard
  * renders completed turns as collapsible <details> cards in the Context
  * panel's "Earlier questions" list, keeping history out of the live panels.
  */

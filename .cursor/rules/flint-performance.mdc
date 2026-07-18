@@ -9,8 +9,8 @@ alwaysApply: true
 
 | Requirement | Target | CI Gate |
 |---|---|---|
-| Directional TTFT P95 | < 800ms | Fail PR > 900ms |
-| Depth response fully streamed P95 | < 8s | Warn |
+| Answer TTFT P95 | < 2s | Fail PR > 2.2s |
+| Visual response fully streamed P95 (when triggered) | < 8s | Warn |
 | RAG retrieval (sqlite-vec) P95 | < 50ms | Fail PR > 60ms |
 | Transcription lag P95 | < 2s | Fail PR > 2.5s |
 | Question detection P95 | ≤ 100ms | Auto-bypass classifier > 200ms rolling |
@@ -45,7 +45,7 @@ Budget edge case (question + min system prompt + min RAG > window):
   "level": "INFO",
   "service": "orchestrator",
   "session_id": "uuid",
-  "event": "directional_thread_complete",
+  "event": "answer_thread_complete",
   "ttft_ms": 412,
   "provider": "groq",
   "model": "llama-3.3-70b-versatile",
@@ -54,7 +54,7 @@ Budget edge case (question + min system prompt + min RAG > window):
 }
 ```
 
-Per-request metrics emitted on every LLM call: `provider`, `model`, `thread_type` (directional/depth/clarifying/detection), `ttft_ms`, `stream_complete_ms`, `rag_latency_ms`, `cache_hit`, `confidence_score`, `tokens_input`, `tokens_output`, `failover_triggered`.
+Per-request metrics emitted on every LLM call: `provider`, `model`, `thread_type` (answer/visual/detection), `ttft_ms`, `stream_complete_ms`, `rag_latency_ms`, `cache_hit`, `confidence_score`, `tokens_input`, `tokens_output`, `failover_triggered`.
 
 ## Log Levels
 
@@ -78,8 +78,8 @@ Local web dashboard at `http://localhost:7373` showing: live TTFT, cache hit rat
 
 | Condition | UI Signal |
 |---|---|
-| TTFT > 1s directional | Amber indicator on panel |
-| TTFT > 2s directional | Orange indicator + tooltip |
+| TTFT > 1s answer | Amber indicator on panel |
+| TTFT > 2s answer | Orange indicator + tooltip |
 | Provider 429 rate limit | "Approaching free tier limit" toast |
 | Failover triggered | "Running locally" indicator |
 | Transcription lag > 2s | "Audio processing slow" amber indicator |
@@ -89,6 +89,6 @@ Local web dashboard at `http://localhost:7373` showing: live TTFT, cache hit rat
 - All prompts live in `/prompts/` versioned by directory.
 - Every prompt has three variants: `gpt.txt`, `claude.txt`, `llama.txt`.
 - A prompt change REQUIRES an eval harness run before merging.
-- Regression gate: win rate ≥ 50%, directional conciseness pass rate ≥ 95%, no domain score below 0.7 relevance.
+- Regression gate: win rate ≥ 50%, answer conciseness pass rate ≥ 95%, no domain score below 0.7 relevance.
 - NEVER inline a prompt as a Rust string literal. Always load from `/prompts/`.
 - Template variables: `{rag_chunks}`, `{rolling_summary_if_compressed}`, `{last_n_turns}`, `{question}`, `{session_domain}`, `{interviewer_role}`, `{interviewer_priorities}`, `{utterance}`, `{pasted_context}`, `{old_turns}`, `{full_transcript}`.

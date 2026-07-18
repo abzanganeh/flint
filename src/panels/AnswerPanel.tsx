@@ -9,7 +9,6 @@ const clearBuffersForNewTurn = (): void => {
   const store = useUIStore.getState();
   store.clearStreamingBuffers();
   store.setAnswerNowMode(false);
-  store.clearClarifyingQuestions();
   store.setConfidenceLevel(null);
 };
 
@@ -27,16 +26,16 @@ const CONFIDENCE_LABEL: Record<ConfidenceLevel, string> = {
   blue: "~ Partial",
   amber: "? Uncertain",
   amber_low: "? Limited",
-  grey: "→ Clarify",
+  grey: "— Unscored",
   red: "⚡ Local",
 };
 
-export interface DirectionalPanelProps {
+export interface AnswerPanelProps {
   sessionId: string;
   isGenerating?: boolean;
 }
 
-const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelProps) => {
+const AnswerPanel = ({ sessionId, isGenerating = false }: AnswerPanelProps) => {
   const {
     streamingBuffers,
     confidenceLevel,
@@ -45,7 +44,7 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
     currentQuestion,
   } = useUIStore();
 
-  const text = streamingBuffers.directional;
+  const text = streamingBuffers.answer;
   const borderColor =
     confidenceLevel != null
       ? CONFIDENCE_BORDER[confidenceLevel]
@@ -88,7 +87,7 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
 
   return (
     <div
-      data-testid="directional-panel"
+      data-testid="answer-panel"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -119,7 +118,7 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
             textTransform: "uppercase",
           }}
         >
-          Directional
+          Answer
         </span>
         {confidenceLabel && (
           <span
@@ -236,4 +235,4 @@ const ActionButton = ({
   </button>
 );
 
-export default DirectionalPanel;
+export default AnswerPanel;

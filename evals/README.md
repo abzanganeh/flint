@@ -2,7 +2,7 @@
 
 Phase 7.2 deliverable. Runs the 200-question bank against every prompt
 variant under `prompts/` and produces structured scores for relevance,
-grounding, conciseness, depth structure, and latency.
+grounding, answer conciseness, visual structure, and latency.
 
 ## Quick start
 
@@ -29,7 +29,7 @@ Reports are written to `evals/results/<short-id>.json` and
 
 A run **fails** if any of the following hold:
 
-- directional conciseness pass rate `< 95%`
+- answer conciseness pass rate `< 95%`
 - any per-domain mean relevance `< 0.70`
 - win rate `< 50%` vs the stored baseline (unless `--skip-win-rate`)
 
@@ -38,6 +38,20 @@ The first run on a fresh repo skips the win-rate check (no baseline yet).
 CI smoke runs use `--skip-win-rate` because the local Ollama judge has run-to-run
 variance; full win-rate comparison applies on manual `--update-baseline` runs before
 merging prompt changes.
+
+> **Manual eval backlog (post `lpav` Part B merge):** the harness always executes
+> completions through the local `OllamaProvider` regardless of `--variant` — there
+> is no cloud-API-key path yet, so a `--variant gpt` run is really "the gpt.txt
+> prompt wording, run on whatever Ollama model is pulled locally." A smoke run
+> against `llama3.1:8b` on the new answer/visual prompts shows the harness
+> plumbing works end to end (no errors, judge scores populate) but the answer
+> conciseness pass rate lands well under the 95% floor — expected variance for a
+> small local model against prompts tuned for GPT/Claude, not a code regression.
+> Before trusting the regression gate against production variants, run the
+> harness once with real GPT/Claude credentials wired into the provider and
+> `--update-baseline` to establish a baseline scored under the new answer/visual
+> architecture (the previous baseline was deleted in slice 28/29 of `lpav` since
+> it scored the retired directional/depth/clarifying threads).
 
 ## Question bank
 
@@ -69,7 +83,7 @@ evals/
 │   ├── error.rs      - EvalError
 │   ├── gate.rs       - RegressionGate + violations
 │   ├── judge.rs      - LLM-as-judge (Ollama-backed) for relevance + grounding
-│   ├── metrics.rs    - Rule-based: conciseness, structure, latency
+│   ├── metrics.rs    - Rule-based: answer conciseness, visual structure, latency
 │   ├── report.rs     - Aggregation + Markdown/JSON writers
 │   └── runner.rs     - Drives every (question x variant) pair
 ├── questions/        - 200 questions across 7 domains

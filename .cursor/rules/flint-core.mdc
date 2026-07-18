@@ -41,7 +41,7 @@ flint/
 │   ├── audio/              # capture.rs, rnnoise.rs, vad.rs
 │   ├── transcription/      # engine.rs, detector.rs
 │   ├── rag/                # embedder.rs, store.rs, retriever.rs
-│   ├── orchestrator/       # mod.rs, directional.rs, depth.rs, clarifying.rs, prewarm.rs
+│   ├── orchestrator/       # mod.rs, answer.rs, visual.rs, visual_classifier.rs, prewarm.rs
 │   ├── llm/                # provider.rs, groq.rs, openai.rs, anthropic.rs, ollama.rs
 │   ├── session/            # state.rs, memory.rs, persistence.rs, recovery.rs
 │   ├── interfaces/         # auth.rs, session.rs, storage.rs, vector.rs
@@ -50,13 +50,13 @@ flint/
 │   ├── confidence.rs, digest.rs, keychain.rs
 │   ├── Cargo.toml, tauri.conf.json
 ├── src/                    # React + TypeScript
-│   ├── panels/             # TranscriptPanel, DirectionalPanel, DepthPanel, ClarifyingPanel, ContextPanel
+│   ├── panels/             # TranscriptPanel, AnswerPanel, VisualPanel, ContextPanel
 │   ├── screens/            # Onboarding, HealthCheck, SessionDesign, DigestReview, Rehearsal, SessionList
 │   ├── store/ui.ts         # Zustand — UI state ONLY
 │   ├── commands/index.ts   # Typed invoke() wrappers
 │   ├── events/index.ts     # Typed Tauri event listeners
 │   ├── components/, hooks/, types/index.ts
-├── prompts/                # directional/, depth/, clarifying/, digest/, compression/, question_detection/, session_essence/
+├── prompts/                # answer/, visual/, digest/, compression/, question_detection/, session_essence/
 ├── supabase/migrations/    # YYYYMMDDHHMMSS_description.sql
 ├── tests/integration/, tests/e2e/, evals/
 ```
@@ -93,30 +93,29 @@ Current state persisted to SQLite on every transition. On app start, if state is
 
 ```rust
 // CORRECT
-let dir = tokio::spawn(run_directional(ctx.clone()));
-let dep = tokio::spawn(run_depth(ctx.clone()));
-let cla = tokio::spawn(run_clarifying(ctx.clone()));
-let (r1, r2, r3) = tokio::join!(dir, dep, cla);
+let ans = tokio::spawn(run_answer(ctx.clone()));
+let vis = tokio::spawn(run_visual(ctx.clone()));
+let (r1, r2) = tokio::join!(ans, vis);
 
 // WRONG
-let dir_result = run_directional(ctx.clone()).await?;
+let ans_result = run_answer(ctx.clone()).await?;
 ```
 
-One thread failing NEVER affects others. Each has its own error boundary.
+One thread failing NEVER affects others. Each has its own error boundary. Visual only spawns when `visual_classifier::needs_visual()` matches or the user forces it via `trigger_visual_response` — Answer always spawns.
 
-### Rule 5 — Directional/Depth/Clarifying Fire ONLY on `source = System` Audio
-NEVER fire on `source = Microphone` (user's own voice).
+### Rule 5 — Answer/Visual Fire ONLY on `source = System` Audio
+NEVER fire on `source = Microphone` (user's own voice). Exception: a manually triggered Visual request (`trigger_visual_response` → `DetectedQuestionSource::VisualManual`) bypasses the audio-source gate by design — it is a direct user action, not an audio-detected question.
 
 ## Tauri Command and Event Contracts
 
 **Commands (React → Rust):**
-`start_session`, `stop_session`, `trigger_response`, `cancel_inference`, `panic_hide_overlay`, `switch_provider`, `get_session_snapshot`
+`start_session`, `stop_session`, `trigger_response`, `trigger_visual_response`, `cancel_inference`, `panic_hide_overlay`, `switch_provider`, `get_session_snapshot`
 
 **Events (Rust → React):**
-`transcription_chunk { text, speaker: "System"|"Microphone", timestamp }`, `directional_token { token }`, `depth_token { token }`, `clarifying_question { question, rank }`, `confidence_score { level: "green"|"blue"|"amber"|"grey"|"red" }`, `thread_status { thread, status: "ok"|"error"|"idle" }`, `failover_triggered { from, to }`, `primary_restored { provider }`, `token_usage_update { input, output, total, cost_estimate }`, `session_state_change { state }`
+`transcription_chunk { text, speaker: "System"|"Microphone", timestamp }`, `answer_token { token }`, `visual_token { token }`, `confidence_score { level: "green"|"blue"|"amber"|"grey"|"red" }`, `thread_status { thread, status: "ok"|"error"|"idle" }`, `failover_triggered { from, to }`, `primary_restored { provider }`, `token_usage_update { input, output, total, cost_estimate }`, `session_state_change { state }`
 
 ## v1 Scope
 
-**In v1:** Groq + Ollama, Job Interview template, system audio loopback (Linux PipeWire / Windows WASAPI / macOS BlackHole), RNNoise + VAD + Whisper, two-pass question detection, tokio parallel threads, token streaming, sqlite-vec RAG + pre-warm cache, dynamic conversation memory, five-panel stealth overlay, Ctrl+Option/Alt hotkey system, confidence colour system, SQLite persistence + crash recovery, OS keychain, hardware tier assessment, health check wizard, rehearsal mode, legal consent, token usage tracker + configurable cost cap, Ollama fallback, post-session summary.
+**In v1:** Groq + Ollama, Job Interview template, system audio loopback (Linux PipeWire / Windows WASAPI / macOS BlackHole), RNNoise + VAD + Whisper, two-pass question detection, tokio parallel threads, token streaming, sqlite-vec RAG + pre-warm cache, dynamic conversation memory, four-panel stealth overlay, Ctrl+Option/Alt hotkey system, confidence colour system, SQLite persistence + crash recovery, OS keychain, hardware tier assessment, health check wizard, rehearsal mode, legal consent, token usage tracker + configurable cost cap, Ollama fallback, post-session summary.
 
 **NOT in v1 — do not implement, stub, or prepare:** file upload ingestion, URL scraping, mid-session model switching UI, voice I/O, session export (PDF/text), conversation phase tracking, mock interview mode, medical exam domain, any domain beyond job interviews, B2B features, OAuth, certificate pinning, cross-encoder re-ranking.

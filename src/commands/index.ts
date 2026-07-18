@@ -115,6 +115,17 @@ export const stopSession = (): Promise<void> => invoke<void>("stop_session");
 export const signalQuestionEnded = (sessionId: string): Promise<void> =>
   invoke<void>("signal_question_ended", { sessionId });
 
+export interface InterviewerSpanPreviewDto {
+  text: string;
+  uncertainSpeaker: boolean;
+}
+
+/** Backend interviewer span since the last question signal (Slice 7). */
+export const getInterviewerSpanPreview = (
+  sessionId: string,
+): Promise<InterviewerSpanPreviewDto> =>
+  invoke<InterviewerSpanPreviewDto>("get_interviewer_span_preview", { sessionId });
+
 export const assignSpeaker = (sessionId: string, speakerId: number): Promise<void> =>
   invoke<void>("assign_speaker", { sessionId, speakerId });
 
@@ -184,6 +195,18 @@ export const runRehearsalTurn = (
 export const completeRehearsal = (sessionId: string): Promise<void> =>
   invoke<void>("complete_rehearsal", { sessionId });
 
+/** Start a 60s audio-only live preview (READY → LIVE_PREVIEW). */
+export const startLivePreview = (sessionId: string): Promise<void> =>
+  invoke<void>("start_live_preview", { sessionId });
+
+/** Commit preview into a full live session (LIVE_PREVIEW → LIVE). */
+export const commitLivePreview = (sessionId: string): Promise<void> =>
+  invoke<void>("commit_live_preview", { sessionId });
+
+/** Cancel preview and return to READY. */
+export const cancelLivePreview = (sessionId: string): Promise<void> =>
+  invoke<void>("cancel_live_preview", { sessionId });
+
 /** Return to Session Design to edit pasted context (incl. company intel). */
 export const returnToSessionDesign = (
   sessionId: string,
@@ -194,6 +217,13 @@ export const rephraseResponse = (
   question: string,
   sessionId: string,
 ): Promise<void> => triggerResponse(question, sessionId, true);
+
+/** Force a Visual (diagram) response for a question the classifier judged as purely verbal. */
+export const triggerVisualResponse = (
+  question: string,
+  sessionId: string,
+): Promise<void> =>
+  invoke<void>("trigger_visual_response", { question, sessionId });
 
 export const copyTextToClipboard = (text: string): Promise<void> =>
   invoke<void>("copy_text_to_clipboard", { text });
@@ -443,9 +473,8 @@ export interface SessionReviewDto {
   state: string;
   transcript: ReviewChunkDto[];
   questionsCount: number;
-  directionalCount: number;
-  depthCount: number;
-  clarifyingCount: number;
+  answerCount: number;
+  visualCount: number;
 }
 
 /** Load a past session's transcript + AI-suggestion counts for review. */

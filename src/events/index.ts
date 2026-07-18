@@ -24,17 +24,12 @@ export interface TurnStartedEventPayload {
   turn: number;
 }
 
-export interface DirectionalTokenEventPayload {
+export interface AnswerTokenEventPayload {
   token: string;
 }
 
-export interface DepthTokenEventPayload {
+export interface VisualTokenEventPayload {
   token: string;
-}
-
-export interface ClarifyingQuestionEventPayload {
-  question: string;
-  rank: number;
 }
 
 export interface ConfidenceScoreEventPayload {
@@ -154,6 +149,20 @@ export const onTranscriptChunkRelabeled = (
     handler(event.payload),
   );
 
+/** Tier-2/3 LLM speaker classifier confirmed a chunk's speaker label. */
+export interface SpeakerRefinedEventPayload {
+  chunk_id: string;
+  speaker: Speaker;
+  source: string;
+}
+
+export const onSpeakerRefined = (
+  handler: (payload: SpeakerRefinedEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<SpeakerRefinedEventPayload>("speaker_refined", (event) =>
+    handler(event.payload),
+  );
+
 export const onTurnStarted = (
   handler: (payload: TurnStartedEventPayload) => void,
 ): Promise<UnlistenFn> =>
@@ -161,24 +170,17 @@ export const onTurnStarted = (
     handler(event.payload),
   );
 
-export const onDirectionalToken = (
-  handler: (payload: DirectionalTokenEventPayload) => void,
+export const onAnswerToken = (
+  handler: (payload: AnswerTokenEventPayload) => void,
 ): Promise<UnlistenFn> =>
-  listen<DirectionalTokenEventPayload>("directional_token", (event) =>
+  listen<AnswerTokenEventPayload>("answer_token", (event) =>
     handler(event.payload),
   );
 
-export const onDepthToken = (
-  handler: (payload: DepthTokenEventPayload) => void,
+export const onVisualToken = (
+  handler: (payload: VisualTokenEventPayload) => void,
 ): Promise<UnlistenFn> =>
-  listen<DepthTokenEventPayload>("depth_token", (event) =>
-    handler(event.payload),
-  );
-
-export const onClarifyingQuestion = (
-  handler: (payload: ClarifyingQuestionEventPayload) => void,
-): Promise<UnlistenFn> =>
-  listen<ClarifyingQuestionEventPayload>("clarifying_question", (event) =>
+  listen<VisualTokenEventPayload>("visual_token", (event) =>
     handler(event.payload),
   );
 

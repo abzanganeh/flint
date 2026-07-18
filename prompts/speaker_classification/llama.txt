@@ -1,0 +1,18 @@
+[System]
+You classify who spoke one utterance in a job-interview transcript: the interviewer or the candidate.
+
+Roles:
+- interviewer: asks interview questions, gives instructions, hosts the interview.
+- candidate: answers questions, describes their own experience.
+
+Answer with exactly one word: interviewer, candidate, or uncertain. Nothing else.
+Use "uncertain" only when the utterance has no real signal (e.g. "okay", "mm-hmm").
+The current channel label below may be wrong — judge from the utterance text.
+
+[Current channel label]
+{current_label}
+
+[Utterance]
+{utterance}
+
+[Answer — one word only]

@@ -28,16 +28,15 @@ import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useRagChunks } from "../hooks/useRagChunks";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import { needsUserContext } from "../lib/contextQuality";
-import DirectionalPanel from "../panels/DirectionalPanel";
-import DepthPanel from "../panels/DepthPanel";
-import ClarifyingPanel from "../panels/ClarifyingPanel";
+import AnswerPanel from "../panels/AnswerPanel";
+import VisualPanel from "../panels/VisualPanel";
 import ContextPanel from "../panels/ContextPanel";
 import TranscriptPanel from "../panels/TranscriptPanel";
 import { useUIStore } from "../store/ui";
 
 export interface RehearsalProps {
   sessionId: string;
-  /** Clear directional/depth/clarifying panels (e.g. after re-ingest). */
+  /** Clear answer/visual panels (e.g. after re-ingest). */
   resetPanelsOnEntry?: boolean;
   onResetPanelsHandled?: () => void;
   onComplete: () => void;
@@ -82,13 +81,11 @@ const Rehearsal = ({
   const {
     streamingBuffers,
     clearStreamingBuffers,
-    clearClarifyingQuestions,
     resetOrchestratorPanels,
     setLastManualQuestion,
     setConfidenceLevel,
     ragChunks,
     confidenceLevel,
-    clarifyingQuestions,
     lastManualQuestion,
   } = useUIStore();
 
@@ -165,16 +162,10 @@ const Rehearsal = ({
       needsUserContext(
         confidenceLevel,
         ragChunks,
-        streamingBuffers.directional,
+        streamingBuffers.answer,
       ),
     );
-  }, [
-    asking,
-    confidenceLevel,
-    ragChunks,
-    clarifyingQuestions.length,
-    streamingBuffers.directional,
-  ]);
+  }, [asking, confidenceLevel, ragChunks, streamingBuffers.answer]);
 
   const fireQuestion = useCallback(
     async (q: string) => {
@@ -193,7 +184,6 @@ const Rehearsal = ({
         // Proceed — backend will enforce the cap if needed.
       }
       clearStreamingBuffers();
-      clearClarifyingQuestions();
       setConfidenceLevel(null);
       setLastManualQuestion(q);
       setLastAskedQuestion(q);
@@ -211,15 +201,13 @@ const Rehearsal = ({
     [
       sessionId,
       clearStreamingBuffers,
-      clearClarifyingQuestions,
       setConfidenceLevel,
       setLastManualQuestion,
     ],
   );
 
   const hasResponse =
-    streamingBuffers.directional.length > 0 ||
-    streamingBuffers.depth.length > 0;
+    streamingBuffers.answer.length > 0 || streamingBuffers.visual.length > 0;
 
   const isReaskingSameQuestion =
     hasResponse &&
@@ -500,7 +488,7 @@ const Rehearsal = ({
             <PreferredAnswerPanel
               sessionId={sessionId}
               question={lastAskedQuestion}
-              suggestedAnswer={streamingBuffers.directional}
+              suggestedAnswer={streamingBuffers.answer}
               onSaved={() => setBankRefreshKey((k) => k + 1)}
             />
           </div>
@@ -512,11 +500,10 @@ const Rehearsal = ({
           <div style={{ flex: 1, overflow: "hidden" }}>
             <OverlayLayout
               transcript={<TranscriptPanel sessionId={sessionId} />}
-              directional={
-                <DirectionalPanel sessionId={sessionId} isGenerating={asking} />
+              answer={
+                <AnswerPanel sessionId={sessionId} isGenerating={asking} />
               }
-              depth={<DepthPanel isGenerating={asking} />}
-              clarifying={<ClarifyingPanel />}
+              visual={<VisualPanel isGenerating={asking} />}
               context={<ContextPanel sessionId={sessionId} />}
             />
           </div>
