@@ -13,6 +13,7 @@ import {
   reopenSession,
   restoreDraftSession,
   returnToSessionDesign,
+  startLivePreview,
   stopMock,
   stopSession,
   type RecoveryOffer,
@@ -31,6 +32,7 @@ import "./components/rehearsal-enrichment.css";
 import DigestReview from "./screens/DigestReview";
 import HealthCheck from "./screens/HealthCheck";
 import LiveOverlay from "./screens/LiveOverlay";
+import LivePreview from "./screens/LivePreview";
 import Onboarding from "./screens/Onboarding";
 import { Recovery } from "./screens/Recovery";
 import Rehearsal from "./screens/Rehearsal";
@@ -57,6 +59,7 @@ type AppScreen =
   | "session-focus"
   | "mic-calibration"
   | "rehearsal"
+  | "live-preview"
   | "mock-interview"
   | "mock-summary"
   | "live"
@@ -76,6 +79,7 @@ const SHELL_SCREENS: AppScreen[] = [
   "session-focus",
   "mic-calibration",
   "rehearsal",
+  "live-preview",
   "mock-interview",
   "mock-summary",
   "session-summary",
@@ -120,6 +124,8 @@ function screenForDraftState(state: string): AppScreen {
     case SessionState.MOCK_INTERVIEW:
     case SessionState.READY:
       return "rehearsal";
+    case SessionState.LIVE_PREVIEW:
+      return "live-preview";
     default:
       return "session-design";
   }
@@ -728,10 +734,31 @@ function App() {
           sessionId={sessionId}
           resetPanelsOnEntry={resetRehearsalPanels}
           onResetPanelsHandled={() => setResetRehearsalPanels(false)}
-          onComplete={() => setScreen("live")}
+          onComplete={() => {
+            void (async () => {
+              try {
+                await startLivePreview(sessionId);
+                setScreen("live-preview");
+              } catch (err: unknown) {
+                setImportError(String(err));
+              }
+            })();
+          }}
           onReturnToSetup={() => void handleReturnToSessionDesign()}
           onOpenSettings={() => openSettings("rehearsal", "session-focus")}
           onStartMock={() => setScreen("mock-interview")}
+        />
+      </Shell>
+    );
+  }
+
+  if (screen === "live-preview" && sessionId) {
+    return (
+      <Shell nav={nav}>
+        <LivePreview
+          sessionId={sessionId}
+          onGoLive={() => setScreen("live")}
+          onBack={() => setScreen("rehearsal")}
         />
       </Shell>
     );

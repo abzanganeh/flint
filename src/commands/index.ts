@@ -195,6 +195,18 @@ export const runRehearsalTurn = (
 export const completeRehearsal = (sessionId: string): Promise<void> =>
   invoke<void>("complete_rehearsal", { sessionId });
 
+/** Start a 60s audio-only live preview (READY → LIVE_PREVIEW). */
+export const startLivePreview = (sessionId: string): Promise<void> =>
+  invoke<void>("start_live_preview", { sessionId });
+
+/** Commit preview into a full live session (LIVE_PREVIEW → LIVE). */
+export const commitLivePreview = (sessionId: string): Promise<void> =>
+  invoke<void>("commit_live_preview", { sessionId });
+
+/** Cancel preview and return to READY. */
+export const cancelLivePreview = (sessionId: string): Promise<void> =>
+  invoke<void>("cancel_live_preview", { sessionId });
+
 /** Return to Session Design to edit pasted context (incl. company intel). */
 export const returnToSessionDesign = (
   sessionId: string,
