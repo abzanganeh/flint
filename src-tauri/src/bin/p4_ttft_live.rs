@@ -1,8 +1,8 @@
 //! P4 manual QA — live directional TTFT measurement loop.
 //!
 //! Runs sequential directional-style prompts against a real LLM provider (one
-//! stream per iteration — no parallel depth/clarifying) to avoid Groq 429 noise
-//! from the full orchestrator firing three threads at once.
+//! stream per iteration — no parallel visual thread) to avoid Groq 429 noise
+//! from the full orchestrator firing multiple threads at once.
 //!
 //! Usage:
 //!   cargo run --bin p4_ttft_live -- --provider groq --runs 15 --delay-secs 8

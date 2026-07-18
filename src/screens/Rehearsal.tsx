@@ -81,13 +81,11 @@ const Rehearsal = ({
   const {
     streamingBuffers,
     clearStreamingBuffers,
-    clearClarifyingQuestions,
     resetOrchestratorPanels,
     setLastManualQuestion,
     setConfidenceLevel,
     ragChunks,
     confidenceLevel,
-    clarifyingQuestions,
     lastManualQuestion,
   } = useUIStore();
 
@@ -167,13 +165,7 @@ const Rehearsal = ({
         streamingBuffers.answer,
       ),
     );
-  }, [
-    asking,
-    confidenceLevel,
-    ragChunks,
-    clarifyingQuestions.length,
-    streamingBuffers.answer,
-  ]);
+  }, [asking, confidenceLevel, ragChunks, streamingBuffers.answer]);
 
   const fireQuestion = useCallback(
     async (q: string) => {
@@ -192,7 +184,6 @@ const Rehearsal = ({
         // Proceed — backend will enforce the cap if needed.
       }
       clearStreamingBuffers();
-      clearClarifyingQuestions();
       setConfidenceLevel(null);
       setLastManualQuestion(q);
       setLastAskedQuestion(q);
@@ -210,7 +201,6 @@ const Rehearsal = ({
     [
       sessionId,
       clearStreamingBuffers,
-      clearClarifyingQuestions,
       setConfidenceLevel,
       setLastManualQuestion,
     ],

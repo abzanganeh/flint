@@ -32,11 +32,6 @@ export interface VisualTokenEventPayload {
   token: string;
 }
 
-export interface ClarifyingQuestionEventPayload {
-  question: string;
-  rank: number;
-}
-
 export interface ConfidenceScoreEventPayload {
   level: ConfidenceLevel;
 }
@@ -172,13 +167,6 @@ export const onVisualToken = (
   handler: (payload: VisualTokenEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<VisualTokenEventPayload>("visual_token", (event) =>
-    handler(event.payload),
-  );
-
-export const onClarifyingQuestion = (
-  handler: (payload: ClarifyingQuestionEventPayload) => void,
-): Promise<UnlistenFn> =>
-  listen<ClarifyingQuestionEventPayload>("clarifying_question", (event) =>
     handler(event.payload),
   );
 

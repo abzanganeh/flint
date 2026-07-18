@@ -25,7 +25,7 @@ pub enum ConfidenceLevel {
     Amber,
     /// score < 0.35 — Amber + tooltip — "Limited prep context"
     AmberLow,
-    /// No score applicable — Grey — "Clarifying question"
+    /// No score applicable — Grey
     Grey,
     /// Local Ollama fallback active — Red border
     Red,

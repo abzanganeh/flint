@@ -1,15 +1,15 @@
-//! Orchestration layer: response threads (directional/depth/clarifying,
-//! migrating to answer/visual across slices 18-28 of `lpav`), pre-warm
-//! cache, and session lifecycle management.
+//! Orchestration layer: response threads (answer/visual, replacing the
+//! retired directional/depth/clarifying threads as of `lpav` slice 28),
+//! pre-warm cache, and session lifecycle management.
 //!
 //! Reference: design doc §8 (System Architecture), `.cursor/rules` flint-core
 //! §4 (parallel threads via tokio::spawn, never sequential).
 //!
 //! ## Concurrency contract
 //!
-//! All three response threads are spawned via `tokio::spawn` in a single
-//! statement — there is NO `.await` between spawns. One thread failing never
-//! affects the others.
+//! The answer and visual response threads are spawned via `tokio::spawn` in
+//! a single statement — there is NO `.await` between spawns. One thread
+//! failing never affects the other.
 //!
 //! ## Silence debounce
 //!
@@ -18,7 +18,6 @@
 //! question is discarded. This prevents double-firing on split utterances.
 
 pub mod answer;
-pub mod clarifying;
 pub mod prewarm;
 pub mod visual;
 pub mod visual_classifier;
@@ -609,7 +608,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // RULE: no .await between spawns — both are dispatched simultaneously
     // when Visual fires. The retired Clarifying thread is no longer spawned
     // here (its job is absorbed into the Answer prompt, slice 18); the
-    // module itself is deleted end-to-end in slice 28.
+    // module itself was deleted end-to-end in slice 28.
     let dir_ctx = ctx.clone();
     let dep_ctx = ctx.clone();
 

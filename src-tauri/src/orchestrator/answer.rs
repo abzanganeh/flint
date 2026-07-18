@@ -8,8 +8,8 @@
 //! generate a standalone clarifying question, the `/prompts/answer/` template
 //! instructs the model to state its best-guess interpretation of an ambiguous
 //! question directly in the conclusion and always answer (see slice 17). The
-//! old `clarifying.rs` module itself is deleted end-to-end in slice 28, once
-//! `mod.rs` stops spawning it (slice 21).
+//! old `clarifying.rs` module — unspawned since slice 21 — was deleted end
+//! to end in slice 28.
 
 use std::path::Path;
 use std::sync::atomic::Ordering;

@@ -93,7 +93,6 @@ describe("UI store orchestrator reset", () => {
     const {
       appendAnswerToken,
       appendVisualToken,
-      addClarifyingQuestion,
       setConfidenceLevel,
       setLastManualQuestion,
       resetOrchestratorPanels,
@@ -101,7 +100,6 @@ describe("UI store orchestrator reset", () => {
 
     appendAnswerToken("rehearsal answer");
     appendVisualToken("rehearsal visual");
-    addClarifyingQuestion({ question: "Clarify?", rank: 1 });
     setConfidenceLevel("green");
     setLastManualQuestion("Tell me about yourself");
 
@@ -110,7 +108,6 @@ describe("UI store orchestrator reset", () => {
     const s = useUIStore.getState();
     expect(s.streamingBuffers.answer).toBe("");
     expect(s.streamingBuffers.visual).toBe("");
-    expect(s.clarifyingQuestions).toEqual([]);
     expect(s.confidenceLevel).toBeNull();
     expect(s.lastManualQuestion).toBe("");
   });

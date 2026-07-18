@@ -45,15 +45,6 @@ pub struct VisualTokenPayload {
     pub token: String,
 }
 
-/// Only `clarifying.rs` still constructs this — that module is dead (nothing
-/// spawns it since slice 21) but stays declared until slice 28 deletes it
-/// end to end. Kept here purely so it keeps compiling until then.
-#[derive(Debug, Clone, Serialize)]
-pub struct ClarifyingQuestionPayload {
-    pub question: String,
-    pub rank: u8,
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfidenceScorePayload {
     pub level: String,
@@ -195,13 +186,6 @@ pub fn emit_answer_token<R: Runtime>(app: &AppHandle<R>, payload: AnswerTokenPay
 
 pub fn emit_visual_token<R: Runtime>(app: &AppHandle<R>, payload: VisualTokenPayload) {
     let _ = app.emit("visual_token", payload);
-}
-
-pub fn emit_clarifying_question<R: Runtime>(
-    app: &AppHandle<R>,
-    payload: ClarifyingQuestionPayload,
-) {
-    let _ = app.emit("clarifying_question", payload);
 }
 
 pub fn emit_confidence_score<R: Runtime>(app: &AppHandle<R>, payload: ConfidenceScorePayload) {

@@ -40,12 +40,6 @@ export interface Notification {
   level: "info" | "warn" | "error";
 }
 
-export interface ClarifyingQuestion {
-  id: string;
-  question: string;
-  rank: number;
-}
-
 export interface RagChunk {
   text: string;
   score: number;
@@ -95,7 +89,6 @@ export interface UIState {
   depthPrePrepared: boolean;
   digestSummary: string | null;
   lastManualQuestion: string;
-  clarifyingQuestions: ClarifyingQuestion[];
   ragChunks: RagChunk[];
   tokenUsage: TokenUsage;
   costCap: CostCapState;

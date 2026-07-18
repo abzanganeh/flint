@@ -1,7 +1,6 @@
 import { create } from "zustand";
 
 import type {
-  ClarifyingQuestion,
   ConfidenceLevel,
   CostCapState,
   Notification,
@@ -34,8 +33,6 @@ interface UIStore extends UIState {
   setDepthPrePrepared: (depthPrePrepared: boolean) => void;
   setDigestSummary: (digestSummary: string | null) => void;
   setLastManualQuestion: (question: string) => void;
-  addClarifyingQuestion: (q: Omit<ClarifyingQuestion, "id">) => void;
-  clearClarifyingQuestions: () => void;
   setRagChunks: (chunks: RagChunk[]) => void;
   setTokenUsage: (usage: TokenUsage) => void;
   accumulateTokenUsage: (
@@ -131,7 +128,6 @@ export const useUIStore = create<UIStore>((set) => ({
   depthPrePrepared: false,
   digestSummary: null,
   lastManualQuestion: "",
-  clarifyingQuestions: [],
   ragChunks: [],
   tokenUsage: defaultTokenUsage,
   costCap: defaultCostCap,
@@ -203,7 +199,6 @@ export const useUIStore = create<UIStore>((set) => ({
     set({
       streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
-      clarifyingQuestions: [],
       confidenceLevel: null,
       answerNowMode: false,
       currentQuestion: "",
@@ -238,7 +233,6 @@ export const useUIStore = create<UIStore>((set) => ({
         streamingBuffers: { answer: "", visual: "" },
         confidenceLevel: null,
         depthPrePrepared: false,
-        clarifyingQuestions: [],
         answerNowMode: s.answerNowMode,
       };
     }),
@@ -250,29 +244,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setDigestSummary: (digestSummary) => set({ digestSummary }),
 
   setLastManualQuestion: (lastManualQuestion) => set({ lastManualQuestion }),
-
-  addClarifyingQuestion: (q) =>
-    set((s) => {
-      const norm = q.question.trim().toLowerCase();
-      if (
-        s.clarifyingQuestions.some(
-          (existing) => existing.question.trim().toLowerCase() === norm,
-        )
-      ) {
-        return s;
-      }
-      const id =
-        typeof crypto !== "undefined" && "randomUUID" in crypto
-          ? crypto.randomUUID()
-          : `${Date.now()}-${Math.random()}`;
-      return {
-        clarifyingQuestions: [...s.clarifyingQuestions, { ...q, id }].sort(
-          (a, b) => a.rank - b.rank,
-        ),
-      };
-    }),
-
-  clearClarifyingQuestions: () => set({ clarifyingQuestions: [] }),
 
   setRagChunks: (ragChunks) => set({ ragChunks }),
 

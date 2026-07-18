@@ -9,7 +9,6 @@ const clearBuffersForNewTurn = (): void => {
   const store = useUIStore.getState();
   store.clearStreamingBuffers();
   store.setAnswerNowMode(false);
-  store.clearClarifyingQuestions();
   store.setConfidenceLevel(null);
 };
 

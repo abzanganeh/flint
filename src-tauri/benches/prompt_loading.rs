@@ -1,8 +1,8 @@
 //! Prompt loading P95 — monitored, not gated.
 //!
 //! Every LLM call lazily reads its template from `prompts/<category>/<model>.txt`.
-//! The path lookup must stay cheap because it runs on the hot directional and
-//! depth paths.
+//! The path lookup must stay cheap because it runs on the hot answer and
+//! visual paths.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -23,9 +23,8 @@ fn bench_load_prompt(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(8));
 
     let cases: &[(&str, &str)] = &[
-        ("directional", "llama"),
-        ("depth", "llama"),
-        ("clarifying", "llama"),
+        ("answer", "llama"),
+        ("visual", "llama"),
         ("question_detection", "llama"),
         ("digest", "llama"),
     ];

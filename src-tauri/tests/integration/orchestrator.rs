@@ -660,7 +660,7 @@ async fn dispatch_turn_runs_fresh_visual_on_cached_turn_three() {
 
 /// LLM provider panic propagates as `JoinError` — orchestrator catches it,
 /// emits a `thread_status` error event, and continues. Covers the panic-arm
-/// of `collect_thread_text` and `collect_clarifying`.
+/// of `collect_thread_text`.
 #[tokio::test]
 async fn dispatch_turn_recovers_from_panicking_llm_provider() {
     let embedder = match try_embedder() {

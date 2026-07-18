@@ -2,7 +2,6 @@ import { useEffect } from "react";
 
 import {
   onAnswerToken,
-  onClarifyingQuestion,
   onConfidenceScore,
   onResponseMetadata,
   onTurnStarted,
@@ -30,9 +29,6 @@ async function attachOrchestratorListeners(): Promise<() => void> {
     }),
     onResponseMetadata(({ pre_prepared }) => {
       useUIStore.getState().setDepthPrePrepared(pre_prepared);
-    }),
-    onClarifyingQuestion(({ question, rank }) => {
-      useUIStore.getState().addClarifyingQuestion({ question, rank });
     }),
   ]);
 
