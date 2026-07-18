@@ -2,9 +2,9 @@
   "current_milestone": "visual-robustness-and-triggers",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
-  "current_slice": 2,
-  "completed_slices": [0, 1],
-  "current_task_id": "vrt-s2-wire-buffered-lines-all-providers",
+  "current_slice": 3,
+  "completed_slices": [0, 1, 2],
+  "current_task_id": "vrt-s3-visual-non-streaming",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -23,5 +23,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 1 done (55b350f): sse_lines.rs byte-buffering module + 6 regression tests. Starting slice 2: wire into all 5 LLM providers."
+  "notes": "Slice 2 done: buffered_lines wired into all 5 LLM providers + chunk-split regression tests. Starting slice 3: Visual non-streaming."
 }
