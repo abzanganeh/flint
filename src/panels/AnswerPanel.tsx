@@ -26,7 +26,7 @@ const CONFIDENCE_LABEL: Record<ConfidenceLevel, string> = {
   blue: "~ Partial",
   amber: "? Uncertain",
   amber_low: "? Limited",
-  grey: "→ Clarify",
+  grey: "— Unscored",
   red: "⚡ Local",
 };
 
