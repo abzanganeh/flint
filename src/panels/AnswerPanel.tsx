@@ -31,12 +31,12 @@ const CONFIDENCE_LABEL: Record<ConfidenceLevel, string> = {
   red: "⚡ Local",
 };
 
-export interface DirectionalPanelProps {
+export interface AnswerPanelProps {
   sessionId: string;
   isGenerating?: boolean;
 }
 
-const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelProps) => {
+const AnswerPanel = ({ sessionId, isGenerating = false }: AnswerPanelProps) => {
   const {
     streamingBuffers,
     confidenceLevel,
@@ -88,7 +88,7 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
 
   return (
     <div
-      data-testid="directional-panel"
+      data-testid="answer-panel"
       style={{
         display: "flex",
         flexDirection: "column",
@@ -119,7 +119,7 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
             textTransform: "uppercase",
           }}
         >
-          Directional
+          Answer
         </span>
         {confidenceLabel && (
           <span
@@ -236,4 +236,4 @@ const ActionButton = ({
   </button>
 );
 
-export default DirectionalPanel;
+export default AnswerPanel;

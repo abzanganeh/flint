@@ -25,7 +25,7 @@ import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys } from "../hooks/useHotkeys";
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useTokenUsage } from "../hooks/useTokenUsage";
-import DirectionalPanel from "../panels/DirectionalPanel";
+import AnswerPanel from "../panels/AnswerPanel";
 import DepthPanel from "../panels/DepthPanel";
 import ClarifyingPanel from "../panels/ClarifyingPanel";
 import ContextPanel from "../panels/ContextPanel";
@@ -437,7 +437,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       <div style={{ flex: 1, overflow: "hidden" }}>
         <OverlayLayout
           transcript={<TranscriptPanel sessionId={sessionId} />}
-          directional={<DirectionalPanel sessionId={sessionId} />}
+          directional={<AnswerPanel sessionId={sessionId} />}
           depth={<DepthPanel />}
           clarifying={<ClarifyingPanel />}
           context={<ContextPanel sessionId={sessionId} />}

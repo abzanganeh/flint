@@ -28,7 +28,7 @@ import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useRagChunks } from "../hooks/useRagChunks";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import { needsUserContext } from "../lib/contextQuality";
-import DirectionalPanel from "../panels/DirectionalPanel";
+import AnswerPanel from "../panels/AnswerPanel";
 import DepthPanel from "../panels/DepthPanel";
 import ClarifyingPanel from "../panels/ClarifyingPanel";
 import ContextPanel from "../panels/ContextPanel";
@@ -512,7 +512,7 @@ const Rehearsal = ({
             <OverlayLayout
               transcript={<TranscriptPanel sessionId={sessionId} />}
               directional={
-                <DirectionalPanel sessionId={sessionId} isGenerating={asking} />
+                <AnswerPanel sessionId={sessionId} isGenerating={asking} />
               }
               depth={<DepthPanel isGenerating={asking} />}
               clarifying={<ClarifyingPanel />}
