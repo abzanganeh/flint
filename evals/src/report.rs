@@ -14,7 +14,7 @@ use crate::runner::{EvalRow, EvalRun, PromptVariant};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DomainSummary {
     pub questions: usize,
-    pub directional_conciseness_pass_rate: f32,
+    pub answer_conciseness_pass_rate: f32,
     pub mean_relevance: f32,
     pub mean_grounding: f32,
     pub mean_ttft_ms: f32,
@@ -86,7 +86,7 @@ impl Report {
                 "Questions: {} · Errors: {} · Conciseness pass rate: {:.1}% · Relevance: {:.2} · Grounding: {:.2} · TTFT mean: {:.0}ms · Stream mean: {:.0}ms",
                 summary.overall.questions,
                 summary.overall.errors,
-                summary.overall.directional_conciseness_pass_rate * 100.0,
+                summary.overall.answer_conciseness_pass_rate * 100.0,
                 summary.overall.mean_relevance,
                 summary.overall.mean_grounding,
                 summary.overall.mean_ttft_ms,
@@ -105,7 +105,7 @@ impl Report {
                     domain.display(),
                     d.questions,
                     d.errors,
-                    d.directional_conciseness_pass_rate * 100.0,
+                    d.answer_conciseness_pass_rate * 100.0,
                     d.mean_relevance,
                     d.mean_grounding,
                     d.mean_ttft_ms
@@ -140,19 +140,19 @@ fn summarise(rows: &[&EvalRow]) -> DomainSummary {
     let mut stream_sum = 0.0_f32;
 
     for row in rows {
-        if let Some(j) = row.directional.judge {
+        if let Some(j) = row.answer.judge {
             rel_sum += j.relevance;
             ground_sum += j.grounding;
             rel_count += 1.0;
             ground_count += 1.0;
         }
-        ttft_sum += row.directional.latency.ttft_ms as f32;
-        stream_sum += row.depth.latency.stream_complete_ms as f32;
+        ttft_sum += row.answer.latency.ttft_ms as f32;
+        stream_sum += row.visual.latency.stream_complete_ms as f32;
     }
 
     DomainSummary {
         questions: rows.len(),
-        directional_conciseness_pass_rate: conciseness_pass / n,
+        answer_conciseness_pass_rate: conciseness_pass / n,
         mean_relevance: safe_div(rel_sum, rel_count),
         mean_grounding: safe_div(ground_sum, ground_count),
         mean_ttft_ms: ttft_sum / n,
@@ -173,13 +173,13 @@ fn safe_div(numer: f32, denom: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::judge::JudgeScores;
-    use crate::metrics::{score_conciseness, score_latency, score_structure};
+    use crate::metrics::{score_conciseness, score_latency, score_visual_structure};
     use crate::runner::ThreadScore;
 
     fn make_row(
         domain: Domain,
         variant: PromptVariant,
-        directional: &str,
+        answer_text: &str,
         relevance: f32,
         grounding: f32,
     ) -> EvalRow {
@@ -187,21 +187,21 @@ mod tests {
             question_id: "q".into(),
             domain,
             variant,
-            directional: ThreadScore {
-                response_text: directional.into(),
+            answer: ThreadScore {
+                response_text: answer_text.into(),
                 latency: score_latency(500, 6_000),
                 judge: Some(JudgeScores {
                     relevance,
                     grounding,
                 }),
             },
-            depth: ThreadScore {
-                response_text: "depth.".into(),
+            visual: ThreadScore {
+                response_text: "```mermaid\nflowchart TD\nA-->B\n```".into(),
                 latency: score_latency(700, 7_000),
                 judge: None,
             },
-            conciseness: score_conciseness(directional),
-            structure: score_structure("a\n\nb"),
+            conciseness: score_conciseness(answer_text),
+            structure: score_visual_structure("```mermaid\nflowchart TD\nA-->B\n```"),
             error: None,
         }
     }
@@ -223,7 +223,7 @@ mod tests {
                 make_row(
                     Domain::SoftwareEngineering,
                     PromptVariant::Gpt,
-                    "One. Two. Three. Four.",
+                    "One. Two. Three. Four. Five.",
                     0.4,
                     0.5,
                 ),
@@ -232,7 +232,7 @@ mod tests {
         let report = Report::from_run(&run);
         let gpt = report.variants.get(&PromptVariant::Gpt).unwrap();
         assert!((gpt.overall.mean_relevance - 0.65).abs() < 0.01);
-        assert!((gpt.overall.directional_conciseness_pass_rate - 0.5).abs() < 0.01);
+        assert!((gpt.overall.answer_conciseness_pass_rate - 0.5).abs() < 0.01);
         assert!(gpt.by_domain.contains_key(&Domain::SoftwareEngineering));
     }
 

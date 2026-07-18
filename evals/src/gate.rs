@@ -3,7 +3,7 @@
 //! From `flint-performance.mdc` and design doc §20:
 //!
 //! * win rate >= 50% vs the stored baseline
-//! * directional conciseness pass rate >= 95%
+//! * answer conciseness pass rate >= 95%
 //! * no per-domain relevance score below 0.7
 //!
 //! The gate returns structured findings — the CLI prints them and exits 1
@@ -76,10 +76,10 @@ pub fn evaluate(report: &Report, baseline: Option<&Report>, options: GateOptions
 }
 
 fn check_conciseness(variant: PromptVariant, summary: &VariantSummary, out: &mut Vec<Violation>) {
-    if summary.overall.directional_conciseness_pass_rate < CONCISENESS_FLOOR {
+    if summary.overall.answer_conciseness_pass_rate < CONCISENESS_FLOOR {
         out.push(Violation::Conciseness {
             variant,
-            pass_rate: summary.overall.directional_conciseness_pass_rate,
+            pass_rate: summary.overall.answer_conciseness_pass_rate,
         });
     }
 }
@@ -145,7 +145,7 @@ mod tests {
                 d,
                 DomainSummary {
                     questions: 10,
-                    directional_conciseness_pass_rate: overall_conciseness,
+                    answer_conciseness_pass_rate: overall_conciseness,
                     mean_relevance: rel,
                     mean_grounding: 0.7,
                     mean_ttft_ms: 500.0,
@@ -157,7 +157,7 @@ mod tests {
         VariantSummary {
             overall: DomainSummary {
                 questions: 10,
-                directional_conciseness_pass_rate: overall_conciseness,
+                answer_conciseness_pass_rate: overall_conciseness,
                 mean_relevance: 0.8,
                 mean_grounding: 0.7,
                 mean_ttft_ms: 500.0,

@@ -20,8 +20,8 @@ use crate::bank::{Domain, Question};
 use crate::error::EvalError;
 use crate::judge::{Judge, JudgeRequest, JudgeScores};
 use crate::metrics::{
-    score_conciseness, score_latency, score_structure, ConcisenessOutcome, LatencyOutcome,
-    StructureOutcome,
+    score_conciseness, score_latency, score_visual_structure, ConcisenessOutcome, LatencyOutcome,
+    VisualStructureOutcome,
 };
 
 /// Prompt variant identifier — matches the filename under
@@ -56,8 +56,8 @@ impl PromptVariant {
     }
 }
 
-/// Per-thread scores from a single eval run. The harness scores directional
-/// and depth separately because they have different quality criteria.
+/// Per-thread scores from a single eval run. The harness scores answer
+/// and visual separately because they have different quality criteria.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreadScore {
     pub response_text: String,
@@ -71,10 +71,10 @@ pub struct EvalRow {
     pub question_id: String,
     pub domain: Domain,
     pub variant: PromptVariant,
-    pub directional: ThreadScore,
-    pub depth: ThreadScore,
+    pub answer: ThreadScore,
+    pub visual: ThreadScore,
     pub conciseness: ConcisenessOutcome,
-    pub structure: StructureOutcome,
+    pub structure: VisualStructureOutcome,
     pub error: Option<String>,
 }
 
@@ -131,20 +131,18 @@ impl EvalRunner {
         question: &Question,
         variant: PromptVariant,
     ) -> Result<EvalRow, EvalError> {
-        let directional = self
-            .run_thread("directional", question, variant, 200)
-            .await?;
-        let depth = self.run_thread("depth", question, variant, 400).await?;
+        let answer = self.run_thread("answer", question, variant, 200).await?;
+        let visual = self.run_thread("visual", question, variant, 400).await?;
 
-        let conciseness = score_conciseness(&directional.response_text);
-        let structure = score_structure(&depth.response_text);
+        let conciseness = score_conciseness(&answer.response_text);
+        let structure = score_visual_structure(&visual.response_text);
 
         Ok(EvalRow {
             question_id: question.id.clone(),
             domain: question.domain,
             variant,
-            directional,
-            depth,
+            answer,
+            visual,
             conciseness,
             structure,
             error: None,
@@ -222,10 +220,10 @@ impl EvalRunner {
             question_id: question.id.clone(),
             domain: question.domain,
             variant,
-            directional: placeholder.clone(),
-            depth: placeholder,
+            answer: placeholder.clone(),
+            visual: placeholder,
             conciseness: score_conciseness(""),
-            structure: score_structure(""),
+            structure: score_visual_structure(""),
             error: Some(err.to_string()),
         }
     }
