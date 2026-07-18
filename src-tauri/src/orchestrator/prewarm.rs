@@ -7,7 +7,7 @@
 //!
 //! ## Concurrency guarantee
 //!
-//! All 10 inference calls (5 × directional + 5 × depth) are dispatched
+//! All 10 inference calls (5 × answer + 5 × visual) are dispatched
 //! immediately via `tokio::spawn`, then collected with `futures::future::join_all`.
 //! No call ever waits for another. Sequential execution is forbidden by
 //! the unit tests (see `test_run_prewarm_fires_all_tasks_concurrently`).
@@ -23,7 +23,7 @@
 //! ## Cache shape
 //!
 //! Each question yields **exactly one** [`PreWarmEntry`] containing both
-//! the directional and the depth response. The two LLM calls per question
+//! the answer and the visual response. The two LLM calls per question
 //! still run concurrently, but their results are merged before insertion —
 //! lookups never see a half-populated entry.
 
@@ -53,8 +53,8 @@ use crate::rag::embedder::Embedder;
 #[derive(Debug, Clone)]
 pub struct PreWarmEntry {
     pub question: String,
-    pub directional_response: String,
-    pub depth_response: String,
+    pub answer_response: String,
+    pub visual_response: String,
     pub created_at: DateTime<Utc>,
     /// bge-small-en-v1.5 embedding of `question` (384 dimensions, unit-norm).
     pub embedding: Vec<f32>,
@@ -96,17 +96,17 @@ impl PreWarmCache {
     ///
     /// Skips insertion when both responses fail the digest-JSON poison check.
     pub fn insert(&mut self, entry: PreWarmEntry) -> Option<Uuid> {
-        let dir_ok = is_plausible_cached_response(&entry.directional_response);
-        let dep_ok = is_plausible_cached_response(&entry.depth_response);
-        if !dir_ok && !dep_ok {
+        let ans_ok = is_plausible_cached_response(&entry.answer_response);
+        let vis_ok = is_plausible_cached_response(&entry.visual_response);
+        if !ans_ok && !vis_ok {
             return None;
         }
         let mut entry = entry;
-        if !dir_ok {
-            entry.directional_response.clear();
+        if !ans_ok {
+            entry.answer_response.clear();
         }
-        if !dep_ok {
-            entry.depth_response.clear();
+        if !vis_ok {
+            entry.visual_response.clear();
         }
         let key = Uuid::new_v4();
         self.entries.insert(key, entry);
@@ -132,8 +132,8 @@ impl PreWarmCache {
             .entries
             .values()
             .filter(|entry| {
-                is_plausible_cached_response(&entry.directional_response)
-                    || is_plausible_cached_response(&entry.depth_response)
+                is_plausible_cached_response(&entry.answer_response)
+                    || is_plausible_cached_response(&entry.visual_response)
             })
             .filter_map(|entry| {
                 if entry.embedding.len() != embedding.len() {
@@ -226,7 +226,7 @@ fn build_prompt(template: &str, question: &str, digest: &Digest) -> String {
 
 /// Fire pre-warm inference for the top-5 digest questions.
 ///
-/// **All 10 LLM calls are spawned concurrently** — directional and depth for
+/// **All 10 LLM calls are spawned concurrently** — answer and visual for
 /// each of the 5 questions — using `tokio::spawn`, then awaited with
 /// `futures::future::join_all`. No call ever blocks another.
 ///
@@ -264,10 +264,10 @@ pub async fn run_prewarm(
     let provider_name = llm.name().to_string();
 
     // Load prompt templates once (outside the spawn tasks).
-    let dir_template = load_prompt("directional", &provider_name)
-        .context("failed to load directional pre-warm prompt")?;
-    let dep_template =
-        load_prompt("depth", &provider_name).context("failed to load depth pre-warm prompt")?;
+    let answer_template =
+        load_prompt("answer", &provider_name).context("failed to load answer pre-warm prompt")?;
+    let visual_template =
+        load_prompt("visual", &provider_name).context("failed to load visual pre-warm prompt")?;
 
     // Embed all questions in one batch off the async runtime.
     let questions_for_embed = questions.clone();
@@ -282,23 +282,23 @@ pub async fn run_prewarm(
 
     let start = Instant::now();
 
-    // For each question, spawn directional and depth tasks. Both tasks run
+    // For each question, spawn answer and visual tasks. Both tasks run
     // concurrently with one another and with all other questions' tasks.
     // We collect them per-question so we can merge results into a single
     // PreWarmEntry per question (no duplicate / half-populated entries).
     let mut question_tasks = Vec::with_capacity(questions.len());
 
     for (question_idx, (question, embedding)) in questions.iter().zip(embeddings).enumerate() {
-        let dir_prompt = build_prompt(&dir_template, question, digest);
-        let dep_prompt = build_prompt(&dep_template, question, digest);
+        let answer_prompt = build_prompt(&answer_template, question, digest);
+        let visual_prompt = build_prompt(&visual_template, question, digest);
         let question_str = question.clone();
 
         // Spawn both LLM calls immediately so they are in-flight in parallel.
-        let llm_dir = Arc::clone(&llm);
-        let dir_handle = tokio::spawn(async move {
-            llm_dir
+        let llm_answer = Arc::clone(&llm);
+        let answer_handle = tokio::spawn(async move {
+            llm_answer
                 .complete(
-                    dir_prompt,
+                    answer_prompt,
                     CompletionConfig {
                         max_tokens: Some(200),
                         temperature: 0.0,
@@ -308,11 +308,11 @@ pub async fn run_prewarm(
                 .await
         });
 
-        let llm_dep = Arc::clone(&llm);
-        let dep_handle = tokio::spawn(async move {
-            llm_dep
+        let llm_visual = Arc::clone(&llm);
+        let visual_handle = tokio::spawn(async move {
+            llm_visual
                 .complete(
-                    dep_prompt,
+                    visual_prompt,
                     CompletionConfig {
                         max_tokens: Some(400),
                         temperature: 0.0,
@@ -327,59 +327,59 @@ pub async fn run_prewarm(
         // runs concurrently across questions.
         let cache_handle = Arc::clone(&cache);
         let coordinator = tokio::spawn(async move {
-            let (dir_join, dep_join) = tokio::join!(dir_handle, dep_handle);
+            let (answer_join, visual_join) = tokio::join!(answer_handle, visual_handle);
 
             // question_idx is the question's position in the digest's
             // likely_questions list — stable for the duration of pre-warm
             // and free of session content. The full text is gated to
             // debug-only logs below (flint-security.mdc §"Hard Constraints").
-            let directional_response = match dir_join {
+            let answer_response = match answer_join {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
-                    warn!(question_idx, error = %e, "directional pre-warm failed");
+                    warn!(question_idx, error = %e, "answer pre-warm failed");
                     String::new()
                 }
                 Err(e) => {
-                    warn!(question_idx, error = %e, "directional task panicked");
+                    warn!(question_idx, error = %e, "answer task panicked");
                     String::new()
                 }
             };
 
-            let depth_response = match dep_join {
+            let visual_response = match visual_join {
                 Ok(Ok(r)) => r,
                 Ok(Err(e)) => {
-                    warn!(question_idx, error = %e, "depth pre-warm failed");
+                    warn!(question_idx, error = %e, "visual pre-warm failed");
                     String::new()
                 }
                 Err(e) => {
-                    warn!(question_idx, error = %e, "depth task panicked");
+                    warn!(question_idx, error = %e, "visual task panicked");
                     String::new()
                 }
             };
 
             // Skip insertion if both calls failed — nothing useful to cache.
-            if directional_response.is_empty() && depth_response.is_empty() {
+            if answer_response.is_empty() && visual_response.is_empty() {
                 return;
             }
 
-            let directional_response = if is_plausible_cached_response(&directional_response) {
-                directional_response
+            let answer_response = if is_plausible_cached_response(&answer_response) {
+                answer_response
             } else {
                 String::new()
             };
-            let depth_response = if is_plausible_cached_response(&depth_response) {
-                depth_response
+            let visual_response = if is_plausible_cached_response(&visual_response) {
+                visual_response
             } else {
                 String::new()
             };
-            if directional_response.is_empty() && depth_response.is_empty() {
+            if answer_response.is_empty() && visual_response.is_empty() {
                 return;
             }
 
             let entry = PreWarmEntry {
                 question: question_str.clone(),
-                directional_response,
-                depth_response,
+                answer_response,
+                visual_response,
                 created_at: Utc::now(),
                 embedding,
             };
@@ -531,8 +531,8 @@ mod tests {
         let mut cache = PreWarmCache::new();
         cache.insert(PreWarmEntry {
             question: q.to_string(),
-            directional_response: "I am a senior engineer.".to_string(),
-            depth_response: "I have 8 years of experience...".to_string(),
+            answer_response: "I am a senior engineer.".to_string(),
+            visual_response: "I have 8 years of experience...".to_string(),
             created_at: Utc::now(),
             embedding: embedding.clone(),
         });
@@ -555,8 +555,8 @@ mod tests {
         let mut cache = PreWarmCache::new();
         cache.insert(PreWarmEntry {
             question: interview_q.to_string(),
-            directional_response: "answer".to_string(),
-            depth_response: "detailed answer".to_string(),
+            answer_response: "answer".to_string(),
+            visual_response: "detailed answer".to_string(),
             created_at: Utc::now(),
             embedding: interview_emb,
         });
@@ -580,8 +580,8 @@ mod tests {
     fn test_staleness_fresh_entry() {
         let entry = PreWarmEntry {
             question: "q".to_string(),
-            directional_response: String::new(),
-            depth_response: String::new(),
+            answer_response: String::new(),
+            visual_response: String::new(),
             created_at: Utc::now(),
             embedding: vec![],
         };
@@ -593,8 +593,8 @@ mod tests {
     fn test_staleness_old_entry() {
         let entry = PreWarmEntry {
             question: "q".to_string(),
-            directional_response: String::new(),
-            depth_response: String::new(),
+            answer_response: String::new(),
+            visual_response: String::new(),
             created_at: Utc::now() - chrono::Duration::minutes(11),
             embedding: vec![],
         };
@@ -620,7 +620,7 @@ mod tests {
     }
 
     /// Each question must produce **exactly one** cache entry — both the
-    /// directional and depth response merged. No half-populated entries.
+    /// answer and visual response merged. No half-populated entries.
     #[tokio::test]
     async fn test_run_prewarm_one_entry_per_question_with_both_fields() {
         let digest = sample_digest();
@@ -638,14 +638,14 @@ mod tests {
         assert_eq!(
             c.len(),
             expected_count,
-            "one entry per question (no duplicates from directional/depth race)",
+            "one entry per question (no duplicates from answer/visual race)",
         );
         for entry in c.entries.values() {
             assert!(
-                !entry.directional_response.is_empty(),
-                "directional must be populated"
+                !entry.answer_response.is_empty(),
+                "answer must be populated"
             );
-            assert!(!entry.depth_response.is_empty(), "depth must be populated");
+            assert!(!entry.visual_response.is_empty(), "visual must be populated");
         }
     }
 
@@ -706,8 +706,8 @@ mod tests {
         // Insert an entry with a 4-dim embedding.
         cache.insert(PreWarmEntry {
             question: "wrong-dim".to_string(),
-            directional_response: "x".to_string(),
-            depth_response: "y".to_string(),
+            answer_response: "x".to_string(),
+            visual_response: "y".to_string(),
             created_at: Utc::now(),
             embedding: vec![1.0, 0.0, 0.0, 0.0],
         });
@@ -724,16 +724,16 @@ mod tests {
         // Best match: aligned with query.
         cache.insert(PreWarmEntry {
             question: "best".to_string(),
-            directional_response: "a".to_string(),
-            depth_response: "b".to_string(),
+            answer_response: "a".to_string(),
+            visual_response: "b".to_string(),
             created_at: Utc::now(),
             embedding: vec![1.0, 0.0, 0.0, 0.0],
         });
         // Lower similarity: orthogonal direction, still ≥ 0.85 due to magnitude.
         cache.insert(PreWarmEntry {
             question: "worse".to_string(),
-            directional_response: "c".to_string(),
-            depth_response: "d".to_string(),
+            answer_response: "c".to_string(),
+            visual_response: "d".to_string(),
             created_at: Utc::now(),
             embedding: vec![0.9, 0.1, 0.0, 0.0],
         });
@@ -749,7 +749,7 @@ mod tests {
         let emb = require_embedder!();
         let cache = Arc::new(Mutex::new(PreWarmCache::new()));
 
-        // Provider name does not match any file under prompts/{directional,depth}/.
+        // Provider name does not match any file under prompts/{answer,visual}/.
         let llm: Arc<dyn LLMProvider> = Arc::new(MockLLMProvider {
             response: "fallback answer".to_string(),
             provider_name: "no_such_provider".to_string(),
@@ -762,7 +762,7 @@ mod tests {
     }
 
     /// Inner LLM error path (Ok(Err(_))): provider returns an error from
-    /// `complete_stream`. Both directional and depth tasks observe the
+    /// `complete_stream`. Both answer and visual tasks observe the
     /// failure and the entry is skipped (both fields empty).
     #[tokio::test]
     async fn test_prewarm_skips_entry_when_both_calls_return_inner_error() {
@@ -847,8 +847,8 @@ mod tests {
         let mut cache = PreWarmCache::new();
         cache.insert(PreWarmEntry {
             question: q.to_string(),
-            directional_response: "I am a senior software engineer.".to_string(),
-            depth_response: "With 8 years of experience...".to_string(),
+            answer_response: "I am a senior software engineer.".to_string(),
+            visual_response: "With 8 years of experience...".to_string(),
             created_at: Utc::now(),
             embedding: embedding.clone(),
         });

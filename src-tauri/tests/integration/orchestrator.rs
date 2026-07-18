@@ -105,8 +105,8 @@ fn test_context(question: &str) -> OrchestrationContext {
         from_cache: false,
         from_preferred: false,
         preferred_answer: String::new(),
-        cached_directional: None,
-        cached_depth: None,
+        cached_answer: None,
+        cached_visual: None,
         turn_cancel: Arc::new(AtomicBool::new(false)),
         turn_number: 1,
     }
@@ -326,7 +326,7 @@ async fn dispatch_turn_survives_primary_llm_failure() {
     );
 }
 
-/// Pre-warm cache hit: dispatch_turn serves cached directional + depth without
+/// Pre-warm cache hit: dispatch_turn serves cached answer + visual without
 /// hitting the LLM. Exercises the cache-hit branch inside `run_turn`.
 #[tokio::test]
 async fn dispatch_turn_serves_prewarm_cache_hit() {
@@ -344,8 +344,8 @@ async fn dispatch_turn_serves_prewarm_cache_hit() {
     let mut cache = PreWarmCache::new();
     cache.insert(flint_lib::orchestrator::prewarm::PreWarmEntry {
         question: question.to_string(),
-        directional_response: "Cached brief answer.".to_string(),
-        depth_response: "Cached detailed answer.".to_string(),
+        answer_response: "Cached brief answer.".to_string(),
+        visual_response: "Cached detailed answer.".to_string(),
         created_at: chrono::Utc::now(),
         embedding,
     });
@@ -605,10 +605,10 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
 }
 
 /// Cache hit + turn >= 3 → visual.rs runs a fresh LLM pass in parallel with
-/// streaming the cached text. Covers the `cached_depth && turn_number >= 3`
+/// streaming the cached text. Covers the `cached_visual && turn_number >= 3`
 /// branch in `visual::run_visual`.
 #[tokio::test]
-async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
+async fn dispatch_turn_runs_fresh_visual_on_cached_turn_three() {
     let embedder = match try_embedder() {
         Some(e) => e,
         None => return,
@@ -621,8 +621,8 @@ async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
     let mut cache = PreWarmCache::new();
     cache.insert(flint_lib::orchestrator::prewarm::PreWarmEntry {
         question: question.to_string(),
-        directional_response: "Cached brief.".to_string(),
-        depth_response: "Cached depth.".to_string(),
+        answer_response: "Cached brief.".to_string(),
+        visual_response: "Cached visual.".to_string(),
         created_at: chrono::Utc::now(),
         embedding,
     });
@@ -635,10 +635,10 @@ async fn dispatch_turn_runs_fresh_depth_on_cached_turn_three() {
     let result = dispatch_turn(
         session_id,
         question.to_string(),
-        3, // turn ≥ 3 triggers the fresh-depth path
+        3, // turn ≥ 3 triggers the fresh-visual path
         Arc::new(test_digest()),
         prompts_dir,
-        fast_failover("Fresh depth answer.", "default"),
+        fast_failover("Fresh visual answer.", "default"),
         embedder,
         fresh_vector_store(),
         Arc::new(Mutex::new(cache)),
@@ -798,12 +798,12 @@ async fn dispatch_turn_returns_early_when_cancel_flag_set() {
 }
 
 #[tokio::test]
-async fn cache_hit_serves_directional_without_llm_call() {
+async fn cache_hit_serves_answer_without_llm_call() {
     let app = mock_app_handle();
     let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
 
     let mut ctx = test_context("Tell me about yourself");
-    ctx.cached_directional = Some("Cached directional response.".to_string());
+    ctx.cached_answer = Some("Cached answer response.".to_string());
     ctx.from_cache = true;
 
     let failover = make_failover("should not be called");
@@ -814,7 +814,7 @@ async fn cache_hit_serves_directional_without_llm_call() {
         .expect("cache serve should succeed");
     let elapsed = start.elapsed();
 
-    assert_eq!(result, "Cached directional response.");
+    assert_eq!(result, "Cached answer response.");
     assert!(
         elapsed < Duration::from_millis(MOCK_DELAY_MS),
         "cache path should not wait for LLM delay"

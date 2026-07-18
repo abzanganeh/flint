@@ -44,7 +44,7 @@ pub async fn run_answer<R: Runtime>(
     let provider_name = failover.active_provider_name().to_string();
 
     // Pre-warm / preferred hit — serve cached response without an LLM round-trip.
-    if let Some(cached) = ctx.cached_directional {
+    if let Some(cached) = ctx.cached_answer {
         let text = emit_cached_answer_tokens(&cached, &app, &ctx.turn_cancel);
         let ttft_ms = ttft_start.elapsed().as_millis() as u64;
         if ctx.from_preferred {

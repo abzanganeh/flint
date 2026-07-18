@@ -85,10 +85,10 @@ pub struct OrchestrationContext {
     pub from_preferred: bool,
     /// Saved preferred answer text when present (used for prompt hints during generation).
     pub preferred_answer: String,
-    /// Cached directional text when pre-warm cache hit (≥ 0.85 cosine).
-    pub cached_directional: Option<String>,
-    /// Cached depth text when pre-warm cache hit.
-    pub cached_depth: Option<String>,
+    /// Cached answer text when pre-warm cache hit (≥ 0.85 cosine).
+    pub cached_answer: Option<String>,
+    /// Cached visual text when pre-warm cache hit.
+    pub cached_visual: Option<String>,
     /// Per-turn cancellation flag — set by `cancel_inference`.
     pub turn_cancel: TurnCancelFlag,
     /// 1-indexed turn number in the current session.
@@ -123,6 +123,14 @@ fn mean_rag_score(chunks: &[ScoredChunk]) -> f32 {
     let top = chunks.iter().take(3);
     let sum: f32 = top.map(|c| c.score).sum();
     sum / chunks.len().min(3) as f32
+}
+
+/// Gate for the fire-and-forget Q&A embedding (step 7b). Only the Answer
+/// thread's output feeds this decision — Visual output is never embedded
+/// for Q&A recall, since it is diagram/code shaped rather than a reusable
+/// spoken answer.
+fn should_embed_qa_pair(confidence_score: f32, answer_text: &str) -> bool {
+    confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD && !answer_text.trim().is_empty()
 }
 
 /// Collapse the nested `JoinError`/thread `Result` into a plain text payload.
@@ -485,27 +493,27 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     } else {
         let cache = cfg.prewarm_cache.lock().await;
         cache.lookup(&embedding).and_then(|e| {
-            let dir = if is_plausible_cached_response(&e.directional_response) {
-                e.directional_response.clone()
+            let ans = if is_plausible_cached_response(&e.answer_response) {
+                e.answer_response.clone()
             } else {
                 String::new()
             };
-            let dep = if is_plausible_cached_response(&e.depth_response) {
-                e.depth_response.clone()
+            let vis = if is_plausible_cached_response(&e.visual_response) {
+                e.visual_response.clone()
             } else {
                 String::new()
             };
-            if dir.is_empty() && dep.is_empty() {
+            if ans.is_empty() && vis.is_empty() {
                 None
             } else {
-                Some((dir, dep))
+                Some((ans, vis))
             }
         })
     };
 
     let from_cache = cache_hit.is_some();
-    let (cached_directional, cached_depth) = match cache_hit {
-        Some((dir, dep)) => (Some(dir), Some(dep)),
+    let (cached_answer, cached_visual) = match cache_hit {
+        Some((ans, vis)) => (Some(ans), Some(vis)),
         None => (None, None),
     };
     if from_preferred {
@@ -591,8 +599,8 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         from_cache,
         from_preferred,
         preferred_answer: preferred_answer.clone(),
-        cached_directional,
-        cached_depth,
+        cached_answer,
+        cached_visual,
         turn_cancel: Arc::clone(&cfg.turn_cancel),
         turn_number: cfg.turn_number,
     };
@@ -751,7 +759,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     );
 
     // ── 7b. Quality-gated Q&A embedding ──────────────────────────────────
-    // If the directional answer reached confidence ≥ QA_EMBED_CONFIDENCE_THRESHOLD
+    // If the Answer thread's output reached confidence ≥ QA_EMBED_CONFIDENCE_THRESHOLD
     // (green or blue), embed the Q&A pair into the session's Q&A vector store
     // so it can be retrieved as a supplemental slot in future turns.
     //
@@ -759,10 +767,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // the turn. Low-confidence answers (amber/grey/red) are skipped to
     // prevent contaminating future retrievals.
     {
-        let should_embed = confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD
-            && !answer_text.trim().is_empty();
-
-        if should_embed {
+        if should_embed_qa_pair(confidence_score, &answer_text) {
             let qa_text = format!(
                 "Q: {}\nA: {}",
                 cfg.question_text.trim(),
@@ -1006,6 +1011,27 @@ mod tests {
     #[test]
     fn mean_rag_score_empty_returns_zero() {
         assert_eq!(mean_rag_score(&[]), 0.0);
+    }
+
+    #[test]
+    fn should_embed_qa_pair_fires_on_high_confidence_answer_text() {
+        assert!(should_embed_qa_pair(
+            QA_EMBED_CONFIDENCE_THRESHOLD,
+            "A grounded answer."
+        ));
+        assert!(should_embed_qa_pair(0.9, "A grounded answer."));
+    }
+
+    #[test]
+    fn should_embed_qa_pair_skips_below_threshold() {
+        let just_under = QA_EMBED_CONFIDENCE_THRESHOLD - 0.01;
+        assert!(!should_embed_qa_pair(just_under, "A grounded answer."));
+    }
+
+    #[test]
+    fn should_embed_qa_pair_skips_empty_answer_text() {
+        assert!(!should_embed_qa_pair(0.95, ""));
+        assert!(!should_embed_qa_pair(0.95, "   "));
     }
 
     /// Slice 17 (`lpav-s17-prompts-answer-visual`) — the Answer + Visual

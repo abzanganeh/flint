@@ -47,7 +47,7 @@ pub async fn run_visual<R: Runtime>(
 
     // Pre-warm / preferred hit — serve cached visual block; on turn ≥ 3 also run fresh LLM
     // unless this is a user-saved preferred script.
-    if let Some(cached) = ctx.cached_depth.clone() {
+    if let Some(cached) = ctx.cached_visual.clone() {
         let mut full_response = emit_cached_visual_block(&cached, &app, &ctx.turn_cancel);
 
         if ctx.turn_number >= 3 && !ctx.from_preferred {
