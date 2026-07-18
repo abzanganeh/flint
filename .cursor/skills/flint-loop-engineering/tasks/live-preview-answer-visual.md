@@ -114,8 +114,8 @@ Composer 2.5 ONLY — push, gh pr create, poll checks, fix flakes, merge
 | 29 | `lpav-s29-eval-harness-update` | COMPLEX | Sonnet 5 | Sonnet 5 |
 | 30 | `lpav-s30-orchestrator-integration-tests` | COMPLEX | Sonnet 5 | Sonnet 5 |
 | 31 | `lpav-s31-panel-vitest` | SIMPLE | Composer 2.5 | Grok 4.5 |
-| 32 | `lpav-s32-rules-compat-shim` | MEDIUM | Grok 4.5 | Sonnet 5 |
-| 33 | `lpav-s33-manual-qa-checklist` | SIMPLE | Composer 2.5 | Grok 4.5 |
+| 32 | `lpav-s32-rules-update` | MEDIUM | Grok 4.5 | Sonnet 5 |
+| 33 | `lpav-s33-manual-qa-checklist-and-local-docs` | SIMPLE | Composer 2.5 | Grok 4.5 |
 | 34 | `lpav-s34-consolidated-review` | COMPLEX | — | Sonnet 5 |
 | 35 | `lpav-s35-fix-review-findings` | MEDIUM | Grok 4.5 | Sonnet 5 |
 | 36 | `lpav-s36-full-gates-rerun` | SIMPLE | Composer 2.5 | Grok 4.5 |
@@ -200,16 +200,18 @@ Initialize `.cursor/flint-loop-state.json`:
 
 ### Slice 3: `lpav-s3-suspicion-detector` (COMPLEX)
 
-**Goal:** Non-phone channel-mismatch suspicion → enqueue for classifier.
+**Goal:** Route existing suspicion detector into the Tier-2 classifier queue instead of only auto-correcting directly.
 
-**Implement:** `is_chunk_suspicious(text, channel)` in `audio/speaker_classifier.rs` (or module):
-- Mic + question shape (`?`, tell me/how/what/why/describe)
-- System + first-person statement (I/we/my/our)
-- Near-duplicate System/Mic within 1.5s
+**IMPORTANT — do not rebuild from scratch.** `src-tauri/src/transcription/speaker_suspicion.rs` already implements the question-shape-on-Mic / first-person-on-System heuristics and is already called from `audio/pipeline.rs` (`speaker_suspicion::evaluate`), which auto-corrects the label immediately. That part is done.
 
-**Tests:** table-driven unit tests per signal.
+**What's actually missing:**
+- Near-duplicate System/Mic within 1.5s signal (loopback bleed survived echo suppression) — not in `speaker_suspicion.rs` today, add it there.
+- Instead of (or in addition to) the immediate auto-correct, suspicious chunks should also enqueue onto the Tier-2 classifier queue built in Slice 4, so a confirmed `interviewer|candidate` verdict can override the plain heuristic guess. Wire this hookup in `audio/pipeline.rs` at the existing `speaker_suspicion::evaluate` call site.
+- Extend `label_source` values so a chunk auto-corrected by heuristic but not yet classifier-confirmed is distinguishable from one the classifier has confirmed (ties into Slice 5's event).
 
-**Commit:** `lpav slice 3: channel suspicion detector for non-phone mode`
+**Tests:** table-driven unit test for the new near-duplicate signal; pipeline test asserting a suspicious chunk is enqueued for classification.
+
+**Commit:** `lpav slice 3: route suspicious chunks to Tier-2 classifier queue`
 
 ---
 
@@ -254,13 +256,22 @@ Initialize `.cursor/flint-loop-state.json`:
 
 ### Slice 7: `lpav-s7-q-interviewer-span` (MEDIUM)
 
-**Goal:** Q / Ask now uses last Interviewer-labeled span (respect manual relabels); exclude user-relabeled-to-You chunks.
+**Goal:** Fix the *global* Q button's targeting; leave the per-line Q chip alone.
 
-**Files:** `TranscriptPanel.tsx`, `LiveSessionStatusBar.tsx`, Rust trigger path if needed.
+**There are two independent Q mechanisms today — do not conflate them:**
+1. `TranscriptPanel.tsx` per-line **Q chip** — already targets the correct merged System utterance (fixed in `qa-fix-summary-transcript` / PR #37). **No change needed here.**
+2. `LiveSessionStatusBar.tsx` global **Q button** — still uses a blind `ROLLING_WINDOW_MS = 30_000` window over raw System chunks (`onSystemChunk` accumulator), independent of any relabeling. **This is what this slice fixes.**
 
-**Tests:** vitest merged span selection; Rust unit for buffer last-interviewer text.
+**Implement:**
+- Replace the 30s rolling-window accumulation in `LiveSessionStatusBar.tsx` with a query against the backend's last Interviewer-labeled span (respecting manual relabels and classifier verdicts from Slices 2–6) — either a new lightweight Rust query command, or reuse the buffer `signalQuestionEnded` already drains.
+- Exclude any chunk the user manually relabeled to `You` from the span.
+- Phone mode: if the current span's speaker confidence is still uncertain (no classifier/manual confirmation), keep today's raw-30s fallback and show a small "(uncertain speaker)" hint — do not block the button.
 
-**Commit:** `lpav slice 7: Q targets full interviewer span with relabel respect`
+**Files:** `LiveSessionStatusBar.tsx` (+ `LiveSessionStatusBar.test.tsx`), Rust query/trigger path in `commands.rs` if a new command is needed.
+
+**Tests:** vitest — span excludes relabeled-to-You chunks, uncertain-speaker hint renders in phone mode; Rust unit for buffer last-interviewer text.
+
+**Commit:** `lpav slice 7: global Q button targets last interviewer span, not raw 30s window`
 
 ---
 
@@ -371,6 +382,8 @@ cd .. && npm run test
 **Answer prompt:** conclusion-first, brief reasoning, one follow-up line appended.  
 **Visual prompt:** fenced mermaid or code only; diagram types for system design.
 
+**Scope note — domain hints hardcoded, not dynamic:** the source plan ties the Visual prompt to a `SessionDomain::preferred_diagram_types()` method. That trait is out of scope for this milestone (no domain-plugin architecture here). Hardcode the interview-relevant diagram-type hints (flowchart, sequenceDiagram, classDiagram, erDiagram for system design / API design questions) directly into the `/prompts/visual/` templates instead. This is an intentional scope reduction — leave a `// TODO(domain-plugin): swap for SessionDomain::preferred_diagram_types() when that trait lands` comment, not a silent omission.
+
 **Tests:** prompt loader unit tests; files exist on disk.
 
 **Commit:** `lpav slice 17: answer and visual prompt artifacts`
@@ -381,11 +394,13 @@ cd .. && npm run test
 
 **Goal:** `orchestrator/answer.rs` — merges directional + clarifying behavior; streams tokens.
 
-**Retire clarifying spawn from orchestrator (slice 21 wires removal).**
+**File handling:** `git mv src-tauri/src/orchestrator/directional.rs src-tauri/src/orchestrator/answer.rs` and adapt in place — do not leave `directional.rs` behind as a second copy. Update `pub mod directional;` → `pub mod answer;` in `orchestrator/mod.rs` in this same slice.
+
+**Retire clarifying spawn from orchestrator (slice 21 wires removal); `orchestrator/clarifying.rs` itself is deleted in Slice 28, not here — do not delete it prematurely since Slice 21 still needs the old spawn removed cleanly first.**
 
 **Tests:** mock provider streaming; conciseness heuristic.
 
-**Commit:** `lpav slice 18: Answer thread module`
+**Commit:** `lpav slice 18: Answer thread module (renamed from directional.rs)`
 
 ---
 
@@ -393,9 +408,11 @@ cd .. && npm run test
 
 **Goal:** `orchestrator/visual.rs` — repurposes depth streaming; buffers until closing fence.
 
+**File handling:** `git mv src-tauri/src/orchestrator/depth.rs src-tauri/src/orchestrator/visual.rs` and adapt in place — same rule as Slice 18. Update `pub mod depth;` → `pub mod visual;` in `orchestrator/mod.rs`.
+
 **Tests:** fence detection unit; mock stream defers emit until complete block.
 
-**Commit:** `lpav slice 19: Visual thread with fenced output buffer`
+**Commit:** `lpav slice 19: Visual thread with fenced output buffer (renamed from depth.rs)`
 
 ---
 
@@ -429,19 +446,42 @@ cd .. && npm run test
 
 **Preferred:** clean break — update all TS listeners in this milestone.
 
-**Files:** `events.rs`, `events/index.ts`, `dto.rs`, persistence `ResponseType`.
+**Complete consumer list — every one of these references `directional`/`depth`/`clarifying` today and must be updated in this slice (verified by repo-wide grep, not just the obvious panel files):**
 
-**Commit:** `lpav slice 22: answer and visual event contracts`
+| File | What changes |
+|------|--------------|
+| `src-tauri/src/events.rs` | `emit_directional_token`→`emit_answer_token`, `emit_depth_token`→`emit_visual_token`; delete `emit_clarifying_question` |
+| `src-tauri/src/dto.rs` | payload types renamed to match |
+| `src-tauri/src/session/persistence.rs` | `ResponseType` enum: `Directional`→`Answer`, `Depth`→`Visual`, drop `Clarifying` (or map to `Answer` for historical rows — do not lose old data) |
+| `src/events/index.ts` | `onDirectionalToken`→`onAnswerToken`, `onDepthToken`→`onVisualToken`; delete `onClarifyingQuestion` |
+| `src/hooks/useOrchestratorStreams.ts` | central listener hub — update all five listener registrations |
+| `src/hooks/useDirectionalStream.ts` | **dead code, zero importers today — delete this file**, do not migrate it |
+| `src/hooks/useDepthStream.ts` | check for importers; if also dead, delete; if used, migrate like `useOrchestratorStreams.ts` |
+| `src/components/LiveSessionStatusBar.tsx` (+ `.test.tsx`) | `onDirectionalToken` subscription and `thread === "directional"` phase-detection check both need the new event/thread names |
+| `src/store/ui.ts` (+ `ui.test.ts`) | `appendDirectionalToken`/`appendDepthToken` → `appendAnswerToken`/`appendVisualToken`; `streamingBuffers.directional/.depth` → `.answer/.visual`; remove `clarifyingQuestions` state |
+| `src/screens/SessionReview.tsx` (+ `.test.tsx`) | `directionalCount`/`depthCount`/`clarifyingCount` stat chips — find and update the Rust-side DTO these are sourced from (likely built in `persistence.rs` alongside the `ResponseType` change above) to `answerCount`/`visualCount` |
+| `src/screens/Rehearsal.tsx` | full panel prop wiring (`directional={...}`, `depth={<DepthPanel/>}`, `clarifying={<ClarifyingPanel/>}`) and `streamingBuffers.directional/.depth` reads |
+| `src/screens/LiveOverlay.tsx` | same panel prop wiring as Rehearsal |
+| `src/components/OverlayLayout.tsx` (+ `.test.tsx`) | panel slot props — also touched by Slice 26, coordinate so this isn't done twice |
+
+**Explicitly NOT renamed (leave as-is, different concept):** `src/screens/HealthCheck.tsx`'s `recommendedLlmConfig.directional`/`.depth` fields describe hardware-tier model recommendations, not orchestrator threads. Leave alone unless it causes a naming collision.
+
+**Commit:** `lpav slice 22: answer and visual event contracts across all consumers`
 
 ---
 
 ### Slice 23: `lpav-s23-prewarm-confidence` (COMPLEX)
 
-**Goal:** Pre-warm cache keys → answer/visual; confidence scoring uses answer text; Q&A embeddings unchanged.
+**Goal:** Pre-warm cache keys → answer/visual; confidence scoring uses answer text; **Q&A embedding gate reworked** (this does NOT stay unchanged — see below).
 
-**Tests:** cache hit serves answer; visual pre-prepared flag.
+**Q&A embedding rework (real behavior change, not a rename):** `orchestrator/mod.rs` currently gates `ingest_qa` on `confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD` computed from the directional/depth response pair (`cached_directional`/`cached_depth`, `e.directional_response`/`e.depth_response` in the pre-warm cache hit path around the `is_plausible_cached_response` calls). Every one of these needs to read from the new `answer` response instead:
+- `OrchestrationContext.cached_directional`/`cached_depth` → `cached_answer` (drop the visual cache key from this gate — visual output isn't embedded for Q&A recall)
+- The pre-warm cache-hit branch that checks `is_plausible_cached_response(&e.directional_response)` / `&e.depth_response` → single check against `e.answer_response`
+- Confidence computation feeding the `QA_EMBED_CONFIDENCE_THRESHOLD` comparison must be based on the Answer thread's output, not a directional/depth blend
 
-**Commit:** `lpav slice 23: prewarm and confidence for answer visual model`
+**Tests:** cache hit serves answer; visual pre-prepared flag; `ingest_qa` fires on high-confidence Answer text (update existing test that asserted this against directional/depth).
+
+**Commit:** `lpav slice 23: prewarm, confidence, and Q&A embedding gate reworked for answer visual model`
 
 ---
 
@@ -459,10 +499,10 @@ cd .. && npm run test
 
 **Deps:** add `mermaid`, `shiki` (or lightweight highlighter).
 
-**Tier 1:** render ```mermaid blocks as SVG; code fences highlighted; raw fallback on parse fail.  
+**Tier 1:** render ```mermaid blocks as SVG; code fences highlighted; raw fallback on parse fail. **Must support all 10 diagram types the source plan requires, not just `flowchart`:** `flowchart`, `sequenceDiagram`, `classDiagram`, `erDiagram`, `stateDiagram`, `quadrantChart`, `timeline`, `mindmap`, `pie`, `xychart-beta`. Mermaid's own parser handles the type dispatch — verify with one test fixture per type, not just flowchart.  
 **Tier 2b stub:** disabled "Refine diagram" button with tooltip.
 
-**Tests:** Vitest — mermaid block renders svg container; invalid mermaid shows raw.
+**Tests:** Vitest — one render test per Mermaid diagram type listed above; invalid mermaid shows raw.
 
 **Commit:** `lpav slice 25: VisualPanel with Mermaid and code rendering`
 
@@ -490,11 +530,18 @@ cd .. && npm run test
 
 ### Slice 28: `lpav-s28-retire-clarifying` (MEDIUM)
 
-**Goal:** Remove ClarifyingPanel, clarifying orchestrator module usage, clarifying prompts from live path (keep files deprecated or delete if eval updated).
+**Goal:** Delete the clarifying thread end to end — this is the slice that actually removes it (Slice 18/21 only stopped spawning it).
 
-**Delete dead code paths; update mock/rehearsal if they referenced clarifying.
+**Delete:**
+- `src-tauri/src/orchestrator/clarifying.rs` (file removal, not just unused-import silence) and its `pub mod clarifying;` line in `orchestrator/mod.rs`
+- `src/panels/ClarifyingPanel.tsx` (+ any `.test.tsx`)
+- `emit_clarifying_question` from `events.rs` if not already removed in Slice 22 — cross-check, don't duplicate
+- `prompts/clarifying/` directory (gpt/claude/llama.txt) — confirm Slice 29's eval harness update no longer references it before deleting, to avoid a broken eval fixture
+- `clarifyingQuestions` state and `addClarifyingQuestion`/`clearClarifyingQuestions` actions from `store/ui.ts` if Slice 22 left them for this slice
 
-**Commit:** `lpav slice 28: retire clarifying panel and live path`
+**Verify no dangling references:** `rg -i clarifying src-tauri/src src/ prompts/` should return zero matches when this slice is done (aside from historical comments explaining the retirement, which are fine).
+
+**Commit:** `lpav slice 28: delete clarifying thread, panel, and prompts`
 
 ---
 
@@ -524,23 +571,45 @@ cd .. && npm run test
 
 ---
 
-### Slice 32: `lpav-s32-rules-compat-shim` (MEDIUM)
+### Slice 32: `lpav-s32-rules-update` (MEDIUM)
 
-**Goal:** Update `.cursor/rules/flint-core.mdc` Rule 4 comment in repo if tracked; thread_status names in logs use answer/visual.
+**Goal:** Update the tracked Cursor rule files — these ARE committed normally, unlike `docs/` (handled separately in Slice 33).
 
-**Do NOT commit docs/ — local note only if gitignored.
+**`.cursor/rules/flint-core.mdc`:**
+- Rule 4 ("Parallel Threads via tokio::spawn — Never Sequential") currently shows `run_directional`/`run_depth`/`run_clarifying` in its code example — update to `run_answer`/`run_visual`, two-thread join.
+- Folder structure listing under `orchestrator/` — update `directional.rs, depth.rs, clarifying.rs` → `answer.rs, visual.rs`.
+- `src/panels/` listing — `DirectionalPanel, DepthPanel, ClarifyingPanel` → `AnswerPanel, VisualPanel`.
 
-**Commit:** `lpav slice 32: thread naming and observability for answer visual`
+**`.cursor/rules/flint-performance.mdc`:**
+- NFR table: `Directional TTFT P95 | < 800ms | Fail PR > 900ms` → `Answer TTFT P95 | < 2s | Fail PR > 2.2s` (per the source plan's Answer thread target).
+- `Depth response fully streamed P95 | < 8s | Warn` → replace with a Visual thread target (Visual only fires conditionally, so define a P95 for "Visual fully streamed when triggered" — carry the existing 8s figure forward unless the eval harness in Slice 29 says otherwise).
+- `thread_type` field in the structured logging schema example: update `directional/depth/clarifying` → `answer/visual`.
+- CI performance gates table: `P95 TTFT directional` row → `P95 TTFT answer`.
+- User-facing performance alerts table: `TTFT > 1s directional` / `> 2s directional` rows → `answer`.
+
+Both files are tracked — normal commit, no special handling needed.
+
+**Commit:** `lpav slice 32: update flint-core and flint-performance rules for answer visual`
 
 ---
 
-### Slice 33: `lpav-s33-manual-qa-checklist` (SIMPLE)
+### Slice 33: `lpav-s33-manual-qa-checklist-and-local-docs` (SIMPLE)
 
 **Create:** `tests/manual-qa/live-preview-answer-visual-checklist.md`
 
 **Sections:** Live Preview flow, phone relabel, Ask now, Answer stream, Visual mermaid on system design question, manual visual trigger.
 
-**Commit:** `lpav slice 33: manual QA checklist for combined milestone`
+**Local docs pass — edit on disk, do NOT `git add docs/` (gitignored on purpose, per `flint-git-workflow.mdc`):**
+
+- `docs/flint_system_design_v3.md`:
+  - §4/§6/§7 architecture diagrams — replace directional/depth/clarifying thread references with answer/visual
+  - §21 — update NFR targets to match the `flint-performance.mdc` changes from Slice 32
+  - §25 — add `LIVE_PREVIEW` to the documented session state machine diagram/table (Slice 8's addition)
+- `docs/ROADMAP.md`:
+  - Mark the `phone-interview-and-live-preview` and `flint_domain-plugin_architecture` Workstream 2 items as shipped by this milestone's PR
+  - Note Excalidraw Tier 2a and deeper-AI-repass Tier 2b as still open (deferred per this milestone's scope)
+
+**Commit (tracked files only):** `lpav slice 33: manual QA checklist for combined milestone` — the docs/ edits above are never staged; verify with `git status` before committing that only the checklist file is added.
 
 ---
 
