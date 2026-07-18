@@ -30,6 +30,9 @@ impl DiarizerManager {
         false
     }
 
+    /// No-op on Windows — speakrs ONNX pipeline is unavailable in v1.
+    pub fn warm_pipeline(&mut self) {}
+
     pub fn ingest_pcm(&mut self, _samples: &[f32], _sample_rate: u32) {}
 
     pub fn note_transcript(&mut self, _speaker_id: u8, _text: &str) {}
