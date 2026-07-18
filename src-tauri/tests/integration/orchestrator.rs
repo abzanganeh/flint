@@ -1010,3 +1010,122 @@ async fn lifting_cost_suspension_re_enables_inference() {
     assert!(result.is_ok(), "post-lift dispatch must run: {result:?}");
     assert!(!tracker.is_suspended(), "still below the widened cap");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 21 — two-thread dispatch (Visual conditional on the classifier)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A system-design question must spawn the Visual thread alongside Answer —
+/// verified indirectly via the persisted Depth response row, since
+/// `persist_thread_response` is a no-op for empty text (the skip case).
+#[tokio::test]
+async fn dispatch_turn_spawns_visual_thread_for_system_design_question() {
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
+    let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+    let session_id = Uuid::new_v4();
+
+    let persistence = fresh_persistence();
+    persistence
+        .create_session_row(session_id, "Visual Spawn Test", "interview", "swe")
+        .expect("session row");
+    persistence
+        .write_state_transition(session_id, &flint_lib::session::state::SessionState::Live)
+        .expect("state -> LIVE");
+
+    let result = dispatch_turn(
+        session_id,
+        "Walk me through how you would design a rate limiter for a public API.".to_string(),
+        1,
+        Arc::new(test_digest()),
+        prompts_dir,
+        fast_failover("```mermaid\nflowchart TD\nA-->B\n```", "default"),
+        embedder,
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        Arc::clone(&persistence),
+        no_op_tracker(),
+        mock_app_handle(),
+    )
+    .await;
+    assert!(result.is_ok(), "dispatch_turn must succeed: {result:?}");
+
+    let recovery = persistence
+        .load_session_for_recovery(session_id)
+        .expect("recovery query")
+        .expect("session must be recoverable (state = LIVE)");
+    let has_depth_response = recovery
+        .responses
+        .iter()
+        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Depth);
+    assert!(
+        has_depth_response,
+        "system-design question must spawn Visual and persist a Depth response"
+    );
+}
+
+/// A purely behavioral question must NOT spawn the Visual thread — no Depth
+/// response should be persisted.
+#[tokio::test]
+async fn dispatch_turn_skips_visual_thread_for_behavioral_question() {
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
+    let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+    let session_id = Uuid::new_v4();
+
+    let persistence = fresh_persistence();
+    persistence
+        .create_session_row(session_id, "Visual Skip Test", "interview", "swe")
+        .expect("session row");
+    persistence
+        .write_state_transition(session_id, &flint_lib::session::state::SessionState::Live)
+        .expect("state -> LIVE");
+
+    let result = dispatch_turn(
+        session_id,
+        "Tell me about a time you disagreed with a senior engineer.".to_string(),
+        1,
+        Arc::new(test_digest()),
+        prompts_dir,
+        fast_failover("A confident behavioral answer.", "default"),
+        embedder,
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        Arc::clone(&persistence),
+        no_op_tracker(),
+        mock_app_handle(),
+    )
+    .await;
+    assert!(result.is_ok(), "dispatch_turn must succeed: {result:?}");
+
+    let recovery = persistence
+        .load_session_for_recovery(session_id)
+        .expect("recovery query")
+        .expect("session must be recoverable (state = LIVE)");
+    let has_depth_response = recovery
+        .responses
+        .iter()
+        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Depth);
+    assert!(
+        !has_depth_response,
+        "behavioral question must skip Visual — no Depth response should be persisted"
+    );
+}

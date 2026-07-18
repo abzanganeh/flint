@@ -179,24 +179,6 @@ fn collect_thread_text<R: Runtime>(
     }
 }
 
-fn collect_clarifying(
-    result: std::result::Result<Result<Option<String>>, tokio::task::JoinError>,
-    session_id: Uuid,
-) -> bool {
-    match result {
-        Ok(Ok(Some(_))) => true,
-        Ok(Ok(None)) => false,
-        Ok(Err(e)) => {
-            log_thread_failed(session_id, "clarifying", &e);
-            false
-        }
-        Err(join_err) => {
-            log_thread_panicked(session_id, "clarifying", &join_err);
-            false
-        }
-    }
-}
-
 fn emit_thread_error<R: Runtime>(app: &AppHandle<R>, thread: &str) {
     emit_thread_status(
         app,
@@ -354,6 +336,10 @@ pub async fn run_orchestrator<R: Runtime>(
             persistence: Arc::clone(&config.persistence),
             cost_tracker: Arc::clone(&config.cost_tracker),
             usage_category: "live_turn".to_string(),
+            force_visual: matches!(
+                question.source,
+                crate::audio::pipeline::DetectedQuestionSource::VisualManual
+            ),
         };
 
         let span = info_span!(
@@ -425,6 +411,12 @@ struct OrchestratorTurnConfig {
     cost_tracker: Arc<crate::cost::CostTracker>,
     /// Phase 5.5.7 — activity category for the usage widget.
     usage_category: String,
+    /// `lpav-s21-orchestrator-two-thread` — bypasses `visual_classifier`
+    /// when the question came from `trigger_visual_response`
+    /// (`DetectedQuestionSource::VisualManual`). Always `false` for
+    /// rehearsal turns dispatched via [`dispatch_turn`] — manual Visual
+    /// triggering is LIVE-only (slice 20).
+    force_visual: bool,
 }
 
 async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) -> Result<()> {
@@ -605,43 +597,61 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         turn_number: cfg.turn_number,
     };
 
-    // ── 5. Spawn three threads concurrently ───────────────────────────────
-    // RULE: no .await between spawns — all three are dispatched simultaneously.
+    // ── 5. Spawn Answer + Visual concurrently ─────────────────────────────
+    // RULE: no .await between spawns — both are dispatched simultaneously
+    // when Visual fires. The retired Clarifying thread is no longer spawned
+    // here (its job is absorbed into the Answer prompt, slice 18); the
+    // module itself is deleted end-to-end in slice 28.
     let dir_ctx = ctx.clone();
     let dep_ctx = ctx.clone();
-    let cla_ctx = ctx.clone();
 
     let dir_app = app.clone();
     let dep_app = app.clone();
-    let cla_app = app.clone();
 
     let dir_failover = Arc::clone(&cfg.failover);
     let dep_failover = Arc::clone(&cfg.failover);
-    let cla_failover = Arc::clone(&cfg.failover);
 
     let dir_prompts = cfg.prompts_dir.clone();
     let dep_prompts = cfg.prompts_dir.clone();
-    let cla_prompts = cfg.prompts_dir.clone();
 
     let dir_task = tokio::spawn(async move {
         answer::run_answer(dir_ctx, dir_failover, &dir_prompts, dir_app).await
     });
 
-    let dep_task = tokio::spawn(async move {
-        visual::run_visual(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+    // Visual only fires when the cheap classifier judges the question likely
+    // to benefit from a diagram, or the user forced it via
+    // `trigger_visual_response` (DetectedQuestionSource::VisualManual).
+    let needs_visual = cfg.force_visual || visual_classifier::needs_visual(&cfg.question_text);
+    let dep_task = needs_visual.then(|| {
+        tokio::spawn(async move {
+            visual::run_visual(dep_ctx, dep_failover, &dep_prompts, dep_app).await
+        })
     });
 
-    let cla_task = tokio::spawn(async move {
-        clarifying::run_clarifying(cla_ctx, cla_failover, &cla_prompts, cla_app).await
-    });
-
-    // Collect results — one thread failing never crashes the others.
-    let (dir_result, dep_result, _cla_result) = tokio::join!(dir_task, dep_task, cla_task);
+    // Collect results — one thread failing never crashes the other.
+    let (dir_result, dep_result) = match dep_task {
+        Some(dep_task) => {
+            let (d, v) = tokio::join!(dir_task, dep_task);
+            (d, Some(v))
+        }
+        None => (dir_task.await, None),
+    };
 
     let (directional_text, dir_err) =
         collect_thread_text(dir_result, cfg.session_id, "directional", &app);
-    let (depth_text, dep_err) = collect_thread_text(dep_result, cfg.session_id, "depth", &app);
-    let clarifying_emitted = collect_clarifying(_cla_result, cfg.session_id);
+    let (depth_text, dep_err) = match dep_result {
+        Some(result) => collect_thread_text(result, cfg.session_id, "depth", &app),
+        None => {
+            emit_thread_status(
+                &app,
+                ThreadStatusPayload {
+                    thread: "depth".to_string(),
+                    status: "idle".to_string(),
+                },
+            );
+            (String::new(), None)
+        }
+    };
 
     if directional_text.trim().is_empty() {
         let detail = dir_err
@@ -656,16 +666,11 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 
     // ── 6. Confidence scoring ─────────────────────────────────────────────
     // Confidence is computed once and reused by both the UI event (step 6)
-    // and the Q&A embedding gate (step 7b).
-    let (confidence_score, confidence_level) = if clarifying_emitted {
-        emit_confidence_score(
-            &app,
-            ConfidenceScorePayload {
-                level: ConfidenceLevel::Grey.as_str().to_string(),
-            },
-        );
-        (0.0_f32, ConfidenceLevel::Grey)
-    } else {
+    // and the Q&A embedding gate (step 7b). Previously short-circuited to a
+    // fixed Grey level when the (now-retired) Clarifying thread produced a
+    // question; the Answer thread's prompt now handles ambiguity inline
+    // (slice 18), so confidence is always computed from the answer text.
+    let (confidence_score, confidence_level) = {
         let rag_texts: Vec<String> = rag_chunks
             .iter()
             .take(3)
@@ -755,8 +760,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // the turn. Low-confidence answers (amber/grey/red) are skipped to
     // prevent contaminating future retrievals.
     {
-        let should_embed = !clarifying_emitted
-            && confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD
+        let should_embed = confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD
             && !directional_text.trim().is_empty();
 
         if should_embed {
@@ -916,6 +920,10 @@ pub async fn dispatch_turn<R: Runtime>(
             persistence,
             cost_tracker,
             usage_category: "rehearsal_turn".to_string(),
+            // Manual Visual triggering (`trigger_visual_response`) is
+            // LIVE-only (slice 20) — rehearsal turns always defer to the
+            // classifier.
+            force_visual: false,
         },
         app,
     )
