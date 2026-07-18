@@ -1,12 +1,12 @@
 {
-  "current_milestone": "qa-fix-summary-transcript",
+  "current_milestone": "live-preview-answer-visual",
   "milestone_status": "in_progress",
   "milestone_branch": {
-    "flint": "fix/qa-summary-transcript-ux"
+    "flint": "feature/live-preview-answer-visual"
   },
-  "current_slice": 5,
-  "completed_slices": [0, 1, 2, 3, 4],
-  "current_task_id": "qa-s5-review-pr-ci-merge",
+  "current_slice": 0,
+  "completed_slices": [],
+  "current_task_id": "lpav-s0-clean-slate",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -15,9 +15,9 @@
   "open_prs": {},
   "manual_gate_backlog": [
     {
-      "gate": "Post-summary + Q-merge device retest",
-      "doc": "tests/manual-qa/stealth-audio-validation-runbook.md",
-      "notes": "After PR merge: End Session shows summary; Q matches full utterance; Copy on live"
+      "gate": "Live Preview + Visual device retest",
+      "doc": "tests/manual-qa/live-preview-answer-visual-checklist.md",
+      "notes": "After merge: Live Preview, phone relabel, Ask now, Mermaid in Visual panel"
     }
   ],
   "agent_ladder": {
@@ -25,5 +25,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slices 1-4 implemented on fix/qa-summary-transcript-ux; slice 5 PR/CI pending."
+  "notes": "Combined Part A + Part B. One PR. Started from main post PR #37."
 }

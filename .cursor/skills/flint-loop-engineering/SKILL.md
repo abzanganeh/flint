@@ -20,7 +20,7 @@ Autonomous implementation loop for Flint milestones. Work continuously until the
 | `/flint-loop stop` | Set `loop_stopped: true`, report status |
 | `/flint-loop status` | Print milestone, branch, current slice, attempts |
 
-`<milestone>` examples: `m10-live-session-reliability`, `pref-mock`, `M7-M2`, `v1-closure-phase2`, `post-v1-ship-prep`, `qa-fix-summary-transcript`
+`<milestone>` examples: `m10-live-session-reliability`, `pref-mock`, `M7-M2`, `v1-closure-phase2`, `post-v1-ship-prep`, `qa-fix-summary-transcript`, `live-preview-answer-visual`
 
 ## Milestone workflow (single branch)
 
