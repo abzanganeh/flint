@@ -469,6 +469,8 @@ pub struct MicCalibrationStatusDto {
     pub wer_mic: Option<f32>,
     pub forced: bool,
     pub calibrated_at: Option<i64>,
+    pub system_clip_text: String,
+    pub mic_paragraph_text: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

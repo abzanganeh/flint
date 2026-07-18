@@ -932,6 +932,8 @@ export interface MicCalibrationStatusDto {
   werMic: number | null;
   forced: boolean;
   calibratedAt: number | null;
+  systemClipText: string;
+  micParagraphText: string;
 }
 
 export interface CalibrationResultDto {

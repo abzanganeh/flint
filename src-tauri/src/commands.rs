@@ -3147,6 +3147,14 @@ pub async fn start_session(
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+    if is_phone_call_mode && crate::audio::diarizer::models_downloaded() {
+        let warm = Arc::clone(&diarizer);
+        tokio::task::spawn_blocking(move || {
+            if let Ok(mut guard) = warm.lock() {
+                guard.warm_pipeline();
+            }
+        });
+    }
     let speaker_classifier = build_speaker_classifier(
         &app,
         Arc::clone(&state.persistence),
@@ -3358,6 +3366,14 @@ pub async fn start_live_preview(
 
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+    if is_phone_call_mode && crate::audio::diarizer::models_downloaded() {
+        let warm = Arc::clone(&diarizer);
+        tokio::task::spawn_blocking(move || {
+            if let Ok(mut guard) = warm.lock() {
+                guard.warm_pipeline();
+            }
+        });
+    }
     let speaker_classifier = build_speaker_classifier(
         &app,
         Arc::clone(&state.persistence),
@@ -6125,6 +6141,8 @@ pub async fn get_mic_calibration_status(
         wer_mic,
         forced,
         calibrated_at,
+        system_clip_text: load_system_clip_text(),
+        mic_paragraph_text: load_mic_paragraph_text(),
     })
 }
 

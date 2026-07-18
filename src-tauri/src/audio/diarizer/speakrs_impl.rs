@@ -1,7 +1,8 @@
 //! Unix diarization backend — local ONNX via `speakrs`.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use speakrs::{ExecutionMode, ModelBundle, ModelManager, OwnedDiarizationPipeline};
 use tracing::{info, warn};
@@ -10,14 +11,12 @@ use super::types::{
     parse_speaker_id, DiarizedSegment, DiarizerStatus, SpeakerRole, DIARIZER_BATCH_INTERVAL,
 };
 
-enum DiarizerPipeline {
-    Missing,
-    Ready(Box<OwnedDiarizationPipeline>),
-    Failed,
-}
+const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(900);
 
 pub struct DiarizerManager {
-    pipeline: DiarizerPipeline,
+    models_dir: Option<PathBuf>,
+    pipeline: Option<OwnedDiarizationPipeline>,
+    load_failed: bool,
     status: DiarizerStatus,
     pcm_buffer: Vec<f32>,
     window_secs: f64,
@@ -34,26 +33,16 @@ impl Default for DiarizerManager {
 
 impl DiarizerManager {
     pub fn new() -> Self {
-        let pipeline = match resolve_models_dir() {
-            Some(dir) => match OwnedDiarizationPipeline::from_dir(&dir, ExecutionMode::Cpu) {
-                Ok(p) => {
-                    info!("speakrs diarization pipeline loaded from {}", dir.display());
-                    DiarizerPipeline::Ready(Box::new(p))
-                }
-                Err(e) => {
-                    warn!(error = %e, "speakrs pipeline init failed");
-                    DiarizerPipeline::Failed
-                }
-            },
-            None => DiarizerPipeline::Missing,
-        };
-        let status = match &pipeline {
-            DiarizerPipeline::Missing => DiarizerStatus::ModelsMissing,
-            DiarizerPipeline::Failed => DiarizerStatus::Failed,
-            DiarizerPipeline::Ready(_) => DiarizerStatus::Unavailable,
+        let models_dir = resolve_models_dir();
+        let status = if models_dir.is_some() {
+            DiarizerStatus::Unavailable
+        } else {
+            DiarizerStatus::ModelsMissing
         };
         Self {
-            pipeline,
+            models_dir,
+            pipeline: None,
+            load_failed: false,
             status,
             pcm_buffer: Vec::new(),
             window_secs: 3.0,
@@ -63,19 +52,53 @@ impl DiarizerManager {
         }
     }
 
+    /// Load the ONNX pipeline off the hot path (Settings download / session pre-warm).
+    pub fn warm_pipeline(&mut self) {
+        let _ = self.ensure_pipeline_loaded();
+    }
+
+    fn ensure_pipeline_loaded(&mut self) -> bool {
+        if self.pipeline.is_some() {
+            return true;
+        }
+        if self.load_failed {
+            return false;
+        }
+        let Some(dir) = self.models_dir.clone() else {
+            return false;
+        };
+        match OwnedDiarizationPipeline::from_dir(&dir, ExecutionMode::Cpu) {
+            Ok(p) => {
+                info!("speakrs diarization pipeline loaded from {}", dir.display());
+                self.pipeline = Some(p);
+                true
+            }
+            Err(e) => {
+                warn!(error = %e, "speakrs pipeline init failed");
+                self.load_failed = true;
+                self.status = DiarizerStatus::Failed;
+                self.pipeline = None;
+                false
+            }
+        }
+    }
+
     pub fn status(&self) -> &DiarizerStatus {
         &self.status
     }
 
     pub fn models_ready(&self) -> bool {
-        matches!(self.pipeline, DiarizerPipeline::Ready(_))
+        self.pipeline.is_some()
     }
 
     pub fn ingest_pcm(&mut self, samples: &[f32], sample_rate: u32) {
         if sample_rate != 16_000 {
             return;
         }
-        let DiarizerPipeline::Ready(pipeline) = &mut self.pipeline else {
+        if !self.ensure_pipeline_loaded() {
+            return;
+        }
+        let Some(pipeline) = self.pipeline.as_mut() else {
             return;
         };
         if matches!(
@@ -115,7 +138,8 @@ impl DiarizerManager {
             Err(e) => {
                 warn!(error = %e, "speakrs diarization batch failed");
                 self.status = DiarizerStatus::Failed;
-                self.pipeline = DiarizerPipeline::Failed;
+                self.load_failed = true;
+                self.pipeline = None;
             }
         }
     }
@@ -256,6 +280,22 @@ pub fn resolve_models_dir() -> Option<PathBuf> {
 }
 
 pub fn download_models() -> Result<PathBuf, String> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(download_models_inner());
+    });
+    match rx.recv_timeout(MODEL_DOWNLOAD_TIMEOUT) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(
+            "Model download timed out after 15 minutes. Check your network and retry.".into(),
+        ),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("Model download stopped unexpectedly. Retry from Settings.".into())
+        }
+    }
+}
+
+fn download_models_inner() -> Result<PathBuf, String> {
     let base = speakrs_models_dir();
     std::fs::create_dir_all(&base).map_err(|e| format!("create models dir: {e}"))?;
     let cache = base.join("hf");
@@ -308,7 +348,7 @@ mod tests {
     #[test]
     fn models_missing_returns_ctrl_q_hint() {
         let mut mgr = DiarizerManager::new();
-        if matches!(mgr.pipeline, DiarizerPipeline::Missing) {
+        if matches!(mgr.status(), DiarizerStatus::ModelsMissing) {
             assert!(mgr.assign_interviewer(0).is_err());
         }
     }
@@ -339,5 +379,14 @@ mod tests {
     fn parse_speaker_label_numeric_suffix() {
         assert_eq!(parse_speaker_id("SPEAKER_00"), 0);
         assert_eq!(parse_speaker_id("SPEAKER_01"), 1);
+    }
+
+    #[test]
+    fn new_does_not_eagerly_load_pipeline_when_models_present() {
+        if !models_downloaded() {
+            return;
+        }
+        let mgr = DiarizerManager::new();
+        assert!(!mgr.models_ready());
     }
 }

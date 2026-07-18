@@ -3,6 +3,9 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 import MicCalibration from "./MicCalibration";
 
+const GENERIC_MIC_PARAGRAPH =
+  "In my last role, I led a cross-functional team to ship a customer-facing feature";
+
 vi.mock("../commands", () => ({
   getMicCalibrationStatus: vi.fn(),
   clearMicCalibration: vi.fn(),
@@ -25,6 +28,8 @@ describe("MicCalibration", () => {
       werMic: 0.1,
       forced: false,
       calibratedAt: 1,
+      systemClipText: "Tell me about a recent project.",
+      micParagraphText: GENERIC_MIC_PARAGRAPH,
     });
 
     render(<MicCalibration onComplete={vi.fn()} />);
@@ -42,6 +47,8 @@ describe("MicCalibration", () => {
       werMic: null,
       forced: false,
       calibratedAt: null,
+      systemClipText: "Tell me about a recent project.",
+      micParagraphText: GENERIC_MIC_PARAGRAPH,
     });
 
     render(<MicCalibration onComplete={vi.fn()} />);
@@ -60,6 +67,8 @@ describe("MicCalibration", () => {
       werMic: 0.1,
       forced: false,
       calibratedAt: 1,
+      systemClipText: "Tell me about a recent project.",
+      micParagraphText: GENERIC_MIC_PARAGRAPH,
     });
 
     render(<MicCalibration onComplete={onComplete} />);
@@ -81,6 +90,8 @@ describe("MicCalibration", () => {
       werMic: null,
       forced: false,
       calibratedAt: null,
+      systemClipText: "Tell me about a recent project.",
+      micParagraphText: GENERIC_MIC_PARAGRAPH,
     });
     vi.mocked(runSystemAudioCalibration).mockResolvedValue({
       wer: 0.1,
@@ -123,5 +134,28 @@ describe("MicCalibration", () => {
 
     fireEvent.click(screen.getByTestId("mic-calibration-run-mic"));
     await waitFor(() => expect(runMicCalibration).toHaveBeenCalledTimes(2));
+  });
+
+  it("shows mic paragraph text from backend, not stale hardcoded copy", async () => {
+    const { getMicCalibrationStatus } = await import("../commands");
+    vi.mocked(getMicCalibrationStatus).mockResolvedValue({
+      passedOnDevice: false,
+      deviceFingerprint: "abc",
+      werSystem: null,
+      werMic: null,
+      forced: false,
+      calibratedAt: null,
+      systemClipText: "Tell me about a recent project.",
+      micParagraphText: GENERIC_MIC_PARAGRAPH,
+    });
+
+    render(<MicCalibration onComplete={vi.fn()} />);
+    fireEvent.click(await screen.findByTestId("mic-calibration-run-system"));
+    await waitFor(() =>
+      expect(screen.getByTestId("mic-calibration-run-mic")).toBeTruthy(),
+    );
+
+    expect(screen.getByText(GENERIC_MIC_PARAGRAPH)).toBeTruthy();
+    expect(screen.queryByText(/SecureAuth/)).toBeNull();
   });
 });

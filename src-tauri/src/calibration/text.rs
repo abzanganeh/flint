@@ -1,18 +1,17 @@
 //! Static calibration reference texts bundled with the app.
 
 pub const SYSTEM_CLIP_TEXT: &str =
-    "Tell me about your experience at SecureAuth building adaptive authentication and \
-     ML-based risk engines. We use OAuth, OIDC, SAML, MFA, and IAM across multi-tenant \
-     SaaS platforms. Describe your work with Kerberos, LDAP, and enterprise identity \
-     federation for LLM and API security.";
+    "Tell me about a recent project where you worked with a small team to deliver \
+     something on a tight schedule. Walk me through how you gathered requirements, \
+     planned the work, communicated progress, and handled unexpected problems along \
+     the way.";
 
 pub const MIC_PARAGRAPH_TEXT: &str =
-    "At SecureAuth, I led the design of an adaptive authentication system using ML-based \
-     risk scoring. The platform supported OAuth 2.0 and OIDC federation across multi-tenant \
-     SaaS customers. I integrated step-up MFA triggers with identity-aware policy \
-     enforcement — including Kerberos and LDAP for enterprise directories. My most recent \
-     work at IdMe24 focused on agentic AI identity: autonomous agents requiring \
-     just-in-time credential provisioning with zero-standing privilege.";
+    "In my last role, I led a cross-functional team to ship a customer-facing feature \
+     under a six-week deadline. We started by writing clear requirements and breaking \
+     the work into weekly milestones. When we hit a blocker in testing, I coordinated \
+     with QA and design to adjust scope without missing the launch date. The feature \
+     went live on schedule and improved user retention.";
 
 pub const SYSTEM_WER_PASS_THRESHOLD: f32 = 0.20;
 pub const MIC_WER_PASS_THRESHOLD: f32 = 0.25;
