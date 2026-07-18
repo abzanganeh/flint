@@ -27,7 +27,6 @@ import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import { useTokenUsage } from "../hooks/useTokenUsage";
 import AnswerPanel from "../panels/AnswerPanel";
 import VisualPanel from "../panels/VisualPanel";
-import ClarifyingPanel from "../panels/ClarifyingPanel";
 import ContextPanel from "../panels/ContextPanel";
 import TranscriptPanel from "../panels/TranscriptPanel";
 import { useUIStore } from "../store/ui";
@@ -437,9 +436,8 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
       <div style={{ flex: 1, overflow: "hidden" }}>
         <OverlayLayout
           transcript={<TranscriptPanel sessionId={sessionId} />}
-          directional={<AnswerPanel sessionId={sessionId} />}
-          depth={<VisualPanel />}
-          clarifying={<ClarifyingPanel />}
+          answer={<AnswerPanel sessionId={sessionId} />}
+          visual={<VisualPanel />}
           context={<ContextPanel sessionId={sessionId} />}
         />
       </div>

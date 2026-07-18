@@ -7,9 +7,8 @@ import { useUIStore } from "../store/ui";
 
 const PANEL_LABELS: Record<PanelId, string> = {
   transcript: "Transcript",
-  directional: "Directional",
-  depth: "Depth",
-  clarifying: "Clarifying",
+  answer: "Answer",
+  visual: "Visual",
   context: "Context",
 };
 
@@ -195,13 +194,12 @@ interface StackPanelSlotProps {
   children: ReactNode;
 }
 
-// Default heights per spec (FR-4.6): Transcript 20%, Directional 30%, Depth 30%, Clarifying 10%, Context 10%.
+// Default heights per spec (FR-4.6): Transcript 20%, Answer 30%, Visual 30%, Context 20%.
 const STACK_DEFAULT_SIZES: Record<PanelId, number> = {
   transcript: 1,
-  directional: 1.5,
-  depth: 1.5,
-  clarifying: 0.5,
-  context: 0.5,
+  answer: 1.5,
+  visual: 1.5,
+  context: 1,
 };
 
 const StackPanelSlot = ({ id, children }: StackPanelSlotProps) => {
@@ -270,25 +268,22 @@ const StackPanelSlot = ({ id, children }: StackPanelSlotProps) => {
 
 interface OverlayLayoutProps {
   transcript: ReactNode;
-  directional: ReactNode;
-  depth: ReactNode;
-  clarifying: ReactNode;
+  answer: ReactNode;
+  visual: ReactNode;
   context: ReactNode;
 }
 
 const PANELS: Array<{ id: PanelId; label: string }> = [
   { id: "transcript", label: "Transcript" },
-  { id: "directional", label: "Directional" },
-  { id: "depth", label: "Depth" },
-  { id: "clarifying", label: "Clarifying" },
+  { id: "answer", label: "Answer" },
+  { id: "visual", label: "Visual" },
   { id: "context", label: "Context" },
 ];
 
 const OverlayLayout = ({
   transcript,
-  directional,
-  depth,
-  clarifying,
+  answer,
+  visual,
   context,
 }: OverlayLayoutProps) => {
   const { overlayMinimised, panicHideActive, layoutMode, setLayoutMode } = useUIStore();
@@ -314,9 +309,8 @@ const OverlayLayout = ({
 
   const panelContent: Record<PanelId, ReactNode> = {
     transcript,
-    directional,
-    depth,
-    clarifying,
+    answer,
+    visual,
     context,
   };
 
@@ -397,13 +391,11 @@ const OverlayLayout = ({
         // ── Horizontal grid ─────────────────────────────────────────────────
         <div style={{ display: "flex", flexDirection: "row", height: "100%", overflow: "hidden" }}>
           <PanelSlot id="transcript">{transcript}</PanelSlot>
-          <ResizeHandle leftId="transcript" rightId="directional" />
-          <PanelSlot id="directional">{directional}</PanelSlot>
-          <ResizeHandle leftId="directional" rightId="depth" />
-          <PanelSlot id="depth">{depth}</PanelSlot>
-          <ResizeHandle leftId="depth" rightId="clarifying" />
-          <PanelSlot id="clarifying">{clarifying}</PanelSlot>
-          <ResizeHandle leftId="clarifying" rightId="context" />
+          <ResizeHandle leftId="transcript" rightId="answer" />
+          <PanelSlot id="answer">{answer}</PanelSlot>
+          <ResizeHandle leftId="answer" rightId="visual" />
+          <PanelSlot id="visual">{visual}</PanelSlot>
+          <ResizeHandle leftId="visual" rightId="context" />
           <PanelSlot id="context">{context}</PanelSlot>
         </div>
       )}

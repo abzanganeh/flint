@@ -15,12 +15,7 @@ export enum SessionState {
   RECOVERING = "RECOVERING",
 }
 
-export type PanelId =
-  | "transcript"
-  | "directional"
-  | "depth"
-  | "clarifying"
-  | "context";
+export type PanelId = "transcript" | "answer" | "visual" | "context";
 
 export type Speaker = "System" | "Microphone";
 

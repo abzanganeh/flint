@@ -53,34 +53,31 @@ interface UIStore extends UIState {
   setAnswerNowMode: (answerNowMode: boolean) => void;
 }
 
-// Default panel sizes per layout mode.
-// Stack mode follows FR-4.6: Transcript 20%, Directional 30%, Depth 30%,
-// Clarifying 10%, Context 10% (weights sum to 5).
+// Default panel sizes per layout mode. Four-panel layout (FR-4.6, post
+// Answer/Visual collapse): Transcript 20%, Answer 30%, Visual 30%,
+// Context 20% (weights sum to 5).
 const DEFAULT_STACK_SIZES: PanelLayout["sizes"] = {
   transcript: 1.0,
-  directional: 1.5,
-  depth: 1.5,
-  clarifying: 0.5,
-  context: 0.5,
+  answer: 1.5,
+  visual: 1.5,
+  context: 1.0,
 };
 
-// Grid mode (horizontal): Directional dominant, Transcript and Depth equal,
-// Clarifying + Context narrower side panels.
+// Grid mode (horizontal): Answer dominant, Transcript and Visual equal,
+// Context narrower side panel.
 const DEFAULT_GRID_SIZES: PanelLayout["sizes"] = {
   transcript: 1,
-  directional: 1.5,
-  depth: 1,
-  clarifying: 0.75,
-  context: 0.75,
+  answer: 1.5,
+  visual: 1,
+  context: 1,
 };
 
 const defaultPanelLayout: PanelLayout = {
   sizes: DEFAULT_STACK_SIZES,
   collapsed: {
     transcript: false,
-    directional: false,
-    depth: false,
-    clarifying: false,
+    answer: false,
+    visual: false,
     context: false,
   },
 };

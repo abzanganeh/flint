@@ -30,14 +30,13 @@ import { useTokenUsage } from "../hooks/useTokenUsage";
 import { needsUserContext } from "../lib/contextQuality";
 import AnswerPanel from "../panels/AnswerPanel";
 import VisualPanel from "../panels/VisualPanel";
-import ClarifyingPanel from "../panels/ClarifyingPanel";
 import ContextPanel from "../panels/ContextPanel";
 import TranscriptPanel from "../panels/TranscriptPanel";
 import { useUIStore } from "../store/ui";
 
 export interface RehearsalProps {
   sessionId: string;
-  /** Clear directional/depth/clarifying panels (e.g. after re-ingest). */
+  /** Clear answer/visual panels (e.g. after re-ingest). */
   resetPanelsOnEntry?: boolean;
   onResetPanelsHandled?: () => void;
   onComplete: () => void;
@@ -511,11 +510,10 @@ const Rehearsal = ({
           <div style={{ flex: 1, overflow: "hidden" }}>
             <OverlayLayout
               transcript={<TranscriptPanel sessionId={sessionId} />}
-              directional={
+              answer={
                 <AnswerPanel sessionId={sessionId} isGenerating={asking} />
               }
-              depth={<VisualPanel isGenerating={asking} />}
-              clarifying={<ClarifyingPanel />}
+              visual={<VisualPanel isGenerating={asking} />}
               context={<ContextPanel sessionId={sessionId} />}
             />
           </div>

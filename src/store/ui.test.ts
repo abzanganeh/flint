@@ -5,9 +5,9 @@ import { useUIStore } from "../store/ui";
 describe("UI store panel layout", () => {
   it("toggles panel collapse", () => {
     const { togglePanelCollapsed, panelLayout } = useUIStore.getState();
-    expect(panelLayout.collapsed.directional).toBe(false);
-    togglePanelCollapsed("directional");
-    expect(useUIStore.getState().panelLayout.collapsed.directional).toBe(true);
+    expect(panelLayout.collapsed.answer).toBe(false);
+    togglePanelCollapsed("answer");
+    expect(useUIStore.getState().panelLayout.collapsed.answer).toBe(true);
   });
 
   it("enforces minimum panel size on resize", () => {
