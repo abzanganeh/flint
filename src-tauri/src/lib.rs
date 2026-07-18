@@ -301,6 +301,7 @@ pub fn run() {
             commands::stop_mock,
             commands::read_mock_audio_data_url,
             commands::get_mock_turns,
+            commands::trigger_mock_visual_response,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

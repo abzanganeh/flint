@@ -227,6 +227,12 @@ export const triggerVisualResponse = (
 ): Promise<void> =>
   invoke<void>("trigger_visual_response", { question, sessionId });
 
+export const triggerMockVisualResponse = (
+  sessionId: string,
+  question: string,
+): Promise<void> =>
+  invoke<void>("trigger_mock_visual_response", { sessionId, question });
+
 export const copyTextToClipboard = (text: string): Promise<void> =>
   invoke<void>("copy_text_to_clipboard", { text });
 
