@@ -49,7 +49,8 @@ use crate::events::{
 };
 
 use crate::audio::audit::{AudioAuditCounters, SuppressionReason};
-use crate::audio::diarizer::DiarizerManager;
+use crate::audio::diarizer::{DiarizerManager, SpeakerRole};
+use crate::audio::speaker_heuristic::{rms_dbfs, PhoneHeuristicState};
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
@@ -64,8 +65,9 @@ use crate::transcription::speaker_suspicion::{self, SuspicionReason};
 /// command upgrade this to `"heuristic"` or `"user"` respectively.
 const LABEL_SOURCE_CHANNEL: &str = "channel";
 
-/// `label_source` applied when the suspicion detector auto-corrects a chunk's
-/// speaker because its content contradicts the capture channel (e.g. an
+/// `label_source` applied when a heuristic (text-shape suspicion, or the
+/// phone-mode RMS+pause heuristic) auto-corrects a chunk's speaker because
+/// its content or timing contradicts the capture channel (e.g. an
 /// interviewer question that landed on the mic, or the user's first-person
 /// speech that bled into the system loopback).
 const LABEL_SOURCE_HEURISTIC: &str = "heuristic";
@@ -359,6 +361,7 @@ pub async fn run_audio_pipeline(
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
     let dedup = SyncMutex::new(CrossChannelDedup::default());
+    let phone_heuristic = SyncMutex::new(PhoneHeuristicState::new());
     let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
 
     loop {
@@ -391,6 +394,7 @@ pub async fn run_audio_pipeline(
             &question_tx,
             &persistence,
             &dedup,
+            &phone_heuristic,
             &mic_quality,
             &audit,
             echo_suppression_enabled,
@@ -424,6 +428,7 @@ async fn process_frame(
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
     dedup: &SyncMutex<CrossChannelDedup>,
+    phone_heuristic: &SyncMutex<PhoneHeuristicState>,
     mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
     audit: &Arc<AudioAuditCounters>,
     echo_suppression_enabled: bool,
@@ -485,6 +490,12 @@ async fn process_frame(
 
     // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
     let chunk_duration_ms = chunk.duration_ms;
+    // Sampled here (before Whisper) rather than after transcription — the
+    // phone-mode pause estimate below must not be inflated by inference
+    // latency. RMS is computed from the raw utterance buffer since `chunk`
+    // is moved into the blocking closure below and unavailable afterward.
+    let chunk_ready_at = Instant::now();
+    let chunk_rms_dbfs = rms_dbfs(&chunk.samples);
     let rolling_context = {
         let guard = rolling_contexts
             .lock()
@@ -618,6 +629,21 @@ async fn process_frame(
                 "System"
             } else {
                 "Microphone"
+            };
+            label_source = LABEL_SOURCE_HEURISTIC;
+        } else if phone_mode_manual_only {
+            // Phone mode has no channel truth at all (both speakers arrive
+            // on the same mixed audio) — when the text-shape check above
+            // stays silent, fall back to the RMS+pause turn-taking
+            // heuristic, the only signal available (Slice 2).
+            let role = phone_heuristic
+                .lock()
+                .map(|mut guard| guard.observe(chunk_rms_dbfs, chunk_duration_ms, chunk_ready_at))
+                .unwrap_or(SpeakerRole::Unknown);
+            speaker = match role {
+                SpeakerRole::Interviewer => "System",
+                SpeakerRole::User => "Microphone",
+                SpeakerRole::Unknown => channel_speaker,
             };
             label_source = LABEL_SOURCE_HEURISTIC;
         }
