@@ -2,9 +2,9 @@
   "current_milestone": "visual-robustness-and-triggers",
   "milestone_status": "in_progress",
   "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
-  "current_slice": 11,
-  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-  "current_task_id": "vrt-s11-consolidated-review",
+  "current_slice": 13,
+  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+  "current_task_id": "vrt-s13-full-gates-rerun",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -23,5 +23,5 @@
     "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 10 done: Part B gates green + manual QA checklist. Starting slice 11 consolidated review."
+  "notes": "Slice 11 review: no blocking findings. Slice 12 skipped. Running slice 13 full gates then PR."
 }
