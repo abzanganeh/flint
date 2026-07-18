@@ -19,6 +19,7 @@ import {
   setHeadphoneGateOverride,
   startSession,
   stopSession,
+  triggerVisualResponse,
   type DiarizationStatusDto,
   type HeadphoneGateStatusDto,
 } from "../commands";
@@ -458,7 +459,14 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
         <OverlayLayout
           transcript={<TranscriptPanel sessionId={sessionId} />}
           answer={<AnswerPanel sessionId={sessionId} />}
-          visual={<VisualPanel sessionId={sessionId} />}
+          visual={
+            <VisualPanel
+              sessionId={sessionId}
+              onGenerateDiagram={(question) =>
+                triggerVisualResponse(question, sessionId)
+              }
+            />
+          }
           context={<ContextPanel sessionId={sessionId} />}
         />
       </div>

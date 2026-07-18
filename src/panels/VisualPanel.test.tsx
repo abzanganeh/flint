@@ -19,11 +19,8 @@ vi.mock("shiki", () => ({
   codeToHtml: (...args: unknown[]) => codeToHtml(...args),
 }));
 
-const triggerVisualResponse = vi.fn().mockResolvedValue(undefined);
-
 vi.mock("../commands", () => ({
   copyTextToClipboard: vi.fn().mockResolvedValue(undefined),
-  triggerVisualResponse: (...args: unknown[]) => triggerVisualResponse(...args),
 }));
 
 const setVisualBuffer = (text: string) => {
@@ -36,8 +33,6 @@ describe("VisualPanel", () => {
   beforeEach(() => {
     mermaidRender.mockReset();
     codeToHtml.mockReset();
-    triggerVisualResponse.mockClear();
-    triggerVisualResponse.mockResolvedValue(undefined);
     useUIStore.setState({
       streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
@@ -120,10 +115,10 @@ describe("VisualPanel", () => {
     expect(screen.getByTestId("visual-raw-fallback").textContent).toContain(
       "flowchart TD",
     );
-    expect(triggerVisualResponse).not.toHaveBeenCalled();
   });
 
   it("auto-retries once on mermaid render failure then shows the diagram", async () => {
+    const onGenerateDiagram = vi.fn().mockResolvedValue(undefined);
     mermaidRender
       .mockRejectedValueOnce(new Error("parse error"))
       .mockResolvedValue({ svg: "<svg>retried</svg>" });
@@ -132,14 +127,15 @@ describe("VisualPanel", () => {
       currentQuestion: "Design a notification microservice.",
     });
     setVisualBuffer("```mermaid\nflowchart TD\nA--\n```");
-    render(<VisualPanel sessionId="sess-1" />);
+    render(
+      <VisualPanel sessionId="sess-1" onGenerateDiagram={onGenerateDiagram} />,
+    );
 
     await waitFor(() => {
-      expect(triggerVisualResponse).toHaveBeenCalledTimes(1);
+      expect(onGenerateDiagram).toHaveBeenCalledTimes(1);
     });
-    expect(triggerVisualResponse).toHaveBeenCalledWith(
+    expect(onGenerateDiagram).toHaveBeenCalledWith(
       "Design a notification microservice.",
-      "sess-1",
     );
 
     setVisualBuffer("```mermaid\nflowchart TD\nA-->B\n```");
@@ -151,16 +147,19 @@ describe("VisualPanel", () => {
   });
 
   it("falls back to raw text without looping when mermaid fails twice", async () => {
+    const onGenerateDiagram = vi.fn().mockResolvedValue(undefined);
     mermaidRender.mockRejectedValue(new Error("parse error"));
 
     useUIStore.setState({
       currentQuestion: "Design a notification microservice.",
     });
     setVisualBuffer("```mermaid\nflowchart TD\nA--\n```");
-    render(<VisualPanel sessionId="sess-1" />);
+    render(
+      <VisualPanel sessionId="sess-1" onGenerateDiagram={onGenerateDiagram} />,
+    );
 
     await waitFor(() => {
-      expect(triggerVisualResponse).toHaveBeenCalledTimes(1);
+      expect(onGenerateDiagram).toHaveBeenCalledTimes(1);
     });
 
     setVisualBuffer("```mermaid\nflowchart TD\nB--\n```");
@@ -168,7 +167,7 @@ describe("VisualPanel", () => {
     await waitFor(() => {
       expect(screen.getByTestId("visual-raw-fallback")).toBeTruthy();
     });
-    expect(triggerVisualResponse).toHaveBeenCalledTimes(1);
+    expect(onGenerateDiagram).toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("visual-raw-fallback").textContent).toContain(
       "flowchart TD",
     );
@@ -210,10 +209,20 @@ describe("VisualPanel", () => {
   });
 
   describe("manual visual trigger", () => {
-    it("hides the Generate diagram button when no sessionId is provided (e.g. Rehearsal)", () => {
+    it("hides the Generate diagram button when no sessionId is provided", () => {
       useUIStore.setState({ currentQuestion: "Design a URL shortener." });
 
-      render(<VisualPanel />);
+      render(
+        <VisualPanel onGenerateDiagram={vi.fn().mockResolvedValue(undefined)} />,
+      );
+
+      expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
+    });
+
+    it("hides the Generate diagram button when onGenerateDiagram is omitted", () => {
+      useUIStore.setState({ currentQuestion: "Design a URL shortener." });
+
+      render(<VisualPanel sessionId="sess-1" />);
 
       expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
     });
@@ -221,7 +230,12 @@ describe("VisualPanel", () => {
     it("hides the Generate diagram button when there is no current question", () => {
       useUIStore.setState({ currentQuestion: "" });
 
-      render(<VisualPanel sessionId="sess-1" />);
+      render(
+        <VisualPanel
+          sessionId="sess-1"
+          onGenerateDiagram={vi.fn().mockResolvedValue(undefined)}
+        />,
+      );
 
       expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
     });
@@ -229,21 +243,30 @@ describe("VisualPanel", () => {
     it("hides the Generate diagram button while a response is generating", () => {
       useUIStore.setState({ currentQuestion: "Design a URL shortener." });
 
-      render(<VisualPanel sessionId="sess-1" isGenerating />);
+      render(
+        <VisualPanel
+          sessionId="sess-1"
+          isGenerating
+          onGenerateDiagram={vi.fn().mockResolvedValue(undefined)}
+        />,
+      );
 
       expect(screen.queryByTestId("generate-diagram-button")).toBeNull();
     });
 
-    it("forces a visual response for the current question when clicked", () => {
+    it("calls the injected onGenerateDiagram prop with the current question", () => {
+      const onGenerateDiagram = vi.fn().mockResolvedValue(undefined);
       useUIStore.setState({ currentQuestion: "Design a URL shortener." });
 
-      render(<VisualPanel sessionId="sess-1" />);
+      render(
+        <VisualPanel
+          sessionId="sess-1"
+          onGenerateDiagram={onGenerateDiagram}
+        />,
+      );
       fireEvent.click(screen.getByTestId("generate-diagram-button"));
 
-      expect(triggerVisualResponse).toHaveBeenCalledWith(
-        "Design a URL shortener.",
-        "sess-1",
-      );
+      expect(onGenerateDiagram).toHaveBeenCalledWith("Design a URL shortener.");
     });
   });
 });

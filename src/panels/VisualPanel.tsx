@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import mermaid from "mermaid";
 import { codeToHtml } from "shiki";
 
-import { copyTextToClipboard, triggerVisualResponse } from "../commands";
+import { copyTextToClipboard } from "../commands";
 import { useUIStore } from "../store/ui";
 import { QuestionHeading } from "./TurnCards";
 
@@ -16,11 +16,14 @@ mermaid.initialize({
 export interface VisualPanelProps {
   isGenerating?: boolean;
   /**
-   * Only provided from the LIVE screen (`trigger_visual_response` requires
-   * `SessionState::Live`) — enables the manual "Generate diagram" trigger.
-   * Omitted in Rehearsal, where the button stays hidden.
+   * When present with `onGenerateDiagram`, enables the manual "Generate
+   * diagram" trigger (and silent Mermaid auto-retry). Parents inject the
+   * dispatch path — Live uses `triggerVisualResponse`, Rehearsal uses
+   * `runRehearsalTurn(..., forceVisual: true)`.
    */
   sessionId?: string;
+  /** Injected trigger; required for Generate diagram / auto-retry dispatch. */
+  onGenerateDiagram?: (question: string) => Promise<void>;
 }
 
 export interface FencedBlock {
@@ -54,7 +57,11 @@ export function isMermaidBlock(block: FencedBlock): boolean {
 
 let mermaidRenderCounter = 0;
 
-const VisualPanel = ({ isGenerating = false, sessionId }: VisualPanelProps) => {
+const VisualPanel = ({
+  isGenerating = false,
+  sessionId,
+  onGenerateDiagram,
+}: VisualPanelProps) => {
   const { streamingBuffers, depthPrePrepared, currentQuestion } = useUIStore();
   const pushNotification = useUIStore((s) => s.pushNotification);
   const [copied, setCopied] = useState(false);
@@ -99,21 +106,24 @@ const VisualPanel = ({ isGenerating = false, sessionId }: VisualPanelProps) => {
   }, [block]);
 
   const canTriggerManually =
-    sessionId != null && !isGenerating && currentQuestion.trim().length > 0;
+    sessionId != null &&
+    onGenerateDiagram != null &&
+    !isGenerating &&
+    currentQuestion.trim().length > 0;
 
   // Silent one-shot retry when Mermaid fails to render — genuine model
   // mistakes only; ref-keyed so a second failure for the same question
   // falls through to the raw-text fallback without looping.
   useEffect(() => {
     if (!renderFailed || !block || !isMermaidBlock(block)) return;
-    if (!canTriggerManually || sessionId == null) return;
+    if (!canTriggerManually || !onGenerateDiagram) return;
 
     const retryKey = currentQuestion.trim();
     if (autoRetriedQuestionsRef.current.has(retryKey)) return;
     autoRetriedQuestionsRef.current.add(retryKey);
 
     setRequesting(true);
-    void triggerVisualResponse(currentQuestion, sessionId)
+    void onGenerateDiagram(currentQuestion)
       .catch((err: unknown) => {
         pushNotification({
           id: crypto.randomUUID(),
@@ -126,7 +136,7 @@ const VisualPanel = ({ isGenerating = false, sessionId }: VisualPanelProps) => {
     renderFailed,
     block,
     canTriggerManually,
-    sessionId,
+    onGenerateDiagram,
     currentQuestion,
     pushNotification,
   ]);
@@ -148,9 +158,9 @@ const VisualPanel = ({ isGenerating = false, sessionId }: VisualPanelProps) => {
   };
 
   const handleGenerateDiagram = () => {
-    if (!sessionId || !canTriggerManually) return;
+    if (!canTriggerManually || !onGenerateDiagram) return;
     setRequesting(true);
-    void triggerVisualResponse(currentQuestion, sessionId)
+    void onGenerateDiagram(currentQuestion)
       .catch((err: unknown) => {
         pushNotification({
           id: crypto.randomUUID(),
