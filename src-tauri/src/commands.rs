@@ -3759,6 +3759,74 @@ pub async fn trigger_response(
     Ok(())
 }
 
+/// Manual Visual trigger — `lpav-s20-visual-classifier`. Valid only from LIVE.
+///
+/// The Visual thread only auto-fires when
+/// [`crate::orchestrator::visual_classifier::needs_visual`] returns `true`
+/// (wired in slice 21). This command lets the user force a diagram for a
+/// question that the classifier judged as purely verbal — most commonly the
+/// current/last question already shown in the Answer panel. Sent through the
+/// same `question_tx` channel as [`trigger_response`], tagged with
+/// [`crate::audio::pipeline::DetectedQuestionSource::VisualManual`] so the
+/// orchestrator can bypass the classifier gate for this turn.
+#[tauri::command]
+pub async fn trigger_visual_response(
+    state: State<'_, AppState>,
+    question: String,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Live {
+            return Err(format!(
+                "trigger_visual_response is only valid from LIVE (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    if question.trim().is_empty() {
+        return Err("No question to generate a diagram for.".to_string());
+    }
+
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
+    }
+
+    let guard = state.live_tasks.lock().await;
+    let Some(handles) = guard.as_ref() else {
+        return Err("No active live session handles.".to_string());
+    };
+    let detected = DetectedQuestion {
+        text: question.clone(),
+        session_id: sid,
+        detected_at: std::time::Instant::now(),
+        source: crate::audio::pipeline::DetectedQuestionSource::VisualManual,
+    };
+    handles
+        .question_tx
+        .try_send(detected)
+        .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
+    info!(
+        session_id = %sid,
+        question_len = question.len(),
+        "manual trigger_visual_response",
+    );
+    #[cfg(debug_assertions)]
+    tracing::debug!(
+        session_id = %sid,
+        question = %question,
+        "manual trigger_visual_response (debug-only content)",
+    );
+
+    Ok(())
+}
+
 /// Manual question boundary — Ctrl+Q (M10 Slice 2 Layer 4).
 ///
 /// Grabs the System transcript buffer since the last signal and sends it

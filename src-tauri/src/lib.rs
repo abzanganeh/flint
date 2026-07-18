@@ -235,6 +235,7 @@ pub fn run() {
             commands::commit_live_preview,
             commands::cancel_live_preview,
             commands::trigger_response,
+            commands::trigger_visual_response,
             commands::signal_question_ended,
             commands::relabel_transcript_chunk,
             commands::assign_speaker,

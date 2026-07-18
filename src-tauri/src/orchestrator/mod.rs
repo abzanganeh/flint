@@ -21,6 +21,7 @@ pub mod answer;
 pub mod clarifying;
 pub mod prewarm;
 pub mod visual;
+pub mod visual_classifier;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -383,6 +384,7 @@ fn is_valid_question_source(source: crate::audio::pipeline::DetectedQuestionSour
         DetectedQuestionSource::System
             | DetectedQuestionSource::PhoneManual
             | DetectedQuestionSource::UserTriggered
+            | DetectedQuestionSource::VisualManual
     )
 }
 
@@ -1064,6 +1066,9 @@ mod tests {
         ));
         assert!(is_valid_question_source(
             DetectedQuestionSource::UserTriggered
+        ));
+        assert!(is_valid_question_source(
+            DetectedQuestionSource::VisualManual
         ));
     }
 

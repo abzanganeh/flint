@@ -121,6 +121,11 @@ pub enum DetectedQuestionSource {
     PhoneManual,
     /// React-side `trigger_response` — the user typed or pasted a question.
     UserTriggered,
+    /// React-side `trigger_visual_response` (`lpav-s20-visual-classifier`) —
+    /// the user manually asked for a diagram on the current/last question,
+    /// bypassing the Visual-need classifier. Wired into the two-thread
+    /// dispatch in slice 21.
+    VisualManual,
     /// Microphone — must NEVER reach the orchestrator. Reserved as a sentinel
     /// for tests / defensive checks.
     Microphone,
