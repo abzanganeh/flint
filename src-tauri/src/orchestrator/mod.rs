@@ -418,11 +418,9 @@ struct OrchestratorTurnConfig {
     cost_tracker: Arc<crate::cost::CostTracker>,
     /// Phase 5.5.7 — activity category for the usage widget.
     usage_category: String,
-    /// `lpav-s21-orchestrator-two-thread` — bypasses `visual_classifier`
-    /// when the question came from `trigger_visual_response`
-    /// (`DetectedQuestionSource::VisualManual`). Always `false` for
-    /// rehearsal turns dispatched via [`dispatch_turn`] — manual Visual
-    /// triggering is LIVE-only (slice 20).
+    /// Bypasses `visual_classifier` when true — set for Live
+    /// `DetectedQuestionSource::VisualManual` and for rehearsal turns
+    /// that pass `force_visual` through [`dispatch_turn`].
     force_visual: bool,
 }
 
@@ -882,6 +880,10 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 }
 
 /// Run a single orchestrator turn (rehearsal or direct dispatch).
+///
+/// When `force_visual` is true, the Visual thread spawns regardless of
+/// `visual_classifier::needs_visual` — used by Rehearsal's manual
+/// "Generate diagram" path.
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch_turn<R: Runtime>(
     session_id: Uuid,
@@ -899,6 +901,7 @@ pub async fn dispatch_turn<R: Runtime>(
     local_llm: Arc<dyn LLMProvider>,
     persistence: Arc<SessionPersistence>,
     cost_tracker: Arc<crate::cost::CostTracker>,
+    force_visual: bool,
     app: AppHandle<R>,
 ) -> Result<()> {
     run_turn(
@@ -919,10 +922,7 @@ pub async fn dispatch_turn<R: Runtime>(
             persistence,
             cost_tracker,
             usage_category: "rehearsal_turn".to_string(),
-            // Manual Visual triggering (`trigger_visual_response`) is
-            // LIVE-only (slice 20) — rehearsal turns always defer to the
-            // classifier.
-            force_visual: false,
+            force_visual,
         },
         app,
     )

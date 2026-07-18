@@ -185,11 +185,13 @@ export const runRehearsalTurn = (
   sessionId: string,
   question: string,
   rephrase?: boolean,
+  forceVisual?: boolean,
 ): Promise<void> =>
   invoke<void>("run_rehearsal_turn", {
     sessionId,
     question,
     rephrase: rephrase ?? null,
+    forceVisual: forceVisual ?? null,
   });
 
 export const completeRehearsal = (sessionId: string): Promise<void> =>

@@ -2036,6 +2036,10 @@ pub fn get_rehearsal_completed() -> bool {
 }
 
 /// Fire a single orchestrator turn during rehearsal (no audio pipeline).
+///
+/// When `force_visual` is `Some(true)`, the Visual thread spawns even if
+/// the classifier would skip it (manual "Generate diagram" from Rehearsal).
+/// Omitted / `None` defaults to `false`.
 #[tauri::command]
 pub async fn run_rehearsal_turn(
     app: AppHandle,
@@ -2043,6 +2047,7 @@ pub async fn run_rehearsal_turn(
     session_id: String,
     question: String,
     rephrase: Option<bool>,
+    force_visual: Option<bool>,
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
 
@@ -2133,6 +2138,7 @@ pub async fn run_rehearsal_turn(
             local_provider,
             Arc::clone(&state.persistence),
             Arc::clone(&state.cost_tracker),
+            force_visual.unwrap_or(false),
             app,
         ),
     )
