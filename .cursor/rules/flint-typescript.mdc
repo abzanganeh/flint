@@ -21,10 +21,10 @@ export const startSession = (sessionId: string) => invoke<void>('start_session',
 export const getSessionSnapshot = () => invoke<SessionSnapshot>('get_session_snapshot');
 
 // CORRECT — typed event listener hook in hooks/
-export function useDirectionalStream() {
-  const appendToken = useUIStore(s => s.appendDirectionalToken);
+export function useAnswerStream() {
+  const appendToken = useUIStore(s => s.appendAnswerToken);
   useEffect(() => {
-    const unlisten = listen<string>('directional_token', e => appendToken(e.payload));
+    const unlisten = listen<string>('answer_token', e => appendToken(e.payload));
     return () => { unlisten.then(f => f()); };
   }, []);
 }
@@ -32,14 +32,14 @@ export function useDirectionalStream() {
 // WRONG — direct invoke or listen in a component
 const MyPanel = () => {
   const go = () => invoke('trigger_response'); // NO — use commands/
-  listen('directional_token', handler);        // NO — use hooks/
+  listen('answer_token', handler);              // NO — use hooks/
 };
 ```
 
 - No raw `invoke()` calls inside components — always go through `commands/index.ts`.
 - No raw `listen()` calls inside components — always go through a hook in `hooks/`.
 - Do not import from `@tauri-apps/api` directly in component files.
-- All five live panels are independent components. They do not share state directly — each subscribes to its own Tauri event.
+- All four live panels are independent components. They do not share state directly — each subscribes to its own Tauri event.
 
 ## Zustand UI Store — UI State ONLY
 
@@ -48,16 +48,16 @@ interface UIState {
   panelLayout: PanelLayout;
   focusedPanel: PanelId | null;
   streamingBuffers: {
-    directional: string;
-    depth: string;
+    answer: string;
+    visual: string;
   };
   notificationQueue: Notification[];
   theme: 'light' | 'dark' | 'system';
   overlayMinimised: boolean;
   panicHideActive: boolean;
   // Actions
-  appendDirectionalToken: (token: string) => void;
-  appendDepthToken: (token: string) => void;
+  appendAnswerToken: (token: string) => void;
+  appendVisualToken: (token: string) => void;
   clearStreamingBuffers: () => void;
   queueNotification: (n: Notification) => void;
 }

@@ -23,7 +23,7 @@ Mock LLM providers return fixtures. **No real API calls in unit tests.**
 
 ## TypeScript Unit Tests (Vitest)
 
-- All five panels: render test + event handler test.
+- All four panels: render test + event handler test.
 - Tauri event handlers: mock event emitter + assert Zustand state update.
 - Panel layout: resize and collapse behaviour.
 
@@ -56,7 +56,7 @@ Full session flow:
 
 | Test | Threshold | Action |
 |---|---|---|
-| P95 TTFT directional | > 900ms | **Fail PR** |
+| P95 TTFT answer | > 2.2s | **Fail PR** |
 | P95 RAG retrieval | > 60ms | **Fail PR** |
 | P95 transcription lag | > 2.5s | **Fail PR** |
 | App cold start | > 4s | Warn (not blocking) |
@@ -87,5 +87,5 @@ Full session flow:
 
 Any prompt change REQUIRES an eval run. Blocks merge if:
 - Win rate < 50% vs previous version
-- Directional conciseness pass rate < 95%
+- Answer conciseness pass rate < 95%
 - Any domain score < 0.7 relevance
