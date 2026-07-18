@@ -23,5 +23,5 @@
     "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 7 done: force_visual through dispatch_turn + run_rehearsal_turn; new integration test green. Starting slice 8: Rehearsal Generate diagram button."
+  "notes": "Slice 7 done (2e8776f): force_visual plumbing. Starting slice 8: Rehearsal Generate diagram button."
 }
