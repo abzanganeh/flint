@@ -1,12 +1,10 @@
 {
-  "current_milestone": "live-preview-answer-visual",
+  "current_milestone": "visual-robustness-and-triggers",
   "milestone_status": "in_progress",
-  "milestone_branch": {
-    "flint": "feature/live-preview-answer-visual"
-  },
+  "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
   "current_slice": 1,
   "completed_slices": [0],
-  "current_task_id": "lpav-s1-turn-history-context",
+  "current_task_id": "vrt-s1-sse-line-buffering",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -15,9 +13,9 @@
   "open_prs": {},
   "manual_gate_backlog": [
     {
-      "gate": "Live Preview + Visual device retest",
-      "doc": "tests/manual-qa/live-preview-answer-visual-checklist.md",
-      "notes": "After merge: Live Preview, phone relabel, Ask now, Mermaid in Visual panel"
+      "gate": "Mermaid diagram device retest",
+      "doc": "tests/manual-qa/visual-robustness-checklist.md",
+      "notes": "After merge: repeat the original 'draw a system design for a notification microservice' prompt on Live; verify Rehearsal + Mock Interview Generate diagram buttons"
     }
   ],
   "agent_ladder": {
@@ -25,5 +23,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 0 complete. Slice 1 in progress — turn history already in ContextPanel; adding vitest."
+  "notes": "Slice 0 done: cherry-picked whisper health-check copy fix (6e78602) and mic calibration/diarizer crash fix (2de2e5f) onto new branch, added run-dev-stack.sh, deleted stray fix branches. Starting Part A streaming correctness."
 }
