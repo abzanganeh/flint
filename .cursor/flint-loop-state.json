@@ -4,9 +4,9 @@
   "milestone_branch": {
     "flint": "feature/live-preview-answer-visual"
   },
-  "current_slice": 0,
-  "completed_slices": [],
-  "current_task_id": "lpav-s0-clean-slate",
+  "current_slice": 1,
+  "completed_slices": [0],
+  "current_task_id": "lpav-s1-turn-history-context",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -25,5 +25,5 @@
     "medium": "grok-4.5-fast-xhigh",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Combined Part A + Part B. One PR. Started from main post PR #37."
+  "notes": "Slice 0 complete. Slice 1 in progress — turn history already in ContextPanel; adding vitest."
 }
