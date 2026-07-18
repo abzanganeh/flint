@@ -213,8 +213,8 @@ fn log_confidence_computed(
     info!(
         session_id = %session_id,
         turn = turn,
-        event = "directional_thread_complete",
-        thread_type = "directional",
+        event = "answer_thread_complete",
+        thread_type = "answer",
         confidence = confidence_score,
         level = %confidence_level.as_str(),
         provider = %provider,
@@ -637,15 +637,14 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         None => (dir_task.await, None),
     };
 
-    let (directional_text, dir_err) =
-        collect_thread_text(dir_result, cfg.session_id, "directional", &app);
-    let (depth_text, dep_err) = match dep_result {
-        Some(result) => collect_thread_text(result, cfg.session_id, "depth", &app),
+    let (answer_text, dir_err) = collect_thread_text(dir_result, cfg.session_id, "answer", &app);
+    let (visual_text, dep_err) = match dep_result {
+        Some(result) => collect_thread_text(result, cfg.session_id, "visual", &app),
         None => {
             emit_thread_status(
                 &app,
                 ThreadStatusPayload {
-                    thread: "depth".to_string(),
+                    thread: "visual".to_string(),
                     status: "idle".to_string(),
                 },
             );
@@ -653,12 +652,12 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         }
     };
 
-    if directional_text.trim().is_empty() {
+    if answer_text.trim().is_empty() {
         let detail = dir_err
             .or(dep_err)
             .unwrap_or_else(|| "unknown inference failure".to_string());
         anyhow::bail!(
-            "No directional answer was generated. Groq may be rate-limited (free tier: ~3 \
+            "No answer was generated. Groq may be rate-limited (free tier: ~3 \
              parallel calls per question). Add an OpenRouter key in Settings → API Keys for cloud \
              fallback, or run `ollama serve` and `ollama pull llama3.1:8b`. Detail: {detail}"
         );
@@ -679,7 +678,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
 
         let signals = ConfidenceSignals {
             rag_grounding,
-            response_text: directional_text.clone(),
+            response_text: answer_text.clone(),
             rag_texts,
             provider_name: cfg.failover.active_provider_name().to_string(),
             cache_stale: from_cache && cfg.turn_number > 3,
@@ -739,15 +738,15 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     persist_thread_response(
         &cfg.persistence,
         cfg.session_id,
-        ResponseType::Directional,
-        &directional_text,
+        ResponseType::Answer,
+        &answer_text,
         confidence_score,
     );
     persist_thread_response(
         &cfg.persistence,
         cfg.session_id,
-        ResponseType::Depth,
-        &depth_text,
+        ResponseType::Visual,
+        &visual_text,
         confidence_score,
     );
 
@@ -761,13 +760,13 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // prevent contaminating future retrievals.
     {
         let should_embed = confidence_score >= QA_EMBED_CONFIDENCE_THRESHOLD
-            && !directional_text.trim().is_empty();
+            && !answer_text.trim().is_empty();
 
         if should_embed {
             let qa_text = format!(
                 "Q: {}\nA: {}",
                 cfg.question_text.trim(),
-                directional_text.trim()
+                answer_text.trim()
             );
             let embedder = Arc::clone(&cfg.embedder);
             let store = Arc::clone(&cfg.vector_store);
@@ -815,8 +814,8 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
         let mut mem = cfg.memory.lock().await;
         mem.push_turn(Turn::new(
             cfg.question_text.clone(),
-            directional_text.clone(),
-            depth_text.clone(),
+            answer_text.clone(),
+            visual_text.clone(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
@@ -829,7 +828,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     // into every call. It overestimates slightly, which is the safer side
     // to err on for a hard cost cap.
     let turn_input = (cfg.question_text.len() as u64 + 500) / 4;
-    let turn_output = (directional_text.len() as u64 + depth_text.len() as u64 + 500) / 4;
+    let turn_output = (answer_text.len() as u64 + visual_text.len() as u64 + 500) / 4;
     let total = turn_input + turn_output;
     let cost_estimate = total as f64 * 0.0000002;
     emit_token_usage_update(
@@ -948,11 +947,11 @@ mod tests {
     #[test]
     fn load_prompt_falls_back_to_default() {
         let dir = tempfile::tempdir().unwrap();
-        let category = dir.path().join("directional");
+        let category = dir.path().join("answer");
         std::fs::create_dir_all(&category).unwrap();
         std::fs::write(category.join("default.txt"), "default template").unwrap();
 
-        let result = load_prompt("directional", "nonexistent_provider", dir.path());
+        let result = load_prompt("answer", "nonexistent_provider", dir.path());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "default template");
     }
@@ -960,22 +959,22 @@ mod tests {
     #[test]
     fn load_prompt_uses_provider_specific_file() {
         let dir = tempfile::tempdir().unwrap();
-        let category = dir.path().join("directional");
+        let category = dir.path().join("answer");
         std::fs::create_dir_all(&category).unwrap();
         std::fs::write(category.join("default.txt"), "default").unwrap();
         std::fs::write(category.join("groq.txt"), "groq variant").unwrap();
 
-        let result = load_prompt("directional", "groq", dir.path());
+        let result = load_prompt("answer", "groq", dir.path());
         assert_eq!(result.unwrap(), "groq variant");
     }
 
     #[test]
     fn load_prompt_errors_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let category = dir.path().join("directional");
+        let category = dir.path().join("answer");
         std::fs::create_dir_all(&category).unwrap();
 
-        assert!(load_prompt("directional", "any", dir.path()).is_err());
+        assert!(load_prompt("answer", "any", dir.path()).is_err());
     }
 
     #[test]

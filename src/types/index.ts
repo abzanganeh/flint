@@ -79,8 +79,8 @@ export interface TurnCard {
   id: string;
   turn: number;
   question: string;
-  directional: string;
-  depth: string;
+  answer: string;
+  visual: string;
   confidenceLevel: ConfidenceLevel | null;
 }
 
@@ -89,8 +89,8 @@ export interface UIState {
   layoutMode: "stack" | "grid";
   focusedPanel: PanelId | null;
   streamingBuffers: {
-    directional: string;
-    depth: string;
+    answer: string;
+    visual: string;
   };
   /** Question heading the answer currently streaming into the buffers. */
   currentQuestion: string;

@@ -23,8 +23,8 @@ interface UIStore extends UIState {
   togglePanelCollapsed: (id: PanelId) => void;
   setLayoutMode: (mode: "stack" | "grid") => void;
   setFocusedPanel: (focusedPanel: PanelId | null) => void;
-  appendDirectionalToken: (token: string) => void;
-  appendDepthToken: (token: string) => void;
+  appendAnswerToken: (token: string) => void;
+  appendVisualToken: (token: string) => void;
   clearStreamingBuffers: () => void;
   /** Clear panel content when entering LIVE so rehearsal answers do not carry over. */
   resetOrchestratorPanels: () => void;
@@ -127,7 +127,7 @@ export const useUIStore = create<UIStore>((set) => ({
   panelLayout: defaultPanelLayout,
   layoutMode: readPersistedLayoutMode(),
   focusedPanel: null,
-  streamingBuffers: { directional: "", depth: "" },
+  streamingBuffers: { answer: "", visual: "" },
   currentQuestion: "",
   turnHistory: [],
   confidenceLevel: null,
@@ -180,31 +180,31 @@ export const useUIStore = create<UIStore>((set) => ({
 
   setFocusedPanel: (focusedPanel) => set({ focusedPanel }),
 
-  appendDirectionalToken: (token) =>
+  appendAnswerToken: (token) =>
     set((s) => ({
       streamingBuffers: {
         ...s.streamingBuffers,
-        directional: s.streamingBuffers.directional + token,
+        answer: s.streamingBuffers.answer + token,
       },
     })),
 
-  appendDepthToken: (token) =>
+  appendVisualToken: (token) =>
     set((s) => ({
       streamingBuffers: {
         ...s.streamingBuffers,
-        depth: s.streamingBuffers.depth + token,
+        visual: s.streamingBuffers.visual + token,
       },
     })),
 
   clearStreamingBuffers: () =>
     set({
-      streamingBuffers: { directional: "", depth: "" },
+      streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
     }),
 
   resetOrchestratorPanels: () =>
     set({
-      streamingBuffers: { directional: "", depth: "" },
+      streamingBuffers: { answer: "", visual: "" },
       depthPrePrepared: false,
       clarifyingQuestions: [],
       confidenceLevel: null,
@@ -218,8 +218,7 @@ export const useUIStore = create<UIStore>((set) => ({
   startTurn: (question, turn) =>
     set((s) => {
       const hasContent =
-        s.streamingBuffers.directional.length > 0 ||
-        s.streamingBuffers.depth.length > 0;
+        s.streamingBuffers.answer.length > 0 || s.streamingBuffers.visual.length > 0;
       const archived: TurnCard[] = hasContent
         ? [
             {
@@ -229,8 +228,8 @@ export const useUIStore = create<UIStore>((set) => ({
                   : `${Date.now()}-${Math.random()}`,
               turn: turn - 1,
               question: s.currentQuestion,
-              directional: s.streamingBuffers.directional,
-              depth: s.streamingBuffers.depth,
+              answer: s.streamingBuffers.answer,
+              visual: s.streamingBuffers.visual,
               confidenceLevel: s.confidenceLevel,
             },
             ...s.turnHistory,
@@ -239,7 +238,7 @@ export const useUIStore = create<UIStore>((set) => ({
       return {
         turnHistory: archived,
         currentQuestion: question,
-        streamingBuffers: { directional: "", depth: "" },
+        streamingBuffers: { answer: "", visual: "" },
         confidenceLevel: null,
         depthPrePrepared: false,
         clarifyingQuestions: [],

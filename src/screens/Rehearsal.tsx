@@ -165,7 +165,7 @@ const Rehearsal = ({
       needsUserContext(
         confidenceLevel,
         ragChunks,
-        streamingBuffers.directional,
+        streamingBuffers.answer,
       ),
     );
   }, [
@@ -173,7 +173,7 @@ const Rehearsal = ({
     confidenceLevel,
     ragChunks,
     clarifyingQuestions.length,
-    streamingBuffers.directional,
+    streamingBuffers.answer,
   ]);
 
   const fireQuestion = useCallback(
@@ -218,8 +218,7 @@ const Rehearsal = ({
   );
 
   const hasResponse =
-    streamingBuffers.directional.length > 0 ||
-    streamingBuffers.depth.length > 0;
+    streamingBuffers.answer.length > 0 || streamingBuffers.visual.length > 0;
 
   const isReaskingSameQuestion =
     hasResponse &&
@@ -500,7 +499,7 @@ const Rehearsal = ({
             <PreferredAnswerPanel
               sessionId={sessionId}
               question={lastAskedQuestion}
-              suggestedAnswer={streamingBuffers.directional}
+              suggestedAnswer={streamingBuffers.answer}
               onSaved={() => setBankRefreshKey((k) => k + 1)}
             />
           </div>

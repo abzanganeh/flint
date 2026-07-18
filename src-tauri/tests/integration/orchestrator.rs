@@ -1063,13 +1063,13 @@ async fn dispatch_turn_spawns_visual_thread_for_system_design_question() {
         .load_session_for_recovery(session_id)
         .expect("recovery query")
         .expect("session must be recoverable (state = LIVE)");
-    let has_depth_response = recovery
+    let has_visual_response = recovery
         .responses
         .iter()
-        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Depth);
+        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Visual);
     assert!(
-        has_depth_response,
-        "system-design question must spawn Visual and persist a Depth response"
+        has_visual_response,
+        "system-design question must spawn Visual and persist a Visual response"
     );
 }
 
@@ -1120,12 +1120,12 @@ async fn dispatch_turn_skips_visual_thread_for_behavioral_question() {
         .load_session_for_recovery(session_id)
         .expect("recovery query")
         .expect("session must be recoverable (state = LIVE)");
-    let has_depth_response = recovery
+    let has_visual_response = recovery
         .responses
         .iter()
-        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Depth);
+        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Visual);
     assert!(
-        !has_depth_response,
-        "behavioral question must skip Visual — no Depth response should be persisted"
+        !has_visual_response,
+        "behavioral question must skip Visual — no Visual response should be persisted"
     );
 }

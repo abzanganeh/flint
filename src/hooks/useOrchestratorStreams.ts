@@ -1,12 +1,12 @@
 import { useEffect } from "react";
 
 import {
+  onAnswerToken,
   onClarifyingQuestion,
   onConfidenceScore,
-  onDepthToken,
-  onDirectionalToken,
   onResponseMetadata,
   onTurnStarted,
+  onVisualToken,
 } from "../events";
 import { useUIStore } from "../store/ui";
 
@@ -19,11 +19,11 @@ async function attachOrchestratorListeners(): Promise<() => void> {
     onTurnStarted(({ question, turn }) => {
       useUIStore.getState().startTurn(question, turn);
     }),
-    onDirectionalToken(({ token }) => {
-      useUIStore.getState().appendDirectionalToken(token);
+    onAnswerToken(({ token }) => {
+      useUIStore.getState().appendAnswerToken(token);
     }),
-    onDepthToken(({ token }) => {
-      useUIStore.getState().appendDepthToken(token);
+    onVisualToken(({ token }) => {
+      useUIStore.getState().appendVisualToken(token);
     }),
     onConfidenceScore(({ level }) => {
       useUIStore.getState().setConfidenceLevel(level);

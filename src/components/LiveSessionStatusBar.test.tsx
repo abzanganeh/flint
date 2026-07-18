@@ -37,8 +37,8 @@ vi.mock("../events", () => ({
     handlers.turnStarted = handler;
     return Promise.resolve(() => undefined);
   },
-  onDirectionalToken: (handler: (payload: unknown) => void) => {
-    handlers.directional = handler;
+  onAnswerToken: (handler: (payload: unknown) => void) => {
+    handlers.answer = handler;
     return Promise.resolve(() => undefined);
   },
   onThreadStatus: (handler: (payload: unknown) => void) => {

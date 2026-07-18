@@ -20,16 +20,16 @@ describe("UI store panel layout", () => {
 describe("UI store orchestrator reset", () => {
   it("resetOrchestratorPanels clears rehearsal carry-over into live", () => {
     const {
-      appendDirectionalToken,
-      appendDepthToken,
+      appendAnswerToken,
+      appendVisualToken,
       addClarifyingQuestion,
       setConfidenceLevel,
       setLastManualQuestion,
       resetOrchestratorPanels,
     } = useUIStore.getState();
 
-    appendDirectionalToken("rehearsal dir");
-    appendDepthToken("rehearsal depth");
+    appendAnswerToken("rehearsal answer");
+    appendVisualToken("rehearsal visual");
     addClarifyingQuestion({ question: "Clarify?", rank: 1 });
     setConfidenceLevel("green");
     setLastManualQuestion("Tell me about yourself");
@@ -37,8 +37,8 @@ describe("UI store orchestrator reset", () => {
     resetOrchestratorPanels();
 
     const s = useUIStore.getState();
-    expect(s.streamingBuffers.directional).toBe("");
-    expect(s.streamingBuffers.depth).toBe("");
+    expect(s.streamingBuffers.answer).toBe("");
+    expect(s.streamingBuffers.visual).toBe("");
     expect(s.clarifyingQuestions).toEqual([]);
     expect(s.confidenceLevel).toBeNull();
     expect(s.lastManualQuestion).toBe("");

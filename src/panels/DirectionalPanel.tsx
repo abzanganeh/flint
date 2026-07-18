@@ -45,7 +45,7 @@ const DirectionalPanel = ({ sessionId, isGenerating = false }: DirectionalPanelP
     currentQuestion,
   } = useUIStore();
 
-  const text = streamingBuffers.directional;
+  const text = streamingBuffers.answer;
   const borderColor =
     confidenceLevel != null
       ? CONFIDENCE_BORDER[confidenceLevel]

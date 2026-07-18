@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { getProviderPriority, signalQuestionEnded } from "../commands";
 import {
-  onDirectionalToken,
+  onAnswerToken,
   onFailoverTriggered,
   onPrimaryRestored,
   onThreadStatus,
@@ -80,11 +80,11 @@ const LiveSessionStatusBar = ({
         setLastManualQuestion(question);
         setQError(null);
       }),
-      onDirectionalToken(() => {
+      onAnswerToken(() => {
         setDetectionPhase("generating");
       }),
       onThreadStatus(({ thread, status }) => {
-        if (thread === "directional" && status === "idle") {
+        if (thread === "answer" && status === "idle") {
           setDetectionPhase("listening");
         }
       }),

@@ -23,7 +23,7 @@ use tokio::time::timeout;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::events::{emit_depth_token, emit_thread_status, DepthTokenPayload, ThreadStatusPayload};
+use crate::events::{emit_thread_status, emit_visual_token, ThreadStatusPayload, VisualTokenPayload};
 use crate::llm::failover::FailoverManager;
 use crate::llm::provider::CompletionConfig;
 
@@ -32,9 +32,9 @@ use super::{load_prompt, OrchestrationContext};
 /// Execute the Visual response thread.
 ///
 /// Emits the complete fenced block to the React layer via a single
-/// `depth_token` event (renamed to `visual_token` in slice 22) once the
-/// closing fence has arrived — never a token-by-token stream, since a
-/// partially-fenced Mermaid block cannot be rendered.
+/// `visual_token` event once the closing fence has arrived — never a
+/// token-by-token stream, since a partially-fenced Mermaid block cannot be
+/// rendered.
 /// Returns the full assembled response text.
 pub async fn run_visual<R: Runtime>(
     ctx: OrchestrationContext,
@@ -66,7 +66,7 @@ pub async fn run_visual<R: Runtime>(
         emit_thread_status(
             &app,
             ThreadStatusPayload {
-                thread: "depth".to_string(),
+                thread: "visual".to_string(),
                 status: "ok".to_string(),
             },
         );
@@ -112,9 +112,9 @@ async fn run_fresh_visual<R: Runtime>(
                 full_response.push_str(&token);
                 if !flushed {
                     if let Some(block) = extract_complete_fence(&full_response) {
-                        emit_depth_token(
+                        emit_visual_token(
                             app,
-                            DepthTokenPayload {
+                            VisualTokenPayload {
                                 token: block.to_string(),
                             },
                         );
@@ -138,9 +138,9 @@ async fn run_fresh_visual<R: Runtime>(
     // whatever we have so the panel can at least show the raw fallback
     // (VisualPanel Tier 1 renders raw text when Mermaid parsing fails).
     if !flushed && !full_response.trim().is_empty() {
-        emit_depth_token(
+        emit_visual_token(
             app,
-            DepthTokenPayload {
+            VisualTokenPayload {
                 token: full_response.clone(),
             },
         );
@@ -156,7 +156,7 @@ async fn run_fresh_visual<R: Runtime>(
     emit_thread_status(
         app,
         ThreadStatusPayload {
-            thread: "depth".to_string(),
+            thread: "visual".to_string(),
             status: "ok".to_string(),
         },
     );
@@ -206,8 +206,8 @@ fn log_visual_nfr_breach(session_id: Uuid, stream_ms: u64) {
 fn log_visual_complete(session_id: Uuid, stream_ms: u64, provider: &str, cache_hit: bool) {
     info!(
         session_id = %session_id,
-        event = "depth_thread_complete",
-        thread_type = "depth",
+        event = "visual_thread_complete",
+        thread_type = "visual",
         stream_complete_ms = stream_ms,
         provider = %provider,
         model = %provider,
@@ -216,7 +216,7 @@ fn log_visual_complete(session_id: Uuid, stream_ms: u64, provider: &str, cache_h
     );
 }
 
-/// Emit a cached fenced block as a single `depth_token` event — cached text
+/// Emit a cached fenced block as a single `visual_token` event — cached text
 /// is already a complete block, so there's no fence to wait for.
 fn emit_cached_visual_block<R: Runtime>(
     text: &str,
@@ -224,9 +224,9 @@ fn emit_cached_visual_block<R: Runtime>(
     cancel: &Arc<std::sync::atomic::AtomicBool>,
 ) -> String {
     if !cancel.load(Ordering::Acquire) {
-        emit_depth_token(
+        emit_visual_token(
             app,
-            DepthTokenPayload {
+            VisualTokenPayload {
                 token: text.to_string(),
             },
         );

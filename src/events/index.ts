@@ -24,11 +24,11 @@ export interface TurnStartedEventPayload {
   turn: number;
 }
 
-export interface DirectionalTokenEventPayload {
+export interface AnswerTokenEventPayload {
   token: string;
 }
 
-export interface DepthTokenEventPayload {
+export interface VisualTokenEventPayload {
   token: string;
 }
 
@@ -161,17 +161,17 @@ export const onTurnStarted = (
     handler(event.payload),
   );
 
-export const onDirectionalToken = (
-  handler: (payload: DirectionalTokenEventPayload) => void,
+export const onAnswerToken = (
+  handler: (payload: AnswerTokenEventPayload) => void,
 ): Promise<UnlistenFn> =>
-  listen<DirectionalTokenEventPayload>("directional_token", (event) =>
+  listen<AnswerTokenEventPayload>("answer_token", (event) =>
     handler(event.payload),
   );
 
-export const onDepthToken = (
-  handler: (payload: DepthTokenEventPayload) => void,
+export const onVisualToken = (
+  handler: (payload: VisualTokenEventPayload) => void,
 ): Promise<UnlistenFn> =>
-  listen<DepthTokenEventPayload>("depth_token", (event) =>
+  listen<VisualTokenEventPayload>("visual_token", (event) =>
     handler(event.payload),
   );
 

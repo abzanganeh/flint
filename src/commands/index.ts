@@ -443,9 +443,8 @@ export interface SessionReviewDto {
   state: string;
   transcript: ReviewChunkDto[];
   questionsCount: number;
-  directionalCount: number;
-  depthCount: number;
-  clarifyingCount: number;
+  answerCount: number;
+  visualCount: number;
 }
 
 /** Load a past session's transcript + AI-suggestion counts for review. */

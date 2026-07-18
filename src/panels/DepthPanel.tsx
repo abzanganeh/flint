@@ -13,7 +13,7 @@ const DepthPanel = ({ isGenerating = false }: DepthPanelProps) => {
     useUIStore();
   const pushNotification = useUIStore((s) => s.pushNotification);
   const [copied, setCopied] = useState(false);
-  const text = streamingBuffers.depth;
+  const text = streamingBuffers.visual;
 
   const sections = text
     .split(/\n(?=\d+\.|[-*]|\*\*)/)

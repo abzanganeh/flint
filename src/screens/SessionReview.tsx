@@ -172,9 +172,8 @@ export function SessionReview({ sessionId, onBack }: Props) {
         <>
           <section style={metaRowStyle}>
             <Chip label={`${review.questionsCount} answered`} />
-            <Chip label={`${review.directionalCount} directional`} />
-            <Chip label={`${review.depthCount} depth`} />
-            <Chip label={`${review.clarifyingCount} clarifying`} />
+            <Chip label={`${review.answerCount} answer`} />
+            <Chip label={`${review.visualCount} visual`} />
             <Chip label={review.state} />
           </section>
 

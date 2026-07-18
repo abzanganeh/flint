@@ -23,8 +23,8 @@ describe("ContextPanel", () => {
         {
           id: "turn-1",
           question: "Tell me about yourself",
-          directional: "Brief directional answer",
-          depth: "Longer depth answer",
+          answer: "Brief answer",
+          visual: "Longer visual answer",
           confidenceLevel: "green",
         },
       ],
@@ -34,8 +34,8 @@ describe("ContextPanel", () => {
 
     expect(screen.getByText("Earlier questions")).toBeTruthy();
     expect(screen.getAllByText("Tell me about yourself").length).toBe(2);
-    expect(screen.getByText("Brief directional answer")).toBeTruthy();
-    expect(screen.getByText("Longer depth answer")).toBeTruthy();
+    expect(screen.getByText("Brief answer")).toBeTruthy();
+    expect(screen.getByText("Longer visual answer")).toBeTruthy();
   });
 
   it("shows empty context when no chunks or history", () => {

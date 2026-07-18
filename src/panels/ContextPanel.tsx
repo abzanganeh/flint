@@ -96,16 +96,16 @@ const ContextPanel = ({ sessionId }: ContextPanelProps) => {
             </div>
             {turnHistory.map((card) => (
               <div key={card.id}>
-                {card.directional.length > 0 && (
+                {card.answer.length > 0 && (
                   <HistoryCard
                     question={card.question}
-                    answer={card.directional}
+                    answer={card.answer}
                   />
                 )}
-                {card.depth.length > 0 && (
+                {card.visual.length > 0 && (
                   <HistoryCard
                     question={card.question}
-                    answer={card.depth}
+                    answer={card.visual}
                   />
                 )}
               </div>

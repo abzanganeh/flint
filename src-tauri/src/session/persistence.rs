@@ -55,25 +55,27 @@ pub struct TranscriptChunk {
 /// Type of AI response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseType {
-    Directional,
-    Depth,
-    Clarifying,
+    Answer,
+    Visual,
 }
 
 impl ResponseType {
     pub fn as_str(self) -> &'static str {
         match self {
-            ResponseType::Directional => "directional",
-            ResponseType::Depth => "depth",
-            ResponseType::Clarifying => "clarifying",
+            ResponseType::Answer => "answer",
+            ResponseType::Visual => "visual",
         }
     }
 
+    /// Accepts both the current values and the pre-lpav names so rows
+    /// persisted before the Answer/Visual rename still load correctly.
+    /// Legacy `"clarifying"` rows fold into `Answer` — that thread's
+    /// behavior was absorbed into Answer in slice 18, so there is no
+    /// separate bucket to preserve it under.
     fn from_str(s: &str) -> Option<Self> {
         match s {
-            "directional" => Some(Self::Directional),
-            "depth" => Some(Self::Depth),
-            "clarifying" => Some(Self::Clarifying),
+            "answer" | "directional" | "clarifying" => Some(Self::Answer),
+            "visual" | "depth" => Some(Self::Visual),
             _ => None,
         }
     }
@@ -2821,7 +2823,7 @@ mod tests {
         Response {
             id: Uuid::new_v4(),
             session_id,
-            response_type: ResponseType::Directional,
+            response_type: ResponseType::Answer,
             content: "A concise directional answer.".to_string(),
             confidence: 0.85,
         }

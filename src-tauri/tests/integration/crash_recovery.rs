@@ -64,7 +64,7 @@ async fn check_for_recovery_detects_live_session() {
         .write_response(&Response {
             id: Uuid::new_v4(),
             session_id: sid,
-            response_type: ResponseType::Directional,
+            response_type: ResponseType::Answer,
             content: "That was a challenging situation…".to_string(),
             confidence: 0.85,
         })

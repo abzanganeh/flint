@@ -4307,7 +4307,7 @@ struct SessionStats {
     low: usize,
 }
 
-/// Derive stats from persisted responses. Each Directional response corresponds
+/// Derive stats from persisted responses. Each Answer response corresponds
 /// to one answered turn, so its count is the real "questions answered" figure,
 /// and its confidence drives the High/Medium/Low distribution. Buckets match
 /// the live confidence bands: High = green+blue (>=0.55), Medium = amber
@@ -4321,7 +4321,7 @@ fn compute_session_stats(responses: &[crate::session::persistence::Response]) ->
     let mut stats = SessionStats::default();
     for r in responses
         .iter()
-        .filter(|r| r.response_type == ResponseType::Directional)
+        .filter(|r| r.response_type == ResponseType::Answer)
     {
         stats.questions_count += 1;
         if r.confidence >= HIGH_THRESHOLD {
@@ -4502,11 +4502,10 @@ pub struct SessionReviewDto {
     pub session_id: String,
     pub state: String,
     pub transcript: Vec<ReviewChunkDto>,
-    /// Directional turns answered (one per answered question).
+    /// Answer turns answered (one per answered question).
     pub questions_count: usize,
-    pub directional_count: usize,
-    pub depth_count: usize,
-    pub clarifying_count: usize,
+    pub answer_count: usize,
+    pub visual_count: usize,
 }
 
 /// Pure mapping from persisted recovery data to the review payload. Extracted
@@ -4524,9 +4523,8 @@ fn build_session_review(
             state: "UNKNOWN".to_string(),
             transcript: Vec::new(),
             questions_count: 0,
-            directional_count: 0,
-            depth_count: 0,
-            clarifying_count: 0,
+            answer_count: 0,
+            visual_count: 0,
         };
     };
 
@@ -4555,9 +4553,8 @@ fn build_session_review(
         state: format!("{}", data.state),
         transcript,
         questions_count: stats.questions_count,
-        directional_count: count_of(ResponseType::Directional),
-        depth_count: count_of(ResponseType::Depth),
-        clarifying_count: count_of(ResponseType::Clarifying),
+        answer_count: count_of(ResponseType::Answer),
+        visual_count: count_of(ResponseType::Visual),
     }
 }
 
@@ -6195,16 +6192,14 @@ mod review_tests {
             state: SessionState::Ended,
             transcript_chunks: vec![],
             responses: vec![
-                resp(sid, ResponseType::Directional),
-                resp(sid, ResponseType::Directional),
-                resp(sid, ResponseType::Depth),
-                resp(sid, ResponseType::Clarifying),
+                resp(sid, ResponseType::Answer),
+                resp(sid, ResponseType::Answer),
+                resp(sid, ResponseType::Visual),
             ],
         };
         let review = build_session_review(sid.to_string(), Some(data));
-        assert_eq!(review.directional_count, 2);
-        assert_eq!(review.depth_count, 1);
-        assert_eq!(review.clarifying_count, 1);
+        assert_eq!(review.answer_count, 2);
+        assert_eq!(review.visual_count, 1);
         assert_eq!(review.questions_count, 2);
     }
 }
@@ -6240,13 +6235,13 @@ mod summary_tests {
     }
 
     #[test]
-    fn stats_count_directional_responses_only() {
+    fn stats_count_answer_responses_only() {
         let responses = vec![
-            response(ResponseType::Directional, 0.8),
-            response(ResponseType::Depth, 0.8),
-            response(ResponseType::Directional, 0.4),
-            response(ResponseType::Depth, 0.4),
-            response(ResponseType::Directional, 0.1),
+            response(ResponseType::Answer, 0.8),
+            response(ResponseType::Visual, 0.8),
+            response(ResponseType::Answer, 0.4),
+            response(ResponseType::Visual, 0.4),
+            response(ResponseType::Answer, 0.1),
         ];
         let stats = compute_session_stats(&responses);
         assert_eq!(stats.questions_count, 3);
@@ -6258,9 +6253,9 @@ mod summary_tests {
     #[test]
     fn stats_bucket_boundaries() {
         let responses = vec![
-            response(ResponseType::Directional, 0.55), // high (inclusive)
-            response(ResponseType::Directional, 0.35), // medium (inclusive)
-            response(ResponseType::Directional, 0.349), // low
+            response(ResponseType::Answer, 0.55),  // high (inclusive)
+            response(ResponseType::Answer, 0.35),  // medium (inclusive)
+            response(ResponseType::Answer, 0.349), // low
         ];
         let stats = compute_session_stats(&responses);
         assert_eq!(stats.high, 1);

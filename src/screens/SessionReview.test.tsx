@@ -59,9 +59,8 @@ describe("SessionReview screen", () => {
       chunk("Microphone", "I am an IAM architect."),
     ],
     questionsCount: 1,
-    directionalCount: 1,
-    depthCount: 1,
-    clarifyingCount: 0,
+    answerCount: 1,
+    visualCount: 1,
     ...overrides,
   });
 
@@ -99,7 +98,7 @@ describe("SessionReview screen", () => {
   it("shows an empty-state message when nothing was recorded", async () => {
     const { getSessionReview } = await import("../commands");
     vi.mocked(getSessionReview).mockResolvedValue(
-      review({ transcript: [], questionsCount: 0, directionalCount: 0, depthCount: 0 }),
+      review({ transcript: [], questionsCount: 0, answerCount: 0, visualCount: 0 }),
     );
 
     render(<SessionReview sessionId="sess-1" onBack={() => undefined} />);

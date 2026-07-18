@@ -36,15 +36,18 @@ pub struct TurnStartedPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DirectionalTokenPayload {
+pub struct AnswerTokenPayload {
     pub token: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct DepthTokenPayload {
+pub struct VisualTokenPayload {
     pub token: String,
 }
 
+/// Only `clarifying.rs` still constructs this — that module is dead (nothing
+/// spawns it since slice 21) but stays declared until slice 28 deletes it
+/// end to end. Kept here purely so it keeps compiling until then.
 #[derive(Debug, Clone, Serialize)]
 pub struct ClarifyingQuestionPayload {
     pub question: String,
@@ -186,12 +189,12 @@ pub fn emit_turn_started<R: Runtime>(app: &AppHandle<R>, payload: TurnStartedPay
     let _ = app.emit("turn_started", payload);
 }
 
-pub fn emit_directional_token<R: Runtime>(app: &AppHandle<R>, payload: DirectionalTokenPayload) {
-    let _ = app.emit("directional_token", payload);
+pub fn emit_answer_token<R: Runtime>(app: &AppHandle<R>, payload: AnswerTokenPayload) {
+    let _ = app.emit("answer_token", payload);
 }
 
-pub fn emit_depth_token<R: Runtime>(app: &AppHandle<R>, payload: DepthTokenPayload) {
-    let _ = app.emit("depth_token", payload);
+pub fn emit_visual_token<R: Runtime>(app: &AppHandle<R>, payload: VisualTokenPayload) {
+    let _ = app.emit("visual_token", payload);
 }
 
 pub fn emit_clarifying_question<R: Runtime>(
