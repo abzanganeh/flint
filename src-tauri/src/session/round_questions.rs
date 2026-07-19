@@ -73,10 +73,7 @@ pub fn supplemental_questions_for_round(round_type: &str) -> Vec<BankQuestionEnt
                 "What's your current location and work setup preference?",
                 vec!["logistics".into()],
             ),
-            BankQuestionEntry::new(
-                "What questions do you have for me?",
-                vec!["general".into()],
-            ),
+            BankQuestionEntry::new("What questions do you have for me?", vec!["general".into()]),
         ],
         "hiring_manager" => vec![
             BankQuestionEntry::new(

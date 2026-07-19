@@ -2451,7 +2451,8 @@ fn merge_supplemental_round_questions(
 ) -> anyhow::Result<()> {
     use crate::session::question_attempts::normalize_question_key;
 
-    let supplemental = crate::session::round_questions::supplemental_questions_for_round(round_type);
+    let supplemental =
+        crate::session::round_questions::supplemental_questions_for_round(round_type);
     if supplemental.is_empty() {
         return Ok(());
     }
@@ -2476,9 +2477,10 @@ fn merge_supplemental_round_questions(
 /// Heuristic interview-round inference from a pasted recruiter brief — a
 /// suggestion the frontend can pre-select, never authoritative on its own.
 #[tauri::command]
-pub async fn infer_round_type_from_brief(recruiter_brief: String) -> Result<Option<String>, String> {
-    Ok(crate::session::round_questions::infer_round_type(&recruiter_brief)
-        .map(|s| s.to_string()))
+pub async fn infer_round_type_from_brief(
+    recruiter_brief: String,
+) -> Result<Option<String>, String> {
+    Ok(crate::session::round_questions::infer_round_type(&recruiter_brief).map(|s| s.to_string()))
 }
 
 /// Toggle phone-call mode for the active session.
@@ -6614,7 +6616,9 @@ mod round_type_merge_tests {
         let entries = db.load_question_bank_entries(sid).unwrap();
         let self_intro_count = entries
             .iter()
-            .filter(|e| e.question.to_lowercase().trim() == "tell me about yourself and your background.")
+            .filter(|e| {
+                e.question.to_lowercase().trim() == "tell me about yourself and your background."
+            })
             .count();
         assert_eq!(
             self_intro_count, 1,

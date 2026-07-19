@@ -60,7 +60,10 @@ mod tests {
     fn stable_shuffle_key_is_unaffected_by_other_items() {
         let seed = 42u64;
         let questions = vec!["a", "b", "c", "d", "e"];
-        let keys_before: Vec<u64> = questions.iter().map(|q| stable_shuffle_key(q, seed)).collect();
+        let keys_before: Vec<u64> = questions
+            .iter()
+            .map(|q| stable_shuffle_key(q, seed))
+            .collect();
         // Remove "b" — every other item's key must be identical, proving
         // order among survivors cannot change when one item leaves the set.
         let remaining = ["a", "c", "d", "e"];
