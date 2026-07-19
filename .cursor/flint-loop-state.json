@@ -1,29 +1,21 @@
 {
-  "current_milestone": "visual-robustness-and-triggers",
-  "milestone_status": "ci_green",
-  "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
-  "current_slice": 14,
-  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
-  "current_task_id": "vrt-s14-pr-ci-merge",
-  "loop_stopped": true,
-  "ci_fix_attempts": 3,
+  "current_milestone": "session-focus-robustness",
+  "milestone_status": "in_progress",
+  "milestone_branch": { "flint": "feature/session-focus-robustness" },
+  "current_slice": 8,
+  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7],
+  "current_task_id": "sfr-s8-pr-ci-merge",
+  "loop_stopped": false,
+  "ci_fix_attempts": 2,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {
-    "39": "merged"
-  },
-  "manual_gate_backlog": [
-    {
-      "gate": "Mermaid diagram device retest",
-      "doc": "tests/manual-qa/visual-robustness-checklist.md",
-      "notes": "After merge: repeat the original 'draw a system design for a notification microservice' prompt on Live; verify Rehearsal + Mock Interview Generate diagram buttons"
-    }
-  ],
+  "open_prs": { "41": "open" },
+  "manual_gate_backlog": [],
   "agent_ladder": {
     "simple": "composer-2.5-fast",
     "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Milestone complete. PR #39 merged (squash). All CI green. Ready for manual live test."
+  "notes": "PR #41 open. Fixed cargo fmt + clippy useless_vec CI failures. One linux cargo-test failure was runner infra (no space left on device), unrelated to this diff - waiting on rerun."
 }

@@ -5,12 +5,14 @@
 
 pub mod draft;
 pub mod export_format;
+pub mod focus_tags;
 pub mod limits;
 pub mod memory;
 pub mod persistence;
 pub mod question_attempts;
 pub mod question_bank;
 pub mod recovery;
+pub mod round_questions;
 pub mod shuffle;
 pub mod state;
 pub mod summary_parse;

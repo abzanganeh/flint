@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   addToQuestionBank,
+  getFocusTagCatalog,
   getQuestionBank,
+  type FocusTagCatalogEntry,
   type QuestionBankEntry,
   removeFromQuestionBank,
   runRehearsalTurn,
@@ -42,6 +44,9 @@ export default function QuestionBank({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [shuffleQuestions, setShuffleQuestions] = useState(readShuffleQuestionsPreference);
+  const [tagCatalog, setTagCatalog] = useState<FocusTagCatalogEntry[]>([]);
+  const [tagPickerOpen, setTagPickerOpen] = useState(false);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const loadBank = useCallback(async () => {
@@ -61,18 +66,31 @@ export default function QuestionBank({
     void loadBank();
   }, [loadBank]);
 
+  useEffect(() => {
+    getFocusTagCatalog(sessionId)
+      .then(setTagCatalog)
+      .catch(() => setTagCatalog([]));
+  }, [sessionId]);
+
   const handleShuffleToggle = (enabled: boolean) => {
     setShuffleQuestions(enabled);
     writeShuffleQuestionsPreference(enabled);
+  };
+
+  const toggleSelectedTag = (tagId: string) => {
+    setSelectedTags((prev) =>
+      prev.includes(tagId) ? prev.filter((t) => t !== tagId) : [...prev, tagId],
+    );
   };
 
   const handleAdd = async () => {
     const trimmed = newQuestion.trim();
     if (!trimmed) return;
     try {
-      await addToQuestionBank(sessionId, trimmed);
+      await addToQuestionBank(sessionId, trimmed, selectedTags.length > 0 ? selectedTags : undefined);
       await loadBank();
       setNewQuestion("");
+      setSelectedTags([]);
       setError(null);
       inputRef.current?.focus();
     } catch (e) {
@@ -207,6 +225,39 @@ export default function QuestionBank({
           Add
         </button>
       </div>
+
+      <button
+        type="button"
+        className="question-bank__tag-toggle"
+        onClick={() => setTagPickerOpen((v) => !v)}
+        data-testid="question-bank-tag-toggle"
+      >
+        {tagPickerOpen ? "− Tag (optional)" : "+ Tag (optional)"}
+        {selectedTags.length > 0 ? ` (${selectedTags.length})` : ""}
+      </button>
+
+      {tagPickerOpen && (
+        <div className="question-bank__tag-picker" data-testid="question-bank-tag-picker">
+          {tagCatalog.map((tag) => {
+            const active = selectedTags.includes(tag.id);
+            return (
+              <button
+                key={tag.id}
+                type="button"
+                data-testid={`question-bank-tag-chip-${tag.id}`}
+                className={`question-bank__tag-chip${active ? " question-bank__tag-chip--active" : ""}${
+                  tag.questionCount === 0 ? " question-bank__tag-chip--muted" : ""
+                }`}
+                title={tag.description}
+                onClick={() => toggleSelectedTag(tag.id)}
+              >
+                {tag.label}
+                <span className="question-bank__tag-chip-count">{tag.questionCount}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
