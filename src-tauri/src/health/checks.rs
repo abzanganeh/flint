@@ -13,9 +13,6 @@ use crate::keychain;
 use crate::llm::stack;
 use crate::supabase::{resolve_supabase_config, SupabaseConfig};
 
-#[cfg(target_os = "linux")]
-use cpal::traits::DeviceTrait;
-
 const OLLAMA_HEALTH_URL: &str = "http://localhost:11434/api/tags";
 const OLLAMA_TIMEOUT_SECS: u64 = 2;
 const SUPABASE_HEALTH_TIMEOUT_SECS: u64 = 5;
@@ -703,48 +700,53 @@ fn echo_cancel_module_loaded() -> bool {
 pub fn check_system_audio_isolation() -> HealthCheckResult {
     #[cfg(target_os = "linux")]
     {
-        let host = cpal::default_host();
-        let sys_dev = match crate::audio::capture::find_system_device(&host) {
-            Ok(d) => d,
-            Err(e) => {
-                return warn(
-                    HealthCheck::SystemAudioIsolation,
-                    "Could not resolve a system audio (loopback) device.",
-                    format!("{e} This will block starting a live session until resolved."),
-                );
-            }
-        };
-        let mic_dev = match crate::audio::capture::find_mic_device(&host) {
-            Ok(d) => d,
-            Err(e) => {
-                return warn(
-                    HealthCheck::SystemAudioIsolation,
-                    "Could not resolve a microphone device.",
-                    e.to_string(),
-                );
-            }
-        };
-        let sys_name = sys_dev.name().unwrap_or_default();
-        let mic_name = mic_dev.name().unwrap_or_default();
-        if sys_name == mic_name {
+        // Do NOT enumerate cpal/ALSA devices here. On some Linux hosts that
+        // triggers a native SIGFPE inside cpal and kills the entire Tauri app
+        // during Health Check startup. Probe PipeWire routing via pactl instead.
+        if !crate::audio::capture::linux_alsa_pulse_plugin_available() {
             return fail(
                 HealthCheck::SystemAudioIsolation,
-                "System audio and microphone resolve to the same device — live \
-                 sessions would duplicate every utterance on both channels and \
-                 never capture real interviewer audio.",
+                "System audio and microphone would share the same ALSA device — \
+                 live sessions would duplicate every utterance on both channels \
+                 and never capture real interviewer audio.",
                 "Install pipewire-pulse (provides the ALSA \"pulse\" plugin: \
                  `sudo apt install pipewire-pulse`), then restart Flint. This is \
                  required for system-audio loopback to work independently of \
                  the microphone.",
             );
         }
-        pass(
-            HealthCheck::SystemAudioIsolation,
-            format!(
-                "System audio ({sys_name}) and microphone ({mic_name}) resolve to \
-                 different devices."
+
+        match crate::audio::capture::linux_pulse_isolation_probe() {
+            Ok((sys_source, mic_source)) => {
+                if sys_source == mic_source {
+                    return fail(
+                        HealthCheck::SystemAudioIsolation,
+                        "System audio and microphone resolve to the same Pulse \
+                         source — live sessions would duplicate every utterance \
+                         on both channels.",
+                        "Set distinct PipeWire sources: system loopback should \
+                         use your default sink's `.monitor` source; the mic should \
+                         use your physical input (or an echo-cancel virtual source). \
+                         Install pipewire-pulse if the ALSA \"pulse\" plugin is missing.",
+                    );
+                }
+                pass(
+                    HealthCheck::SystemAudioIsolation,
+                    format!(
+                        "System audio ({sys_source}) and microphone ({mic_source}) \
+                         resolve to different Pulse sources."
+                    ),
+                )
+            }
+            Err(e) => warn(
+                HealthCheck::SystemAudioIsolation,
+                "Could not verify system audio isolation via PipeWire.",
+                format!(
+                    "{e} Ensure PipeWire/PulseAudio is running and your default \
+                     sink/source are configured before going live."
+                ),
             ),
-        )
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {

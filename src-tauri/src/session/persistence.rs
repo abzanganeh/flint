@@ -1510,11 +1510,16 @@ impl SessionPersistence {
     }
 
     /// Load tagged question bank entries.
+    ///
+    /// Reorders a generic opener ("tell me about yourself" and variants) to
+    /// the front on every read — this normalizes sessions whose bank was
+    /// stored before that ordering rule existed, not just newly extracted
+    /// digests, without needing a data migration.
     pub fn load_question_bank_entries(
         &self,
         session_id: Uuid,
     ) -> Result<Vec<crate::session::question_bank::BankQuestionEntry>> {
-        use crate::session::question_bank::parse_bank_json;
+        use crate::session::question_bank::{parse_bank_json, prioritize_opener_entry};
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
         let json: String = conn
@@ -1524,7 +1529,9 @@ impl SessionPersistence {
                 |r| r.get(0),
             )
             .context("load question bank entries")?;
-        Ok(parse_bank_json(&json))
+        let mut entries = parse_bank_json(&json);
+        prioritize_opener_entry(&mut entries);
+        Ok(entries)
     }
 
     /// Load the persisted question bank for a session. Returns an empty vec
