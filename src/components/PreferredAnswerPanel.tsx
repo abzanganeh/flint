@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getPreferredAnswer, savePreferredAnswer } from "../commands";
+import InfoPopover from "./InfoPopover";
 
 interface PreferredAnswerPanelProps {
   sessionId: string;
@@ -8,6 +9,8 @@ interface PreferredAnswerPanelProps {
   /** Flint's latest directional draft — pre-fill when no saved answer yet. */
   suggestedAnswer?: string;
   onSaved?: () => void;
+  /** When true, body starts collapsed to save vertical space (user can expand). */
+  defaultCollapsed?: boolean;
 }
 
 type SaveState = "idle" | "saving" | "saved" | "error";
@@ -20,11 +23,13 @@ export default function PreferredAnswerPanel({
   question,
   suggestedAnswer = "",
   onSaved,
+  defaultCollapsed = false,
 }: PreferredAnswerPanelProps) {
   const [draft, setDraft] = useState("");
   const [loadedPreferred, setLoadedPreferred] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(!defaultCollapsed);
 
   const loadPreferred = useCallback(async () => {
     if (!question.trim()) return;
@@ -71,25 +76,40 @@ export default function PreferredAnswerPanel({
   return (
     <div className="preferred-answer-panel">
       <div className="preferred-answer-panel__header">
-        <span className="preferred-answer-panel__title">Tailor for Live</span>
-        {hasSaved && (
-          <span className="preferred-answer-panel__badge">Saved for Live</span>
-        )}
+        <button
+          type="button"
+          className="preferred-answer-panel__toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <span className="preferred-answer-panel__title">Tailor for Live</span>
+          <span className="preferred-answer-panel__chevron" aria-hidden>
+            {expanded ? "▲" : "▼"}
+          </span>
+        </button>
+        <div className="preferred-answer-panel__header-actions">
+          <InfoPopover ariaLabel="How tailoring for Live works">
+            <p>
+              Flint&apos;s draft is a starting point. Edit it into words you would actually
+              say — first person, natural, grounded in your real experience. Saved answers
+              appear instantly during your live interview.
+            </p>
+          </InfoPopover>
+          {hasSaved && (
+            <span className="preferred-answer-panel__badge">Saved for Live</span>
+          )}
+        </div>
       </div>
 
-      <p className="preferred-answer-panel__hint">
-        Flint&apos;s draft is a starting point. Edit it into words you would actually say —
-        first person, natural, grounded in your real experience. Saved answers appear
-        instantly during your live interview.
-      </p>
-
+      {expanded && (
+        <>
       <label className="preferred-answer-panel__label" htmlFor="preferred-answer-body">
         Your preferred answer
       </label>
       <textarea
         id="preferred-answer-body"
         className="preferred-answer-panel__textarea"
-        rows={7}
+        rows={4}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         placeholder="Write how you would say this out loud in the interview…"
@@ -125,6 +145,8 @@ export default function PreferredAnswerPanel({
               : "Save as preferred answer"}
         </button>
       </div>
+        </>
+      )}
     </div>
   );
 }

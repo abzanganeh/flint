@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { copyTextToClipboard, rephraseResponse } from "../commands";
+import { PANEL_ACCENTS } from "../lib/panelColors";
 import { useUIStore } from "../store/ui";
 import type { ConfidenceLevel } from "../types";
 import { QuestionHeading } from "./TurnCards";
@@ -106,13 +107,14 @@ const AnswerPanel = ({ sessionId, isGenerating = false }: AnswerPanelProps) => {
           alignItems: "center",
           justifyContent: "space-between",
           padding: "6px 12px",
-          borderBottom: "1px solid #1e2028",
+          borderBottom: `1px solid ${PANEL_ACCENTS.answer.headerBorder}`,
+          backgroundColor: PANEL_ACCENTS.answer.headerBg,
           flexShrink: 0,
         }}
       >
         <span
           style={{
-            color: "#6b7280",
+            color: PANEL_ACCENTS.answer.text,
             fontSize: "11px",
             letterSpacing: "0.08em",
             textTransform: "uppercase",

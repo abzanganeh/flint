@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import InfoPopover from "../components/InfoPopover";
 import PreferredAnswerPanel from "../components/PreferredAnswerPanel";
 import MicQualityBadge from "../components/MicQualityBadge";
 import FirstRunRehearsalModal, {
@@ -47,6 +48,32 @@ export interface RehearsalProps {
 
 type SideTab = "checklist" | "questions" | "research" | "stories";
 
+const QUESTION_INPUT_MIN_HEIGHT = 44;
+const QUESTION_INPUT_MAX_HEIGHT = 260;
+const QUESTION_INPUT_DEFAULT_HEIGHT = 64;
+const QUESTION_INPUT_HEIGHT_STORAGE_KEY = "flint.rehearsal.questionInputHeight";
+
+const readPersistedQuestionInputHeight = (): number => {
+  try {
+    const raw = window.localStorage.getItem(QUESTION_INPUT_HEIGHT_STORAGE_KEY);
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.min(QUESTION_INPUT_MAX_HEIGHT, Math.max(QUESTION_INPUT_MIN_HEIGHT, parsed));
+    }
+  } catch {
+    // localStorage unavailable (e.g. private mode) — fall back to default.
+  }
+  return QUESTION_INPUT_DEFAULT_HEIGHT;
+};
+
+const persistQuestionInputHeight = (height: number): void => {
+  try {
+    window.localStorage.setItem(QUESTION_INPUT_HEIGHT_STORAGE_KEY, String(height));
+  } catch {
+    // Non-fatal — just won't persist across sessions.
+  }
+};
+
 const emptyFields: SessionContextFields = {
   jobDescription: "",
   profile: "",
@@ -77,6 +104,11 @@ const Rehearsal = ({
   );
   const [sideTab, setSideTab] = useState<SideTab>("checklist");
   const [sideOpen, setSideOpen] = useState(true);
+  const [questionInputHeight, setQuestionInputHeight] = useState(
+    readPersistedQuestionInputHeight,
+  );
+  const questionInputHeightRef = useRef(questionInputHeight);
+  questionInputHeightRef.current = questionInputHeight;
 
   const {
     streamingBuffers,
@@ -214,6 +246,23 @@ const Rehearsal = ({
     lastAskedQuestion.trim() !== "" &&
     question.trim() === lastAskedQuestion.trim();
 
+  // On first response, collapse low-priority panels so Answer/Visual get space.
+  const autoFocusedPanelsRef = useRef(false);
+  useEffect(() => {
+    if (!hasResponse || autoFocusedPanelsRef.current) return;
+    autoFocusedPanelsRef.current = true;
+    useUIStore.setState((s) => ({
+      panelLayout: {
+        ...s.panelLayout,
+        collapsed: {
+          ...s.panelLayout.collapsed,
+          transcript: true,
+          context: true,
+        },
+      },
+    }));
+  }, [hasResponse]);
+
   const handleSubmit = useCallback(async () => {
     if (!question.trim() || asking) return;
     await fireQuestion(question.trim());
@@ -226,6 +275,28 @@ const Rehearsal = ({
     },
     [fireQuestion],
   );
+
+  const handleQuestionResizeStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const startY = e.clientY;
+    const startHeight = questionInputHeightRef.current;
+
+    const onMove = (ev: MouseEvent) => {
+      const dy = ev.clientY - startY;
+      const next = Math.min(
+        QUESTION_INPUT_MAX_HEIGHT,
+        Math.max(QUESTION_INPUT_MIN_HEIGHT, startHeight + dy),
+      );
+      setQuestionInputHeight(next);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      persistQuestionInputHeight(questionInputHeightRef.current);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, []);
 
   const handleGenerateDiagram = useCallback(
     async (q: string) => {
@@ -295,69 +366,46 @@ const Rehearsal = ({
 
       <div
         data-testid="rehearsal-screen"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          height: "calc(100vh - 36px)",
-          backgroundColor: "#0f1117",
-          fontFamily: "'Inter', 'SF Pro Text', system-ui, sans-serif",
-        }}
+        className="rehearsal-screen"
       >
-        {/* Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            padding: "8px 16px",
-            borderBottom: "1px solid #1e2028",
-            flexShrink: 0,
-            flexWrap: "wrap",
-          }}
-        >
-          <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
-            <span
-              style={{
-                color: "#a78bfa",
-                fontSize: "11px",
-                fontWeight: 700,
-                letterSpacing: "0.1em",
-                textTransform: "uppercase",
-                flexShrink: 0,
-              }}
-            >
-              Rehearsal Mode
-            </span>
+        {/* Compact header — workflow + shortcut hints live in [i] popovers */}
+        <header className="rehearsal-header">
+          <div className="rehearsal-header__primary">
+            <span className="rehearsal-header__mode">Rehearsal Mode</span>
             <SessionContextBadges
               sessionId={sessionId}
               onOpenSettings={onOpenSettings}
             />
+            <InfoPopover ariaLabel="How rehearsal feeds Live">
+              <p>
+                <strong>Ask → tailor → save for Live.</strong> Flint drafts from your prep
+                context. Edit each answer into your own words, then{" "}
+                <strong>Save as preferred answer</strong>. Saved scripts appear instantly
+                when the same question comes up in your live interview.
+              </p>
+            </InfoPopover>
+            <InfoPopover ariaLabel="Keyboard shortcuts">
+              <ul className="rehearsal-shortcuts-list">
+                <li>
+                  <kbd>Ctrl+Enter</kbd> — Ask / submit question
+                </li>
+                <li>
+                  {typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent)
+                    ? "Ctrl+Shift+Space or F8 — Re-ask (Ctrl+Alt+Space blocked on Wayland)"
+                    : "Ctrl+Alt+Space — Re-ask last question"}
+                </li>
+              </ul>
+            </InfoPopover>
           </div>
-          <span style={{ color: "#6b7280", fontSize: "11px" }}>
-            — Ask → tailor your answer → save for Live. Ctrl+Enter to ask
-            {typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent)
-              ? " · Ctrl+Shift+Space or F8 to re-ask (Ctrl+Alt+Space blocked on Wayland)"
-              : " · Ctrl+Alt+Space to re-ask"}
-            .
-          </span>
 
-          <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+          <div className="rehearsal-header__actions">
             <UsageWidget />
             {onOpenSettings && (
               <button
                 type="button"
                 onClick={onOpenSettings}
                 title="Open API Keys settings"
-                style={{
-                  padding: "4px 10px",
-                  fontSize: "11px",
-                  fontWeight: 600,
-                  borderRadius: 4,
-                  border: "1px solid #374151",
-                  backgroundColor: "transparent",
-                  color: "#9ca3af",
-                  cursor: "pointer",
-                }}
+                className="rehearsal-header__ghost-btn"
               >
                 API Keys
               </button>
@@ -375,115 +423,54 @@ const Rehearsal = ({
                     onReturnToSetup();
                   }
                 }}
-                style={{
-                  padding: "4px 10px",
-                  fontSize: "11px",
-                  fontWeight: 600,
-                  borderRadius: 4,
-                  border: "1px solid #374151",
-                  backgroundColor: "transparent",
-                  color: "#9ca3af",
-                  cursor: "pointer",
-                }}
+                className="rehearsal-header__ghost-btn"
               >
                 Edit session setup
               </button>
             )}
           </div>
-        </div>
+        </header>
 
-        <div className="rehearsal-workflow-banner">
-          <strong>How rehearsal feeds Live:</strong> Flint drafts from your prep context.
-          Edit each answer into your own words, then <strong>Save as preferred answer</strong>.
-          Saved scripts appear instantly when the same question comes up in your live interview.
-        </div>
-
-        {/* Question input */}
-        <div
-          style={{
-            padding: "12px 16px",
-            borderBottom: "1px solid #1e2028",
-            display: "flex",
-            gap: 8,
-            flexShrink: 0,
-            alignItems: "flex-start",
-          }}
-        >
-          <textarea
-            data-testid="rehearsal-question-input"
-            value={question}
-            onChange={(e) => setQuestion(e.target.value)}
-            placeholder="Type a practice interview question… (Enter = new line, Ctrl+Enter = Ask)"
-            rows={3}
-            disabled={asking}
-            style={{
-              flex: 1,
-              padding: "8px 12px",
-              backgroundColor: "#1a1d26",
-              border: "1px solid #2d3748",
-              borderRadius: 6,
-              color: "#e5e7eb",
-              fontSize: "13px",
-              lineHeight: 1.5,
-              fontFamily: "inherit",
-              resize: "vertical",
-              minHeight: "4.5rem",
-              maxHeight: "12rem",
-              outline: "none",
-            }}
-          />
-          <button
-            data-testid="rehearsal-submit-button"
-            onClick={() => void handleSubmit()}
-            disabled={!question.trim() || asking}
-            style={{
-              padding: "8px 16px",
-              backgroundColor: question.trim() && !asking ? "#7c3aed" : "#1e2028",
-              color: question.trim() && !asking ? "#fff" : "#4b5563",
-              border: "none",
-              borderRadius: 6,
-              fontSize: "13px",
-              fontWeight: 600,
-              cursor: question.trim() && !asking ? "pointer" : "not-allowed",
-              flexShrink: 0,
-              alignSelf: "flex-end",
-            }}
-          >
-            {asking ? "Asking…" : isReaskingSameQuestion ? "Ask again" : "Ask"}
-          </button>
-        </div>
-
-        {error && (
-          <div
-            style={{
-              padding: "8px 16px",
-              color: "#ef4444",
-              fontSize: "12px",
-              borderBottom: "1px solid #1e2028",
-              flexShrink: 0,
-            }}
-          >
-            {error}
+        {/* Scrollable workflow strip — caps height so panels always get room */}
+        <div className="rehearsal-workflow-scroll">
+          <div className="rehearsal-question-row">
+            <div className="rehearsal-question-input-wrap">
+              <textarea
+                data-testid="rehearsal-question-input"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                placeholder="Type a practice question… (Ctrl+Enter to ask)"
+                disabled={asking}
+                className="rehearsal-question-input"
+                style={{ height: `${questionInputHeight}px` }}
+              />
+              <div
+                className="rehearsal-question-resize-handle"
+                onMouseDown={handleQuestionResizeStart}
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Resize question input"
+                title="Drag to resize"
+              >
+                <span className="rehearsal-question-resize-handle__grip" />
+              </div>
+            </div>
+            <button
+              data-testid="rehearsal-submit-button"
+              onClick={() => void handleSubmit()}
+              disabled={!question.trim() || asking}
+              className="rehearsal-ask-btn"
+            >
+              {asking ? "Asking…" : isReaskingSameQuestion ? "Ask again" : "Ask"}
+            </button>
           </div>
-        )}
 
-        {costBlocked && !error && (
-          <div
-            style={{
-              padding: "8px 16px",
-              color: "#f59e0b",
-              fontSize: "12px",
-              borderBottom: "1px solid #1e2028",
-              flexShrink: 0,
-            }}
-          >
-            {costBlocked}
-          </div>
-        )}
+          {error && <div className="rehearsal-inline-alert rehearsal-inline-alert--error">{error}</div>}
+          {costBlocked && !error && (
+            <div className="rehearsal-inline-alert rehearsal-inline-alert--warn">{costBlocked}</div>
+          )}
 
-        {/* Weak-context warning — shown after a turn with no/weak RAG hits */}
-        {!asking && weakContext && hasResponse && lastAskedQuestion && (
-          <div style={{ padding: "8px 16px", flexShrink: 0 }}>
+          {!asking && weakContext && hasResponse && lastAskedQuestion && (
             <AddContextPanel
               sessionId={sessionId}
               question={lastAskedQuestion}
@@ -496,24 +483,22 @@ const Rehearsal = ({
                 }
               }}
             />
-          </div>
-        )}
+          )}
 
-        {!asking && hasResponse && lastAskedQuestion && (
-          <div style={{ padding: "8px 16px", flexShrink: 0 }}>
+          {!asking && hasResponse && lastAskedQuestion && (
             <PreferredAnswerPanel
               sessionId={sessionId}
               question={lastAskedQuestion}
               suggestedAnswer={streamingBuffers.answer}
               onSaved={() => setBankRefreshKey((k) => k + 1)}
+              defaultCollapsed
             />
-          </div>
-        )}
+          )}
+        </div>
 
-        {/* Main content: panels + sidebar */}
-        <div style={{ flex: 1, overflow: "hidden", minHeight: 0, display: "flex" }}>
-          {/* Overlay panels */}
-          <div style={{ flex: 1, overflow: "hidden" }}>
+        {/* Main content: panels + sidebar — guaranteed min height */}
+        <div className="rehearsal-main">
+          <div className="rehearsal-panels">
             <OverlayLayout
               transcript={<TranscriptPanel sessionId={sessionId} />}
               answer={
@@ -531,67 +516,37 @@ const Rehearsal = ({
           </div>
 
           {/* Sidebar */}
-          <div
-            style={{
-              width: sideOpen ? 280 : 28,
-              flexShrink: 0,
-              borderLeft: "1px solid #1e2028",
-              display: "flex",
-              flexDirection: "column",
-              overflow: "hidden",
-              transition: "width 0.18s ease",
-            }}
-          >
-            {/* Sidebar toggle */}
+          <div className={`rehearsal-sidebar${sideOpen ? "" : " rehearsal-sidebar--collapsed"}`}>
+            {/* Sidebar toggle — colored bar so collapse/expand is obvious at a glance */}
             <button
               onClick={() => setSideOpen((v) => !v)}
-              title={sideOpen ? "Hide sidebar" : "Show sidebar"}
-              style={{
-                height: 28,
-                background: "none",
-                border: "none",
-                borderBottom: "1px solid #1e2028",
-                cursor: "pointer",
-                color: "#52525b",
-                fontSize: 10,
-                fontWeight: 600,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: sideOpen ? "flex-end" : "center",
-                padding: "0 8px",
-                flexShrink: 0,
-              }}
+              aria-label={sideOpen ? "Hide prep tools sidebar" : "Show prep tools sidebar"}
+              title={sideOpen ? "Hide Prep Tools sidebar" : "Show Prep Tools sidebar (Qs, Chat, Stories)"}
+              className={`rehearsal-sidebar__toggle${
+                sideOpen ? " rehearsal-sidebar__toggle--expanded" : " rehearsal-sidebar__toggle--collapsed"
+              }`}
             >
-              {sideOpen ? "▶" : "◀"}
+              {sideOpen ? (
+                <>
+                  <span>Prep Tools</span>
+                  <span className="rehearsal-sidebar__toggle-icon">▸</span>
+                </>
+              ) : (
+                <span className="rehearsal-sidebar__toggle-vertical">◂ Prep Tools</span>
+              )}
             </button>
 
             {sideOpen && (
               <>
                 {/* Tab bar */}
-                <div
-                  style={{
-                    display: "flex",
-                    borderBottom: "1px solid #1e2028",
-                    flexShrink: 0,
-                  }}
-                >
+                <div className="rehearsal-sidebar__tabs">
                   {(["checklist", "questions", "research", "stories"] as SideTab[]).map((t) => (
                     <button
                       key={t}
                       onClick={() => setSideTab(t)}
-                      style={{
-                        flex: 1,
-                        padding: "5px 4px",
-                        background: "none",
-                        border: "none",
-                        borderBottom: sideTab === t ? "2px solid #7c3aed" : "2px solid transparent",
-                        color: sideTab === t ? "#a78bfa" : "#52525b",
-                        fontSize: 10,
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        textTransform: "capitalize",
-                        letterSpacing: "0.04em",
-                      }}
+                      className={`rehearsal-sidebar__tab${
+                        sideTab === t ? " rehearsal-sidebar__tab--active" : ""
+                      }`}
                     >
                       {t === "checklist"
                         ? "Prep"
@@ -605,7 +560,7 @@ const Rehearsal = ({
                 </div>
 
                 {/* Tab content */}
-                <div style={{ flex: 1, overflow: "auto", padding: 12 }}>
+                <div className="rehearsal-sidebar__tab-content">
                   {sideTab === "checklist" && (
                     <PrepChecklist
                       fields={contextFields}
@@ -646,26 +601,8 @@ const Rehearsal = ({
 
         <TokenBudgetIndicator />
 
-        {/* Footer */}
-        <div
-          style={{
-            padding: "10px 16px",
-            borderTop: "1px solid #1e2028",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexShrink: 0,
-            gap: 12,
-          }}
-        >
-          <span
-            style={{
-              color: hasResponse ? "#52525b" : "#f59e0b",
-              fontSize: "11px",
-              lineHeight: 1.5,
-              maxWidth: 420,
-            }}
-          >
+        <footer className="rehearsal-footer">
+          <span className={`rehearsal-footer__hint${hasResponse ? "" : " rehearsal-footer__hint--warn"}`}>
             {hasResponse
               ? "Review the panels above. Mock Interview trains delivery — go live when you feel ready."
               : "Ask at least one practice question and try Mock Interview before going live — better prep means sharper answers in the real session."}
@@ -675,17 +612,7 @@ const Rehearsal = ({
               data-testid="start-mock-button"
               onClick={onStartMock}
               title="Strongly recommended — practice with AI interviewer before going live"
-              style={{
-                padding: "8px 20px",
-                backgroundColor: "#7c3aed",
-                color: "#fff",
-                border: "none",
-                borderRadius: 6,
-                fontSize: "13px",
-                fontWeight: 600,
-                cursor: "pointer",
-                flexShrink: 0,
-              }}
+              className="rehearsal-footer__mock-btn"
             >
               Mock Interview
             </button>
@@ -698,21 +625,11 @@ const Rehearsal = ({
                 ? "Continue to live session"
                 : "Not recommended — practice first for better live answers"
             }
-            style={{
-              padding: "8px 20px",
-              backgroundColor: hasResponse ? "#22c55e" : "transparent",
-              color: hasResponse ? "#fff" : "#94a3b8",
-              border: hasResponse ? "none" : "1px solid #374151",
-              borderRadius: 6,
-              fontSize: "13px",
-              fontWeight: 600,
-              cursor: "pointer",
-              flexShrink: 0,
-            }}
+            className={`rehearsal-footer__complete-btn${hasResponse ? " rehearsal-footer__complete-btn--ready" : ""}`}
           >
             {hasResponse ? "Complete Rehearsal →" : "Go live without rehearsing"}
           </button>
-        </div>
+        </footer>
       </div>
       <MicQualityBadge />
       </>
