@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   getFocusTagCatalog,
   getSessionFocus,
+  inferRoundTypeFromBrief,
   saveSessionFocus,
   type FocusTagCatalogEntry,
   type SessionFocusDto,
@@ -13,6 +14,15 @@ interface Props {
   onComplete: () => void;
 }
 
+/** Mirrors ROUND_TYPES in src-tauri/src/session/round_questions.rs */
+const ROUND_TYPES = [
+  { value: "recruiter_screen", label: "Recruiter / HR screen" },
+  { value: "technical", label: "Technical interview" },
+  { value: "hiring_manager", label: "Hiring manager" },
+  { value: "onsite_panel", label: "Onsite / panel loop" },
+  { value: "final", label: "Final / executive round" },
+] as const;
+
 const emptyFocus = (): SessionFocusDto => ({
   focusName: "",
   focusTags: [],
@@ -20,6 +30,7 @@ const emptyFocus = (): SessionFocusDto => ({
   focusNotes: "",
   focusConfirmedAt: null,
   needsFocusRefresh: false,
+  roundType: "",
 });
 
 export default function SessionFocusGate({ sessionId, onComplete }: Props) {
@@ -28,6 +39,7 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const roundTypeTouchedRef = useRef(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -39,6 +51,7 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
       ]);
       setFocus(focusData);
       setCatalog(tagCatalog);
+      roundTypeTouchedRef.current = false;
     } catch (e) {
       setError(String(e));
     } finally {
@@ -57,6 +70,20 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
         : [...prev.focusTags, tag];
       return { ...prev, focusTags: selected };
     });
+  };
+
+  const handleBriefBlur = async () => {
+    if (roundTypeTouchedRef.current) return;
+    const brief = focus.recruiterBrief.trim();
+    if (!brief) return;
+    try {
+      const inferred = await inferRoundTypeFromBrief(brief);
+      if (inferred && !roundTypeTouchedRef.current) {
+        setFocus((prev) => ({ ...prev, roundType: inferred }));
+      }
+    } catch {
+      // Non-fatal — suggestion only.
+    }
   };
 
   const handleContinue = async () => {
@@ -136,11 +163,38 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
 
       <label style={{ display: "block", marginBottom: 16 }}>
         <span style={{ display: "block", fontSize: 12, color: "#64748b", marginBottom: 6 }}>
+          Interview round
+        </span>
+        <select
+          data-testid="session-focus-round-type"
+          value={focus.roundType}
+          onChange={(e) => {
+            roundTypeTouchedRef.current = true;
+            setFocus((p) => ({ ...p, roundType: e.target.value }));
+          }}
+          style={inputStyle}
+        >
+          <option value="">Not specified</option>
+          {ROUND_TYPES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </select>
+        <span style={{ display: "block", fontSize: 11, color: "#52525b", marginTop: 6 }}>
+          Suggested from the recruiter brief when you leave that field — you can always override.
+        </span>
+      </label>
+
+      <label style={{ display: "block", marginBottom: 16 }}>
+        <span style={{ display: "block", fontSize: 12, color: "#64748b", marginBottom: 6 }}>
           Recruiter brief (paste email)
         </span>
         <textarea
+          data-testid="session-focus-recruiter-brief"
           value={focus.recruiterBrief}
           onChange={(e) => setFocus((p) => ({ ...p, recruiterBrief: e.target.value }))}
+          onBlur={() => void handleBriefBlur()}
           rows={4}
           placeholder="Paste the recruiter email or agenda…"
           style={{ ...inputStyle, resize: "vertical" }}

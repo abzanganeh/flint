@@ -782,6 +782,8 @@ export interface SessionFocusDto {
   focusNotes: string;
   focusConfirmedAt: number | null;
   needsFocusRefresh: boolean;
+  /** Interview round id (e.g. recruiter_screen); empty = unspecified. */
+  roundType: string;
 }
 
 export const getSessionFocus = (sessionId: string): Promise<SessionFocusDto> =>
@@ -791,6 +793,12 @@ export const saveSessionFocus = (
   sessionId: string,
   focus: SessionFocusDto,
 ): Promise<void> => invoke<void>("save_session_focus", { sessionId, focus });
+
+/** Heuristic suggestion from recruiter brief text; null when no keywords match. */
+export const inferRoundTypeFromBrief = (
+  recruiterBrief: string,
+): Promise<string | null> =>
+  invoke<string | null>("infer_round_type_from_brief", { recruiterBrief });
 
 export const listQuestionBankTags = (sessionId: string): Promise<string[]> =>
   invoke<string[]>("list_question_bank_tags", { sessionId });

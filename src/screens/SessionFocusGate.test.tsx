@@ -6,6 +6,7 @@ import SessionFocusGate from "./SessionFocusGate";
 vi.mock("../commands", () => ({
   getFocusTagCatalog: vi.fn(),
   getSessionFocus: vi.fn(),
+  inferRoundTypeFromBrief: vi.fn(),
   saveSessionFocus: vi.fn(),
 }));
 
@@ -16,6 +17,7 @@ const emptyFocus = () => ({
   focusNotes: "",
   focusConfirmedAt: null,
   needsFocusRefresh: false,
+  roundType: "",
 });
 
 const catalog = [
@@ -79,6 +81,109 @@ describe("SessionFocusGate focus-tag catalog", () => {
       expect(saveSessionFocus).toHaveBeenCalledWith(
         "s1",
         expect.objectContaining({ focusTags: ["motivation"] }),
+      );
+    });
+  });
+});
+
+describe("SessionFocusGate round-type selector", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("pre-selects round type from inferred recruiter brief on blur", async () => {
+    const { getFocusTagCatalog, getSessionFocus, inferRoundTypeFromBrief } =
+      await import("../commands");
+    vi.mocked(getSessionFocus).mockResolvedValue(emptyFocus());
+    vi.mocked(getFocusTagCatalog).mockResolvedValue(catalog);
+    vi.mocked(inferRoundTypeFromBrief).mockResolvedValue("recruiter_screen");
+
+    render(<SessionFocusGate sessionId="s1" onComplete={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-focus-recruiter-brief")).toBeTruthy();
+    });
+
+    const brief = screen.getByTestId("session-focus-recruiter-brief");
+    fireEvent.change(brief, {
+      target: { value: "30 minute phone screen with our internal recruiter" },
+    });
+    fireEvent.blur(brief);
+
+    await waitFor(() => {
+      expect(inferRoundTypeFromBrief).toHaveBeenCalledWith(
+        "30 minute phone screen with our internal recruiter",
+      );
+    });
+    await waitFor(() => {
+      expect(
+        (screen.getByTestId("session-focus-round-type") as HTMLSelectElement).value,
+      ).toBe("recruiter_screen");
+    });
+  });
+
+  it("does not overwrite a manual round-type selection after brief edit", async () => {
+    const { getFocusTagCatalog, getSessionFocus, inferRoundTypeFromBrief } =
+      await import("../commands");
+    vi.mocked(getSessionFocus).mockResolvedValue(emptyFocus());
+    vi.mocked(getFocusTagCatalog).mockResolvedValue(catalog);
+    vi.mocked(inferRoundTypeFromBrief).mockResolvedValue("recruiter_screen");
+
+    render(<SessionFocusGate sessionId="s1" onComplete={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-focus-round-type")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("session-focus-round-type"), {
+      target: { value: "technical" },
+    });
+    expect(
+      (screen.getByTestId("session-focus-round-type") as HTMLSelectElement).value,
+    ).toBe("technical");
+
+    const brief = screen.getByTestId("session-focus-recruiter-brief");
+    fireEvent.change(brief, {
+      target: { value: "This is a recruiter phone screen" },
+    });
+    fireEvent.blur(brief);
+
+    await waitFor(() => {
+      // Give the async blur handler a chance to run if it were going to call infer.
+      expect(
+        (screen.getByTestId("session-focus-round-type") as HTMLSelectElement).value,
+      ).toBe("technical");
+    });
+    expect(inferRoundTypeFromBrief).not.toHaveBeenCalled();
+  });
+
+  it("includes roundType when saving session focus", async () => {
+    const { getFocusTagCatalog, getSessionFocus, saveSessionFocus } = await import(
+      "../commands"
+    );
+    vi.mocked(getSessionFocus).mockResolvedValue(emptyFocus());
+    vi.mocked(getFocusTagCatalog).mockResolvedValue(catalog);
+    vi.mocked(saveSessionFocus).mockResolvedValue(undefined);
+
+    render(<SessionFocusGate sessionId="s1" onComplete={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-focus-round-type")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("session-focus-round-type"), {
+      target: { value: "hiring_manager" },
+    });
+    fireEvent.click(screen.getByTestId("focus-tag-chip-behavioral"));
+    fireEvent.click(screen.getByTestId("session-focus-continue"));
+
+    await waitFor(() => {
+      expect(saveSessionFocus).toHaveBeenCalledWith(
+        "s1",
+        expect.objectContaining({
+          roundType: "hiring_manager",
+          focusTags: ["behavioral"],
+        }),
       );
     });
   });

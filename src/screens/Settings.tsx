@@ -447,6 +447,15 @@ function PrivacyTab() {
 
 // ── Session Focus Tab ─────────────────────────────────────────────────────────
 
+/** Mirrors ROUND_TYPES in src-tauri/src/session/round_questions.rs */
+const ROUND_TYPES = [
+  { value: "recruiter_screen", label: "Recruiter / HR screen" },
+  { value: "technical", label: "Technical interview" },
+  { value: "hiring_manager", label: "Hiring manager" },
+  { value: "onsite_panel", label: "Onsite / panel loop" },
+  { value: "final", label: "Final / executive round" },
+] as const;
+
 function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }) {
   const [focus, setFocus] = useState<SessionFocusDto | null>(null);
   const [catalog, setCatalog] = useState<FocusTagCatalogEntry[]>([]);
@@ -567,6 +576,22 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
           value={focus.focusName}
           onChange={(e) => setFocus({ ...focus, focusName: e.target.value })}
         />
+      </label>
+      <label className="settings-tab__field">
+        <span className="settings-tab__label">Interview round</span>
+        <select
+          className="settings-tab__input"
+          data-testid="settings-focus-round-type"
+          value={focus.roundType}
+          onChange={(e) => setFocus({ ...focus, roundType: e.target.value })}
+        >
+          <option value="">Not specified</option>
+          {ROUND_TYPES.map((t) => (
+            <option key={t.value} value={t.value}>
+              {t.label}
+            </option>
+          ))}
+        </select>
       </label>
       <label className="settings-tab__field">
         <span className="settings-tab__label">Recruiter brief</span>
