@@ -173,6 +173,50 @@ pub fn collect_bank_tags(entries: &[BankQuestionEntry]) -> Vec<String> {
     tags
 }
 
+/// Phrases identifying a generic "tell me about yourself" style opener.
+/// Real interviews virtually always lead with one of these regardless of
+/// what order digest extraction (an LLM call, so non-deterministic) or
+/// manual bank additions put questions in, so it is always pinned to the
+/// front rather than trusting extraction order.
+const OPENER_PHRASES: &[&str] = &[
+    "tell me about yourself",
+    "tell us about yourself",
+    "walk me through your background",
+    "walk me through your resume",
+    "walk us through your resume",
+    "introduce yourself",
+];
+
+fn is_opener_question(question: &str) -> bool {
+    let lower = question.to_lowercase();
+    OPENER_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Move the first opener-style item (if any) to the front, preserving the
+/// relative order of everything else.
+fn move_opener_to_front<T>(items: &mut Vec<T>, question_of: impl Fn(&T) -> &str) {
+    if let Some(pos) = items
+        .iter()
+        .position(|item| is_opener_question(question_of(item)))
+    {
+        if pos != 0 {
+            let opener = items.remove(pos);
+            items.insert(0, opener);
+        }
+    }
+}
+
+/// Reorder plain question strings (e.g. `Digest::likely_questions`) so a
+/// generic opener leads the list.
+pub fn prioritize_opener_question(questions: &mut Vec<String>) {
+    move_opener_to_front(questions, |q| q.as_str());
+}
+
+/// Reorder tagged bank entries so a generic opener leads the list.
+pub fn prioritize_opener_entry(entries: &mut Vec<BankQuestionEntry>) {
+    move_opener_to_front(entries, |e| e.question.as_str());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +238,54 @@ mod tests {
         let filtered = filter_by_focus_tags(&entries, &["technical".into()]);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].question, "Q2");
+    }
+
+    #[test]
+    fn prioritize_opener_question_moves_match_to_front() {
+        let mut qs = vec![
+            "Tell me about a complex production incident you led.".to_string(),
+            "What are your greatest strengths?".to_string(),
+            "Tell me about yourself".to_string(),
+            "Why should we hire you?".to_string(),
+        ];
+        prioritize_opener_question(&mut qs);
+        assert_eq!(qs[0], "Tell me about yourself");
+        assert_eq!(qs.len(), 4);
+        // Relative order of the rest is preserved.
+        assert_eq!(
+            qs[1],
+            "Tell me about a complex production incident you led."
+        );
+    }
+
+    #[test]
+    fn prioritize_opener_question_is_case_insensitive_and_matches_variants() {
+        let mut qs = vec![
+            "Why this role?".to_string(),
+            "Can you walk me through your background?".to_string(),
+        ];
+        prioritize_opener_question(&mut qs);
+        assert_eq!(qs[0], "Can you walk me through your background?");
+    }
+
+    #[test]
+    fn prioritize_opener_question_noop_when_already_first_or_absent() {
+        let mut already_first = vec!["Tell me about yourself".to_string(), "Q2".to_string()];
+        prioritize_opener_question(&mut already_first);
+        assert_eq!(already_first[0], "Tell me about yourself");
+
+        let mut absent = vec!["Q1".to_string(), "Q2".to_string()];
+        prioritize_opener_question(&mut absent);
+        assert_eq!(absent, vec!["Q1".to_string(), "Q2".to_string()]);
+    }
+
+    #[test]
+    fn prioritize_opener_entry_moves_match_to_front() {
+        let mut entries = vec![
+            BankQuestionEntry::question_only("Tell me about a production incident."),
+            BankQuestionEntry::question_only("Tell me about yourself."),
+        ];
+        prioritize_opener_entry(&mut entries);
+        assert_eq!(entries[0].question, "Tell me about yourself.");
     }
 }

@@ -2573,7 +2573,7 @@ pub async fn get_question_bank(
     filter_by_focus: Option<bool>,
 ) -> Result<Vec<crate::dto::QuestionBankEntryDto>, String> {
     use crate::session::question_attempts::normalize_question_key;
-    use crate::session::question_bank::filter_by_focus_tags;
+    use crate::session::question_bank::{filter_by_focus_tags, prioritize_opener_entry};
 
     let sid = validate_session_id(&state, &session_id).await?;
     let shuffle = shuffle.unwrap_or(false);
@@ -2612,6 +2612,12 @@ pub async fn get_question_bank(
             }
         }
     }
+
+    // `load_question_bank_entries` already reorders on read, but the
+    // freshly-seeded fallback branch above builds `bank_entries` in memory
+    // without a reload — reorder here too so this response is consistent
+    // even on that first call.
+    prioritize_opener_entry(&mut bank_entries);
 
     let attempts = state
         .persistence

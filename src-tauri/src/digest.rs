@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, error, warn};
 
 use crate::llm::provider::LLMProvider;
+use crate::session::question_bank::prioritize_opener_question;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -173,6 +174,11 @@ pub async fn extract_digest(context_text: &str, llm: &dyn LLMProvider) -> Result
         );
     }
     pad_likely_questions(&mut digest.likely_questions);
+    // LLM extraction order is non-deterministic — real interviews virtually
+    // always open with a generic self-intro, so pin one to the front rather
+    // than trusting whatever order the model returned domain-specific
+    // questions in.
+    prioritize_opener_question(&mut digest.likely_questions);
 
     debug!(
         role = %digest.role,
@@ -336,9 +342,11 @@ mod tests {
         let digest = extract_digest("some context", &llm).await.unwrap();
 
         assert_eq!(digest.likely_questions.len(), 5);
-        // Original 2 kept, 3 padded from universal bank
-        assert_eq!(digest.likely_questions[0], "Why product management?");
-        assert_eq!(digest.likely_questions[1], "Tell me about a launch");
+        // Original 2 kept, 3 padded from universal bank, but the padded-in
+        // opener is pinned to the front over the LLM's own extraction order.
+        assert_eq!(digest.likely_questions[0], "Tell me about yourself");
+        assert_eq!(digest.likely_questions[1], "Why product management?");
+        assert_eq!(digest.likely_questions[2], "Tell me about a launch");
     }
 
     #[tokio::test]
