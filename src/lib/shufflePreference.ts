@@ -3,10 +3,10 @@ const STORAGE_KEY = "flint-shuffle-questions";
 export function readShuffleQuestionsPreference(): boolean {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw === null) return true;
+    if (raw === null) return false;
     return raw === "true";
   } catch {
-    return true;
+    return false;
   }
 }
 
