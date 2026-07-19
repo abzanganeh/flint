@@ -6,16 +6,16 @@
   "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7],
   "current_task_id": "sfr-s8-pr-ci-merge",
   "loop_stopped": false,
-  "ci_fix_attempts": 0,
+  "ci_fix_attempts": 2,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {},
+  "open_prs": { "41": "open" },
   "manual_gate_backlog": [],
   "agent_ladder": {
     "simple": "composer-2.5-fast",
     "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Review approved (no blocking findings). One consistency fix applied in slice 7. Ready for PR/CI/merge."
+  "notes": "PR #41 open. Fixed cargo fmt + clippy useless_vec CI failures. One linux cargo-test failure was runner infra (no space left on device), unrelated to this diff - waiting on rerun."
 }
