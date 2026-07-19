@@ -252,10 +252,10 @@ const HealthCheck = ({ onComplete }: HealthCheckProps) => {
                 </li>
                 <li>{profile.os}</li>
                 <li>
-                  Whisper: {profile.recommendedWhisperModel} · Directional:{" "}
+                  Whisper: {profile.recommendedWhisperModel} · Answer:{" "}
                   {profile.recommendedLlmConfig.directional}
                 </li>
-                <li>Depth: {profile.recommendedLlmConfig.depth}</li>
+                <li>Visual: {profile.recommendedLlmConfig.depth}</li>
               </ul>
             </section>
             <PlatformAudioGuidance profile={profile} />

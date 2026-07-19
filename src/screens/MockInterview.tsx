@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { type UnlistenFn } from "@tauri-apps/api/event";
 
 import {
@@ -12,6 +12,7 @@ import {
   skipMockTurn,
   startMock,
   stopMock,
+  triggerMockVisualResponse,
   type CoachFeedback,
   type MockStudyMode,
 } from "../commands";
@@ -24,11 +25,14 @@ import {
   onMockSuggestedToken,
   onMockUserTranscribed,
 } from "../events";
+import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import CoachPanel from "../panels/CoachPanel";
 import MockSaveForLiveModal from "../components/MockSaveForLiveModal";
 import MicQualityBadge from "../components/MicQualityBadge";
 import SuggestedAnswerPanel from "../panels/SuggestedAnswerPanel";
+import VisualPanel from "../panels/VisualPanel";
 import { readShuffleQuestionsPreference, writeShuffleQuestionsPreference } from "../lib/shufflePreference";
+import { useUIStore } from "../store/ui";
 
 export interface MockInterviewProps {
   sessionId: string;
@@ -93,6 +97,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   >("idle");
   const [savePreferredError, setSavePreferredError] = useState<string | null>(null);
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [showVisual, setShowVisual] = useState(true);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
   const studyModeRef = useRef<MockStudyMode>(studyMode);
@@ -100,6 +105,14 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   const retryPendingRef = useRef(false);
   const mountedRef = useRef(true);
   const mockSessionActiveRef = useRef(false);
+
+  // Reuses the same visual_token -> streamingBuffers.visual plumbing Live and
+  // Rehearsal rely on (ref-counted, safe to mount from a third screen).
+  useOrchestratorStreams();
+
+  useLayoutEffect(() => {
+    useUIStore.getState().resetOrchestratorPanels();
+  }, []);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -146,6 +159,10 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             preferredHit: Boolean(p.preferred_hit),
             suggestedStreaming: p.mode === "study" || Boolean(p.preferred_hit),
           }));
+          // VisualPanel reads currentQuestion + the visual streaming buffer
+          // from the shared UI store; startTurn also clears any diagram
+          // left over from the previous question.
+          useUIStore.getState().startTurn(p.question, p.turn_n);
           setRecording(false);
           setSavePreferredState("idle");
           setSavePreferredError(null);
@@ -387,6 +404,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
       setError(String(e));
     }
   };
+
+  const handleGenerateDiagram = useCallback(
+    async (question: string) => {
+      await triggerMockVisualResponse(_sessionId, question);
+    },
+    [_sessionId],
+  );
 
   const handleSkip = async () => {
     setRecording(false);
@@ -871,6 +895,40 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             text={turn.suggestedText}
             isStreaming={turn.suggestedStreaming}
           />
+        )}
+
+        {phase !== "idle" && turn.question.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <button
+              type="button"
+              data-testid="mock-visual-toggle-button"
+              onClick={() => setShowVisual((v) => !v)}
+              style={{
+                alignSelf: "flex-start",
+                background: "none",
+                border: "1px solid #374151",
+                color: "#94a3b8",
+                borderRadius: 5,
+                padding: "4px 10px",
+                fontSize: "11px",
+                cursor: "pointer",
+              }}
+            >
+              {showVisual ? "Hide diagram panel" : "Show diagram panel"}
+            </button>
+            {showVisual && (
+              <div
+                style={{
+                  height: 260,
+                  border: "1px solid #1e2028",
+                  borderRadius: 8,
+                  overflow: "hidden",
+                }}
+              >
+                <VisualPanel sessionId={_sessionId} onGenerateDiagram={handleGenerateDiagram} />
+              </div>
+            )}
+          </div>
         )}
 
         {phase !== "idle" && studyMode === "practice" && !showSuggested && (

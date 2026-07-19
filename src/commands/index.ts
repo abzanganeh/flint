@@ -185,11 +185,13 @@ export const runRehearsalTurn = (
   sessionId: string,
   question: string,
   rephrase?: boolean,
+  forceVisual?: boolean,
 ): Promise<void> =>
   invoke<void>("run_rehearsal_turn", {
     sessionId,
     question,
     rephrase: rephrase ?? null,
+    forceVisual: forceVisual ?? null,
   });
 
 export const completeRehearsal = (sessionId: string): Promise<void> =>
@@ -224,6 +226,12 @@ export const triggerVisualResponse = (
   sessionId: string,
 ): Promise<void> =>
   invoke<void>("trigger_visual_response", { question, sessionId });
+
+export const triggerMockVisualResponse = (
+  sessionId: string,
+  question: string,
+): Promise<void> =>
+  invoke<void>("trigger_mock_visual_response", { sessionId, question });
 
 export const copyTextToClipboard = (text: string): Promise<void> =>
   invoke<void>("copy_text_to_clipboard", { text });
@@ -932,6 +940,8 @@ export interface MicCalibrationStatusDto {
   werMic: number | null;
   forced: boolean;
   calibratedAt: number | null;
+  systemClipText: string;
+  micParagraphText: string;
 }
 
 export interface CalibrationResultDto {

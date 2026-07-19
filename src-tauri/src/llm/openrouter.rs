@@ -17,6 +17,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::provider::{CompletionConfig, LLMProvider, RateLimit};
+use super::sse_lines::buffered_lines;
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_MODEL: &str = "meta-llama/llama-3.3-70b-instruct";
@@ -215,29 +216,18 @@ impl LLMProvider for OpenRouterProvider {
         }
 
         let byte_stream = response.bytes_stream();
-        let line_stream = byte_stream
-            .map(|chunk| chunk.context("OpenRouter stream read error"))
-            .flat_map(|chunk_result| {
-                let lines: Vec<Result<String>> = match chunk_result {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes)
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(|l| Ok(l.to_string()))
-                        .collect(),
-                    Err(e) => vec![Err(e)],
-                };
-                futures::stream::iter(lines)
-            })
-            .filter_map(|line_result| async move {
-                match line_result {
-                    Err(e) => Some(Err(e)),
-                    Ok(line) => {
-                        #[cfg(debug_assertions)]
-                        debug!(line = %line, "openrouter sse line");
-                        Self::parse_sse_line(&line).map(Ok)
+        let line_stream =
+            buffered_lines(byte_stream.map(|chunk| chunk.context("OpenRouter stream read error")))
+                .filter_map(|line_result| async move {
+                    match line_result {
+                        Err(e) => Some(Err(e)),
+                        Ok(line) => {
+                            #[cfg(debug_assertions)]
+                            debug!(line = %line, "openrouter sse line");
+                            Self::parse_sse_line(&line).map(Ok)
+                        }
                     }
-                }
-            });
+                });
 
         Ok(Box::pin(line_stream))
     }

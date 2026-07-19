@@ -201,6 +201,7 @@
   color: #fde68a;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(251, 191, 36, 0.06);
+  white-space: pre-line;
 }
 
 .check-fix.fail-fix {

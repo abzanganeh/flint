@@ -14,6 +14,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use super::provider::{CompletionConfig, LLMProvider, RateLimit};
+use super::sse_lines::buffered_lines;
 
 const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -187,30 +188,19 @@ impl LLMProvider for AnthropicProvider {
         }
 
         let byte_stream = response.bytes_stream();
-        let line_stream = byte_stream
-            .map(|chunk| chunk.context("Anthropic stream read error"))
-            .flat_map(|chunk_result| {
-                let lines: Vec<Result<String>> = match chunk_result {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes)
-                        .lines()
-                        .filter(|l| !l.is_empty())
-                        .map(|l| Ok(l.to_string()))
-                        .collect(),
-                    Err(e) => vec![Err(e)],
-                };
-                futures::stream::iter(lines)
-            })
-            .filter_map(|line_result| async move {
-                match line_result {
-                    Err(e) => Some(Err(e)),
-                    Ok(line) => {
-                        #[cfg(debug_assertions)]
-                        debug!(line = %line, "anthropic sse line");
+        let line_stream =
+            buffered_lines(byte_stream.map(|chunk| chunk.context("Anthropic stream read error")))
+                .filter_map(|line_result| async move {
+                    match line_result {
+                        Err(e) => Some(Err(e)),
+                        Ok(line) => {
+                            #[cfg(debug_assertions)]
+                            debug!(line = %line, "anthropic sse line");
 
-                        Self::parse_sse_line(&line).map(Ok)
+                            Self::parse_sse_line(&line).map(Ok)
+                        }
                     }
-                }
-            });
+                });
 
         Ok(Box::pin(line_stream))
     }

@@ -50,7 +50,9 @@ use crate::mock::mic_capture::MicCapture;
 use crate::mock::rag::query_mock_rag;
 use crate::mock::tts;
 use crate::orchestrator::prewarm::{run_prewarm, PreWarmCache};
-use crate::orchestrator::{dispatch_turn, run_orchestrator, OrchestratorConfig};
+use crate::orchestrator::{
+    dispatch_turn, run_orchestrator, visual, OrchestrationContext, OrchestratorConfig,
+};
 use crate::rag::chunker::chunk_text;
 use crate::research::{self, tavily, ResearchSource};
 
@@ -61,7 +63,7 @@ const RESEARCH_PROMPT_OVERHEAD_CHARS: usize = 800;
 const ENRICHMENT_RESULTS_PER_QUERY: usize = 4;
 use crate::session::draft;
 use crate::session::limits;
-use crate::session::memory::ConversationMemory;
+use crate::session::memory::{ConversationMemory, MemoryContext};
 use crate::session::persistence::SessionPersistence;
 use crate::session::recovery;
 use crate::session::state::SessionState;
@@ -2036,6 +2038,10 @@ pub fn get_rehearsal_completed() -> bool {
 }
 
 /// Fire a single orchestrator turn during rehearsal (no audio pipeline).
+///
+/// When `force_visual` is `Some(true)`, the Visual thread spawns even if
+/// the classifier would skip it (manual "Generate diagram" from Rehearsal).
+/// Omitted / `None` defaults to `false`.
 #[tauri::command]
 pub async fn run_rehearsal_turn(
     app: AppHandle,
@@ -2043,6 +2049,7 @@ pub async fn run_rehearsal_turn(
     session_id: String,
     question: String,
     rephrase: Option<bool>,
+    force_visual: Option<bool>,
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
 
@@ -2133,6 +2140,7 @@ pub async fn run_rehearsal_turn(
             local_provider,
             Arc::clone(&state.persistence),
             Arc::clone(&state.cost_tracker),
+            force_visual.unwrap_or(false),
             app,
         ),
     )
@@ -3147,6 +3155,14 @@ pub async fn start_session(
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
 
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+    if is_phone_call_mode && crate::audio::diarizer::models_downloaded() {
+        let warm = Arc::clone(&diarizer);
+        tokio::task::spawn_blocking(move || {
+            if let Ok(mut guard) = warm.lock() {
+                guard.warm_pipeline();
+            }
+        });
+    }
     let speaker_classifier = build_speaker_classifier(
         &app,
         Arc::clone(&state.persistence),
@@ -3358,6 +3374,14 @@ pub async fn start_live_preview(
 
     let audit = Arc::new(crate::audio::audit::AudioAuditCounters::new());
     let diarizer = Arc::new(std::sync::Mutex::new(DiarizerManager::new()));
+    if is_phone_call_mode && crate::audio::diarizer::models_downloaded() {
+        let warm = Arc::clone(&diarizer);
+        tokio::task::spawn_blocking(move || {
+            if let Ok(mut guard) = warm.lock() {
+                guard.warm_pipeline();
+            }
+        });
+    }
     let speaker_classifier = build_speaker_classifier(
         &app,
         Arc::clone(&state.persistence),
@@ -5368,6 +5392,131 @@ pub async fn ask_mock_question(state: State<'_, AppState>) -> Result<(), String>
         .map_err(|e| e.to_string())
 }
 
+/// Pure state-gate check for [`trigger_mock_visual_response`], extracted so
+/// it is unit-testable without a full `AppState`/`AppHandle` (mirrors the
+/// LIVE-only gate in `trigger_visual_response`, but for MOCK_INTERVIEW).
+fn ensure_mock_interview_state(current: SessionState) -> Result<(), String> {
+    if current != SessionState::MockInterview {
+        return Err(format!(
+            "trigger_mock_visual_response is only valid from MOCK_INTERVIEW (current: {current})"
+        ));
+    }
+    Ok(())
+}
+
+/// Manual Visual trigger for Mock Interview — `vrt-s9-mock-interview-visual-support`.
+///
+/// Mock Interview has no `dispatch_turn`/Answer+Visual orchestrator (see
+/// `mock::conductor`) — it runs its own bespoke suggested-answer thread and
+/// turn phase state machine. Rather than wiring Visual into that state
+/// machine, this command dispatches [`orchestrator::visual::run_visual`]
+/// directly as a one-off task, reusing its prompt-building and Mermaid/code
+/// fence contract without forking it. Valid only from `MockInterview`;
+/// sources RAG/digest context from the mock session (role packs on
+/// `MockTaskHandles`, digest on `AppState::session_digest`) rather than
+/// `live_tasks`, which does not exist during a mock session.
+#[tauri::command]
+pub async fn trigger_mock_visual_response(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    question: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        ensure_mock_interview_state(*machine.current())?;
+    }
+
+    if question.trim().is_empty() {
+        return Err("No question to generate a diagram for.".to_string());
+    }
+
+    if state.cost_tracker.is_suspended() {
+        return Err(
+            "Inference is suspended because the cost cap was reached. Lift the cap or reset the tracker to continue."
+                .to_string(),
+        );
+    }
+
+    let (role_packs, turn_number) = {
+        let guard = state.mock_tasks.lock().await;
+        let handles = guard.as_ref().ok_or("No active mock session.")?;
+        (
+            handles.role_packs.clone(),
+            handles.active_turn_n.load(Ordering::SeqCst).max(1) as usize,
+        )
+    };
+
+    let digest = state
+        .session_digest
+        .read()
+        .await
+        .clone()
+        .ok_or("Digest not set — confirm session design first.")?;
+    let digest = Arc::new(digest);
+
+    let embedder = state.require_embedder()?;
+    let rag_chunks = query_mock_rag(
+        sid,
+        &question,
+        &embedder,
+        state.vector_store.as_ref(),
+        Some((state.global_kb.as_ref(), &role_packs)),
+        8,
+    )
+    .await;
+
+    let (failover, _, _) = build_failover_stack(&app, &state, false).await?;
+
+    let ctx = OrchestrationContext {
+        session_id: sid,
+        question: question.clone(),
+        rag_chunks,
+        qa_chunks: Vec::new(),
+        digest,
+        memory_ctx: MemoryContext {
+            rolling_summary: String::new(),
+            recent_turns: String::new(),
+            truncated: false,
+        },
+        from_cache: false,
+        from_preferred: false,
+        preferred_answer: String::new(),
+        cached_answer: None,
+        cached_visual: None,
+        turn_cancel: Arc::new(AtomicBool::new(false)),
+        turn_number,
+    };
+
+    let prompts_dir = prompts_base_dir();
+    let question_len = question.len();
+    tokio::spawn(async move {
+        if let Err(e) = visual::run_visual(ctx, failover, &prompts_dir, app).await {
+            warn!(
+                session_id = %sid,
+                error = %e,
+                "mock visual generation failed",
+            );
+        }
+    });
+
+    info!(
+        session_id = %sid,
+        question_len,
+        "manual trigger_mock_visual_response",
+    );
+    #[cfg(debug_assertions)]
+    tracing::debug!(
+        session_id = %sid,
+        question = %question,
+        "manual trigger_mock_visual_response (debug-only content)",
+    );
+
+    Ok(())
+}
+
 /// Start recording the user's microphone for the current mock turn.
 ///
 /// Auto flow: listening begins after TTS; answering begins when the user speaks.
@@ -6125,6 +6274,8 @@ pub async fn get_mic_calibration_status(
         wer_mic,
         forced,
         calibrated_at,
+        system_clip_text: load_system_clip_text(),
+        mic_paragraph_text: load_mic_paragraph_text(),
     })
 }
 
@@ -6245,6 +6396,29 @@ mod oauth_dedupe_tests {
         reset_oauth_auth_code_dedupe_for_tests();
         assert!(claim_oauth_auth_code("code-one"));
         assert!(claim_oauth_auth_code("code-two"));
+    }
+}
+
+#[cfg(test)]
+mod mock_visual_trigger_tests {
+    use super::{ensure_mock_interview_state, SessionState};
+
+    #[test]
+    fn accepts_mock_interview_state() {
+        assert!(ensure_mock_interview_state(SessionState::MockInterview).is_ok());
+    }
+
+    #[test]
+    fn rejects_live_state() {
+        let err =
+            ensure_mock_interview_state(SessionState::Live).expect_err("LIVE must be rejected");
+        assert!(err.contains("MOCK_INTERVIEW"));
+    }
+
+    #[test]
+    fn rejects_rehearsing_and_idle_states() {
+        assert!(ensure_mock_interview_state(SessionState::Rehearsing).is_err());
+        assert!(ensure_mock_interview_state(SessionState::Idle).is_err());
     }
 }
 

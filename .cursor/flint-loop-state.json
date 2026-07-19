@@ -1,12 +1,10 @@
 {
-  "current_milestone": "live-preview-answer-visual",
+  "current_milestone": "visual-robustness-and-triggers",
   "milestone_status": "in_progress",
-  "milestone_branch": {
-    "flint": "feature/live-preview-answer-visual"
-  },
-  "current_slice": 1,
-  "completed_slices": [0],
-  "current_task_id": "lpav-s1-turn-history-context",
+  "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
+  "current_slice": 13,
+  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+  "current_task_id": "vrt-s13-full-gates-rerun",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
@@ -15,15 +13,15 @@
   "open_prs": {},
   "manual_gate_backlog": [
     {
-      "gate": "Live Preview + Visual device retest",
-      "doc": "tests/manual-qa/live-preview-answer-visual-checklist.md",
-      "notes": "After merge: Live Preview, phone relabel, Ask now, Mermaid in Visual panel"
+      "gate": "Mermaid diagram device retest",
+      "doc": "tests/manual-qa/visual-robustness-checklist.md",
+      "notes": "After merge: repeat the original 'draw a system design for a notification microservice' prompt on Live; verify Rehearsal + Mock Interview Generate diagram buttons"
     }
   ],
   "agent_ladder": {
     "simple": "composer-2.5-fast",
-    "medium": "grok-4.5-fast-xhigh",
+    "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 0 complete. Slice 1 in progress — turn history already in ContextPanel; adding vitest."
+  "notes": "Slice 11 review: no blocking findings. Slice 12 skipped. Running slice 13 full gates then PR."
 }

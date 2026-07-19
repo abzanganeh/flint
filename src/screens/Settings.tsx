@@ -538,10 +538,13 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
   const handleDownloadDiarizationModels = async () => {
     setDownloadingDiarizationModels(true);
     setError(null);
+    setSuccessMsg(null);
     try {
       await downloadDiarizationModels();
       const status = await getDiarizationStatus();
       setDiarizationModelsReady(status.modelsReady);
+      setSuccessMsg("Speaker models installed. You can start a phone interview session.");
+      setTimeout(() => setSuccessMsg(null), 4000);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -637,8 +640,15 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
         <span className="settings-tab__label">Speaker separation models</span>
         <p className="settings-tab__hint">
           Phone interview mode uses on-device ONNX models (~200MB) to separate interviewer and
-          candidate voices. Audio never leaves your machine for diarization.
+          candidate voices. Audio never leaves your machine for diarization. The first download
+          can take several minutes — keep this window open until it finishes.
         </p>
+        {downloadingDiarizationModels ? (
+          <p className="settings-tab__hint" data-testid="diarization-models-downloading">
+            Downloading speaker models… This may take 5–15 minutes on a slow connection. Flint
+            stays responsive; do not close the app.
+          </p>
+        ) : null}
         {diarizationModelsReady ? (
           <p className="settings-tab__success" data-testid="diarization-models-ready">
             Models installed.

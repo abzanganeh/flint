@@ -217,9 +217,24 @@ fn check_whisper_model(recommended: WhisperModel) -> HealthCheckResult {
     warn(
         HealthCheck::WhisperModel,
         format!("Whisper model {model_file} is not installed."),
-        format!(
-            "Download {model_file} into ~/.cache/whisper/ before your first session. Flint will prompt you during session setup if it is still missing."
-        ),
+        whisper_model_missing_fix(recommended),
+    )
+}
+
+fn whisper_model_missing_fix(recommended: WhisperModel) -> String {
+    let model_file = whisper_model_filename(recommended);
+    let model_name = recommended.as_str();
+    format!(
+        "Install the speech model before your first live session (~250 MB for small.en).\n\
+         \n\
+         Easiest — from a terminal in the Flint project folder, run:\n\
+         ./scripts/install-whisper-model.sh {model_name}\n\
+         \n\
+         Or paste this one-liner (same result):\n\
+         mkdir -p ~/.cache/whisper && curl -L --progress-bar -o ~/.cache/whisper/{model_file} \"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{model_file}\"\n\
+         \n\
+         When the download finishes, click Re-run health check (or restart Flint). The Whisper row should turn green.\n\
+         Tip: if you are not in the Flint folder, open a terminal and cd into it first, then run the script."
     )
 }
 
@@ -758,6 +773,27 @@ mod tests {
         assert_eq!(
             whisper_model_filename(WhisperModel::SmallEn),
             "ggml-small.en.bin"
+        );
+    }
+
+    #[test]
+    fn whisper_model_missing_fix_lists_install_steps() {
+        let fix = whisper_model_missing_fix(WhisperModel::SmallEn);
+        assert!(
+            fix.contains("./scripts/install-whisper-model.sh small.en"),
+            "fix must name the install script: {fix}"
+        );
+        assert!(
+            fix.contains("ggml-small.en.bin"),
+            "fix must name the model file: {fix}"
+        );
+        assert!(
+            fix.contains("huggingface.co/ggerganov/whisper.cpp"),
+            "fix must include the download URL: {fix}"
+        );
+        assert!(
+            fix.contains("Re-run health check"),
+            "fix must tell the user how to verify: {fix}"
         );
     }
 

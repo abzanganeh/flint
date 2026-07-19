@@ -227,6 +227,22 @@ const Rehearsal = ({
     [fireQuestion],
   );
 
+  const handleGenerateDiagram = useCallback(
+    async (q: string) => {
+      setError(null);
+      clearStreamingBuffers();
+      setAsking(true);
+      try {
+        await runRehearsalTurn(sessionId, q, undefined, true);
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setAsking(false);
+      }
+    },
+    [sessionId, clearStreamingBuffers],
+  );
+
   const handleComplete = async () => {
     if (!hasResponse) {
       const proceed = window.confirm(
@@ -503,7 +519,13 @@ const Rehearsal = ({
               answer={
                 <AnswerPanel sessionId={sessionId} isGenerating={asking} />
               }
-              visual={<VisualPanel isGenerating={asking} />}
+              visual={
+                <VisualPanel
+                  sessionId={sessionId}
+                  isGenerating={asking}
+                  onGenerateDiagram={handleGenerateDiagram}
+                />
+              }
               context={<ContextPanel sessionId={sessionId} />}
             />
           </div>

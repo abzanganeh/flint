@@ -4,11 +4,12 @@
 //! plumbing, but the output contract is different: `/prompts/visual/`
 //! (slice 17) instructs the model to emit exactly one fenced Mermaid diagram
 //! or code block. A half-streamed diagram can't be rendered, so unlike the
-//! Answer thread this module buffers tokens internally and only emits once
-//! a complete fenced block has arrived (or the stream ends, as a raw
-//! fallback) — see [`extract_complete_fence`].
+//! Answer thread this module never showed partial tokens — it now requests
+//! a non-streaming completion (`stream: false`, `vrt-s3-visual-non-streaming`)
+//! and extracts the fenced block from the single complete response (or falls
+//! back to the raw text if no fence closes) — see [`extract_complete_fence`].
 //!
-//! Fully streamed in < 8s P95. Prompt loaded from
+//! Full request completes in < 8s P95. Prompt loaded from
 //! `/prompts/visual/{provider}.txt` or `default.txt`.
 
 use std::path::Path;
@@ -17,7 +18,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Error, Result};
-use futures::StreamExt;
 use tauri::{AppHandle, Runtime};
 use tokio::time::timeout;
 use tracing::{info, warn};
@@ -92,60 +92,53 @@ async fn run_fresh_visual<R: Runtime>(
     let config = CompletionConfig {
         max_tokens: Some(400),
         temperature: 0.0,
-        stream: true,
+        stream: false,
     };
 
     let estimated_tokens = 500_u32;
-    let mut stream = failover
-        .complete_stream(prompt, config, app, estimated_tokens)
+
+    // No mid-flight cancellation point once a non-streaming HTTP call is in
+    // flight — check before issuing it. Visual never showed partial output
+    // during cancellation anyway, so bailing out here is not a regression.
+    let full_response = if ctx.turn_cancel.load(Ordering::Acquire) {
+        String::new()
+    } else {
+        match timeout(
+            Duration::from_secs(60),
+            failover.complete(prompt, config, app, estimated_tokens),
+        )
         .await
-        .context("visual stream failed")?;
-
-    let mut full_response = String::new();
-    let mut flushed = false;
-    let stream_deadline = Instant::now() + Duration::from_secs(60);
-
-    while Instant::now() < stream_deadline {
-        if ctx.turn_cancel.load(Ordering::Acquire) {
-            break;
-        }
-        match timeout(Duration::from_secs(15), stream.next()).await {
-            Ok(Some(Ok(token))) => {
-                full_response.push_str(&token);
-                if !flushed {
-                    if let Some(block) = extract_complete_fence(&full_response) {
-                        emit_visual_token(
-                            app,
-                            VisualTokenPayload {
-                                token: block.to_string(),
-                            },
-                        );
-                        flushed = true;
-                    }
-                }
-            }
-            Ok(Some(Err(e))) => return Err(e).context("visual token error"),
-            Ok(None) => break,
+        {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => return Err(e).context("visual completion failed"),
             Err(_) => {
                 warn!(
                     session_id = %ctx.session_id,
-                    "visual stream stalled — returning partial response"
+                    "visual completion stalled past 60s deadline — returning empty response"
                 );
-                break;
+                String::new()
             }
         }
-    }
+    };
 
-    // Malformed or truncated stream — no closing fence ever arrived. Flush
-    // whatever we have so the panel can at least show the raw fallback
-    // (VisualPanel Tier 1 renders raw text when Mermaid parsing fails).
-    if !flushed && !full_response.trim().is_empty() {
-        emit_visual_token(
+    // A single non-streaming response either contains a complete fenced
+    // block or it doesn't — no incremental extraction needed. Fall back to
+    // the raw text if no fence closes (VisualPanel Tier 1 renders raw text
+    // when Mermaid parsing fails).
+    match extract_complete_fence(&full_response) {
+        Some(block) => emit_visual_token(
+            app,
+            VisualTokenPayload {
+                token: block.to_string(),
+            },
+        ),
+        None if !full_response.trim().is_empty() => emit_visual_token(
             app,
             VisualTokenPayload {
                 token: full_response.clone(),
             },
-        );
+        ),
+        None => {}
     }
 
     let stream_ms = start.elapsed().as_millis() as u64;
@@ -300,6 +293,139 @@ fn build_prompt(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::digest::Digest;
+    use crate::llm::failover::FailoverManager;
+    use crate::llm::provider::{LLMProvider, RateLimit};
+    use crate::llm::rate_limiter::RateLimiter;
+    use crate::session::memory::MemoryContext;
+    use futures::Stream;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::atomic::AtomicBool;
+    use tauri::test::{mock_builder, mock_context, noop_assets, MockRuntime};
+
+    fn mock_app_handle() -> AppHandle<MockRuntime> {
+        mock_builder()
+            .build(mock_context(noop_assets()))
+            .expect("mock tauri app")
+            .handle()
+            .clone()
+    }
+
+    fn test_prompts_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts")
+    }
+
+    fn test_context() -> OrchestrationContext {
+        OrchestrationContext {
+            session_id: Uuid::new_v4(),
+            question: "Design a notification microservice".to_string(),
+            rag_chunks: vec![],
+            qa_chunks: vec![],
+            digest: Arc::new(Digest {
+                role: "Engineer".to_string(),
+                company: "Acme".to_string(),
+                domain: "software engineering".to_string(),
+                key_skills: vec!["distributed systems".to_string()],
+                seniority: "senior".to_string(),
+                likely_questions: vec![],
+                topics_to_avoid: vec![],
+            }),
+            memory_ctx: MemoryContext {
+                rolling_summary: String::new(),
+                recent_turns: String::new(),
+                truncated: false,
+            },
+            from_cache: false,
+            from_preferred: false,
+            preferred_answer: String::new(),
+            cached_answer: None,
+            cached_visual: None,
+            turn_cancel: Arc::new(AtomicBool::new(false)),
+            turn_number: 1,
+        }
+    }
+
+    /// Records the `CompletionConfig` it was called with so tests can assert
+    /// on what `run_visual` actually requested from the provider.
+    struct ConfigCapturingProvider {
+        response: String,
+        captured_stream: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for ConfigCapturingProvider {
+        async fn complete_stream(
+            &self,
+            _prompt: String,
+            config: CompletionConfig,
+        ) -> Result<Pin<Box<dyn Stream<Item = Result<String>> + Send>>> {
+            self.captured_stream.store(config.stream, Ordering::SeqCst);
+            let response = self.response.clone();
+            Ok(Box::pin(futures::stream::once(async move { Ok(response) })))
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        fn context_window(&self) -> usize {
+            128_000
+        }
+        fn rate_limit(&self) -> RateLimit {
+            RateLimit {
+                requests_per_minute: 60,
+                tokens_per_minute: 6_000,
+            }
+        }
+    }
+
+    fn make_failover(response: &str, captured_stream: Arc<AtomicBool>) -> Arc<FailoverManager> {
+        let primary: Arc<dyn LLMProvider> = Arc::new(ConfigCapturingProvider {
+            response: response.to_string(),
+            captured_stream,
+        });
+        let local: Arc<dyn LLMProvider> = Arc::new(crate::llm::provider::FailingMockLLMProvider {
+            provider_name: "ollama".to_string(),
+            error_message: "should not be called".to_string(),
+        });
+        let rl = Arc::new(RateLimiter::new("mock", 60, 60_000));
+        Arc::new(FailoverManager::new(primary, vec![], local, rl))
+    }
+
+    #[tokio::test]
+    async fn run_visual_requests_non_streaming_completion() {
+        let captured_stream = Arc::new(AtomicBool::new(true));
+        let failover = make_failover(
+            "```mermaid\nflowchart TD\nA-->B\n```",
+            Arc::clone(&captured_stream),
+        );
+        let app = mock_app_handle();
+
+        let result = run_visual(test_context(), failover, &test_prompts_dir(), app).await;
+
+        assert!(result.is_ok());
+        assert!(
+            !captured_stream.load(Ordering::SeqCst),
+            "Visual must request stream: false from the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_visual_falls_back_to_raw_text_when_no_fence_closes() {
+        let captured_stream = Arc::new(AtomicBool::new(true));
+        let raw_response = "The model forgot to fence this diagram entirely.";
+        let failover = make_failover(raw_response, Arc::clone(&captured_stream));
+        let app = mock_app_handle();
+
+        let result = run_visual(test_context(), failover, &test_prompts_dir(), app)
+            .await
+            .expect("malformed non-streaming response must still resolve, not error");
+
+        assert_eq!(result, raw_response);
+    }
 
     #[test]
     fn extract_complete_fence_returns_none_when_no_fence_opened() {

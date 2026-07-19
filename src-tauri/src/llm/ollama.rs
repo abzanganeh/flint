@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use super::provider::{CompletionConfig, LLMProvider, RateLimit};
+use super::sse_lines::buffered_lines;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -160,30 +161,24 @@ impl LLMProvider for OllamaProvider {
 
         let byte_stream = response.bytes_stream();
 
-        let token_stream = byte_stream
-            .map(|chunk| chunk.context("Ollama stream read error"))
-            .flat_map(|chunk_result| {
-                let lines: Vec<Result<Option<String>>> = match chunk_result {
-                    Ok(bytes) => String::from_utf8_lossy(&bytes)
-                        .lines()
-                        .map(|l| {
-                            #[cfg(debug_assertions)]
-                            debug!(line = %l, "ollama stream line");
+        let token_stream =
+            buffered_lines(byte_stream.map(|chunk| chunk.context("Ollama stream read error")))
+                .map(|line_result| match line_result {
+                    Ok(line) => {
+                        #[cfg(debug_assertions)]
+                        debug!(line = %line, "ollama stream line");
 
-                            Self::parse_chunk(l).transpose()
-                        })
-                        .collect(),
-                    Err(e) => vec![Err(e)],
-                };
-                futures::stream::iter(lines)
-            })
-            .filter_map(|r| async move {
-                match r {
-                    Ok(Some(token)) => Some(Ok(token)),
-                    Ok(None) => None,
-                    Err(e) => Some(Err(e)),
-                }
-            });
+                        Self::parse_chunk(&line).transpose()
+                    }
+                    Err(e) => Err(e),
+                })
+                .filter_map(|r| async move {
+                    match r {
+                        Ok(Some(token)) => Some(Ok(token)),
+                        Ok(None) => None,
+                        Err(e) => Some(Err(e)),
+                    }
+                });
 
         Ok(Box::pin(token_stream))
     }

@@ -32,8 +32,7 @@ pub fn score_transcript(reference: &str, transcript: &str, threshold: f32) -> Ca
 }
 
 /// Mic calibration scoring — same WER gate as system audio, but also accepts
-/// strong word recall when jargon (OAuth, Kerberos, etc.) drives WER up despite
-/// clear audio.
+/// strong word recall when minor wording differences drive WER up despite clear audio.
 pub fn score_mic_calibration(reference: &str, transcript: &str) -> CalibrationScore {
     let wer = word_error_rate(reference, transcript);
     let recall = word_recall(reference, transcript);
@@ -61,22 +60,22 @@ mod tests {
     #[test]
     fn mocked_mic_transcript_with_typos_may_fail() {
         let reference = load_mic_paragraph_text();
-        let hypothesis = "At SecureAuth I led authentication using OAuth OIDC SAML MFA.";
+        let hypothesis =
+            "In my last role I led a team to ship a feature under a deadline with milestones.";
         let score = score_mic_calibration(&reference, hypothesis);
         assert!(!score.passed || score.wer < MIC_WER_PASS_THRESHOLD * 2.0);
     }
 
     #[test]
-    fn mic_calibration_passes_with_high_recall_despite_jargon_wer() {
+    fn mic_calibration_passes_with_high_recall_despite_wer() {
         let reference = load_mic_paragraph_text();
-        // Missing opening sentence but most content present — typical pre-fix failure mode.
+        // Missing opening clause but most content present — typical partial-read recovery.
         let hypothesis =
-            "I led the design of an adaptive authentication system using ML based risk \
-            scoring. The platform supported OAuth and OIDC federation across multi tenant SaaS \
-            customers. I integrated step up MFA triggers with identity aware policy enforcement \
-            including Kerberos and LDAP for enterprise directories. My most recent work at IdMe24 \
-            focused on agentic AI identity autonomous agents requiring just in time credential \
-            provisioning with zero standing privilege.";
+            "I led a cross functional team to ship a customer facing feature under a six week \
+            deadline. We started by writing clear requirements and breaking the work into weekly \
+            milestones. When we hit a blocker in testing I coordinated with QA and design to \
+            adjust scope without missing the launch date. The feature went live on schedule and \
+            improved user retention.";
         let score = score_mic_calibration(&reference, hypothesis);
         assert!(
             score.passed,

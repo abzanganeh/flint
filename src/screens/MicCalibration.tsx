@@ -63,12 +63,25 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
     // In phone-call mode skip system loopback test entirely — there is no
     // system audio to capture. Jump straight to the microphone phase.
     if (phoneCallMode) {
-      setPhase("mic");
-      setLoading(false);
+      void (async () => {
+        try {
+          const s = await getMicCalibrationStatus();
+          setStatus(s);
+        } catch (e) {
+          setError(String(e));
+        } finally {
+          setPhase("mic");
+          setLoading(false);
+        }
+      })();
       return;
     }
     void loadStatus();
   }, [loadStatus, phoneCallMode]);
+
+  const micParagraphText =
+    status?.micParagraphText ??
+    "Loading mic test paragraph…";
 
   const finishCalibration = async (forced: boolean) => {
     const werSystem = systemResult?.wer ?? status?.werSystem ?? 0;
@@ -296,12 +309,7 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
             <>
               <p>Read the following paragraph aloud when you click <strong>Start mic test</strong>. Read it at a normal pace — you have 45 seconds.</p>
               <blockquote className="mic-calibration-paragraph">
-                At SecureAuth, I led the design of an adaptive authentication system using ML-based
-                risk scoring. The platform supported OAuth 2.0 and OIDC federation across multi-tenant
-                SaaS customers. I integrated step-up MFA triggers with identity-aware policy
-                enforcement — including Kerberos and LDAP for enterprise directories. My most recent
-                work at IdMe24 focused on agentic AI identity: autonomous agents requiring just-in-time
-                credential provisioning with zero-standing privilege.
+                {micParagraphText}
               </blockquote>
               <p style={{ fontSize: "0.875rem", color: "#6b7280" }}>
                 Read it once through — Flint will start listening as soon as you click the button below.
@@ -311,12 +319,7 @@ export default function MicCalibration({ onComplete, forceRetest = false, phoneC
             <>
               <p style={{ fontWeight: 600 }}>Recording — read the paragraph below now:</p>
               <blockquote className="mic-calibration-paragraph">
-                At SecureAuth, I led the design of an adaptive authentication system using ML-based
-                risk scoring. The platform supported OAuth 2.0 and OIDC federation across multi-tenant
-                SaaS customers. I integrated step-up MFA triggers with identity-aware policy
-                enforcement — including Kerberos and LDAP for enterprise directories. My most recent
-                work at IdMe24 focused on agentic AI identity: autonomous agents requiring just-in-time
-                credential provisioning with zero-standing privilege.
+                {micParagraphText}
               </blockquote>
             </>
           )}

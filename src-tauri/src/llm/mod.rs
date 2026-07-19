@@ -12,4 +12,5 @@ pub mod openai_compat;
 pub mod openrouter;
 pub mod provider;
 pub mod rate_limiter;
+pub mod sse_lines;
 pub mod stack;

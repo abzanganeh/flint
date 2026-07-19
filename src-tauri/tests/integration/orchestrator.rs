@@ -255,6 +255,7 @@ async fn dispatch_turn_runs_full_pipeline_end_to_end() {
         local_llm,
         persistence,
         no_op_tracker(),
+        false,
         app,
     )
     .await;
@@ -317,6 +318,7 @@ async fn dispatch_turn_survives_primary_llm_failure() {
         local_llm,
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -396,6 +398,7 @@ async fn dispatch_turn_serves_prewarm_cache_hit() {
         local_llm,
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -599,6 +602,7 @@ async fn dispatch_turn_emits_context_truncated_when_memory_compressed() {
         local_llm,
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -653,6 +657,7 @@ async fn dispatch_turn_runs_fresh_visual_on_cached_turn_three() {
         }),
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -706,6 +711,7 @@ async fn dispatch_turn_recovers_from_panicking_llm_provider() {
         local_llm,
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -750,6 +756,7 @@ async fn dispatch_turn_logs_when_persistence_write_fails() {
         }),
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -792,6 +799,7 @@ async fn dispatch_turn_returns_early_when_cancel_flag_set() {
         }),
         persistence,
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -873,6 +881,7 @@ async fn dispatch_turn_short_circuits_when_cost_tracker_is_suspended() {
         }),
         Arc::clone(&persistence),
         Arc::clone(&tracker),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -917,6 +926,7 @@ async fn dispatch_turn_short_circuits_when_cost_tracker_is_suspended() {
         }),
         persistence,
         Arc::clone(&tracker),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -972,6 +982,7 @@ async fn lifting_cost_suspension_re_enables_inference() {
         }),
         Arc::clone(&persistence),
         Arc::clone(&tracker),
+        false,
         mock_app_handle(),
     )
     .await
@@ -1006,6 +1017,7 @@ async fn lifting_cost_suspension_re_enables_inference() {
         }),
         persistence,
         Arc::clone(&tracker),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -1056,6 +1068,7 @@ async fn dispatch_turn_spawns_visual_thread_for_system_design_question() {
         }),
         Arc::clone(&persistence),
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -1113,6 +1126,7 @@ async fn dispatch_turn_skips_visual_thread_for_behavioral_question() {
         }),
         Arc::clone(&persistence),
         no_op_tracker(),
+        false,
         mock_app_handle(),
     )
     .await;
@@ -1136,13 +1150,71 @@ async fn dispatch_turn_skips_visual_thread_for_behavioral_question() {
 // Slice 30 — manual visual trigger forces the thread past the classifier
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `dispatch_turn(..., force_visual: true)` must spawn Visual even when
+/// the classifier would skip (purely verbal / behavioral question).
+#[tokio::test]
+async fn dispatch_turn_forces_visual_thread_when_force_visual_true() {
+    let embedder = match try_embedder() {
+        Some(e) => e,
+        None => return,
+    };
+    let prompts_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../prompts");
+    let session_id = Uuid::new_v4();
+
+    let persistence = fresh_persistence();
+    persistence
+        .create_session_row(session_id, "Force Visual Test", "interview", "swe")
+        .expect("session row");
+    persistence
+        .write_state_transition(session_id, &flint_lib::session::state::SessionState::Live)
+        .expect("state -> LIVE");
+
+    let result = dispatch_turn(
+        session_id,
+        "Tell me about a time you disagreed with a senior engineer.".to_string(),
+        1,
+        Arc::new(test_digest()),
+        prompts_dir,
+        fast_failover("```mermaid\nflowchart TD\nA-->B\n```", "default"),
+        embedder,
+        fresh_vector_store(),
+        Arc::new(Mutex::new(PreWarmCache::new())),
+        Arc::new(Mutex::new(ConversationMemory::new(128_000))),
+        "Sum:\n{old_turns}".to_string(),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(MockLLMProvider {
+            response: "x".to_string(),
+            provider_name: "ollama".to_string(),
+        }),
+        Arc::clone(&persistence),
+        no_op_tracker(),
+        true,
+        mock_app_handle(),
+    )
+    .await;
+    assert!(result.is_ok(), "dispatch_turn must succeed: {result:?}");
+
+    let recovery = persistence
+        .load_session_for_recovery(session_id)
+        .expect("recovery query")
+        .expect("session must be recoverable (state = LIVE)");
+    let has_visual_response = recovery
+        .responses
+        .iter()
+        .any(|r| r.response_type == flint_lib::session::persistence::ResponseType::Visual);
+    assert!(
+        has_visual_response,
+        "force_visual: true must spawn Visual even for a behavioral question"
+    );
+}
+
 /// `trigger_visual_response` (Tauri command, slice 20) surfaces as a
 /// `DetectedQuestion` tagged `DetectedQuestionSource::VisualManual`. The
 /// per-turn config built in `run_orchestrator` must force Visual to spawn
 /// for that source regardless of what `visual_classifier::needs_visual`
-/// says about the question text — covers the `cfg.force_visual` branch
-/// that `dispatch_turn` alone can't reach (it always passes `force_visual:
-/// false`, see slice 21).
+/// says about the question text — Live's path sets `force_visual` from
+/// `VisualManual`; rehearsal reaches the same branch via
+/// `dispatch_turn(..., force_visual: true)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_orchestrator_forces_visual_thread_on_manual_trigger() {
     let embedder = match try_embedder() {
