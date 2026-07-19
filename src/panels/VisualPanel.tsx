@@ -325,7 +325,7 @@ const VisualPanel = ({
           <button
             type="button"
             onClick={handleUseAnswer}
-            title="Copy the full visual answer to your clipboard"
+            title="Copy this diagram's text to your clipboard"
             style={{
               padding: "4px 10px",
               fontSize: "11px",
@@ -337,7 +337,7 @@ const VisualPanel = ({
               cursor: "pointer",
             }}
           >
-            {copied ? "Copied!" : "Use This Answer"}
+            {copied ? "Copied!" : "Copy Diagram Text"}
           </button>
         </div>
       )}
