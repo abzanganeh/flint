@@ -636,6 +636,116 @@ fn configure_pipewire_default_mic_source() {
     );
 }
 
+/// True when the ALSA `pulse` plugin is available (typically via `pipewire-pulse`).
+///
+/// Health checks use this instead of opening cpal devices: on some Linux hosts
+/// cpal/ALSA enumeration can SIGFPE and take down the whole Tauri process.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_alsa_pulse_plugin_available() -> bool {
+    let Ok(output) = std::process::Command::new("aplay").args(["-L"]).output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.trim() == "pulse")
+}
+
+/// Resolve the Pulse sources system loopback and mic capture would use, without cpal.
+///
+/// Mirrors [`configure_pipewire_monitor_source`] + [`find_mic_device`] routing at
+/// the PipeWire layer so [`check_system_audio_isolation`] can run safely.
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_pulse_isolation_probe() -> Result<(String, String), String> {
+    fn pactl_trim(args: &[&str]) -> Result<String, String> {
+        let output = std::process::Command::new("pactl")
+            .args(args)
+            .output()
+            .map_err(|e| format!("pactl unavailable: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "pactl {} failed",
+                args.first().copied().unwrap_or("?")
+            ));
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if value.is_empty() {
+            return Err(format!(
+                "pactl {} returned empty output",
+                args.first().copied().unwrap_or("?")
+            ));
+        }
+        Ok(value)
+    }
+
+    let system_source = if let Ok(source) = std::env::var("PULSE_SOURCE") {
+        let source = source.trim().to_string();
+        if source.is_empty() {
+            return Err("PULSE_SOURCE is set but empty".into());
+        }
+        source
+    } else {
+        let sink = pactl_trim(&["get-default-sink"])?;
+        format!("{sink}.monitor")
+    };
+
+    let mic_source = if let Ok(target) = std::env::var("FLINT_MIC_SOURCE") {
+        let target = target.trim().to_lowercase();
+        if target.is_empty() {
+            pactl_trim(&["get-default-source"])?
+        } else {
+            let sources = pactl_trim(&["list", "short", "sources"])?;
+            sources
+                .lines()
+                .find_map(|line| {
+                    let name = line.split_whitespace().nth(1)?;
+                    if name.to_lowercase().contains(&target) {
+                        Some(name.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| {
+                    format!("FLINT_MIC_SOURCE={target:?} but no matching Pulse source found")
+                })?
+        }
+    } else if echo_cancel_module_loaded_for_probe() {
+        let sources = pactl_trim(&["list", "short", "sources"])?;
+        match sources.lines().find_map(|line| {
+            let name = line.split_whitespace().nth(1)?;
+            let lower = name.to_lowercase();
+            if lower.contains("echo") || lower.contains("cancel") || lower.contains("aec") {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        }) {
+            Some(name) => name,
+            None => pactl_trim(&["get-default-source"])?,
+        }
+    } else {
+        pactl_trim(&["get-default-source"])?
+    };
+
+    Ok((system_source, mic_source))
+}
+
+#[cfg(target_os = "linux")]
+fn echo_cancel_module_loaded_for_probe() -> bool {
+    let Ok(output) = std::process::Command::new("pactl")
+        .args(["list", "short", "modules"])
+        .output()
+    else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.contains("module-echo-cancel"))
+}
+
 /// Prefer ALSA plugin devices that multiplex through PipeWire instead of raw
 /// `hw:` nodes that can block xdg-desktop-portal enumeration.
 #[cfg(target_os = "linux")]
