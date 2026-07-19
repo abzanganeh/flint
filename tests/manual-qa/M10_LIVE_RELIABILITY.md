@@ -3,7 +3,7 @@
 ## Prerequisites
 - Groq + DeepSeek (or Ollama) keys configured
 - Headphones optional (echo gate now 0.85 Jaccard)
-- Wayland for stealth (not X11)
+- Wayland for private mode (not X11)
 
 ## Loopback live (standard)
 1. Start rehearsal-complete session, go LIVE on Zoom/Teams loopback.

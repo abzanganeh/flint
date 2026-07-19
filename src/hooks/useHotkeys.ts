@@ -42,7 +42,7 @@ function isTriggerChord(e: KeyboardEvent): boolean {
   return isLinuxPlatform() && metaHeld(e);
 }
 
-/** Stealth panic hide: Ctrl+Alt+Shift+Space (Linux also Ctrl+Super+Shift+Space). */
+/** Private-mode panic hide: Ctrl+Alt+Shift+Space (Linux also Ctrl+Super+Shift+Space). */
 function isPanicChord(e: KeyboardEvent): boolean {
   if (!isSpaceKey(e) || e.repeat || !ctrlHeld(e) || !e.shiftKey) return false;
   if (altHeld(e)) return true;

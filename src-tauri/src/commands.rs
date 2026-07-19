@@ -23,9 +23,9 @@ use crate::calibration::{
 use crate::digest::extract_digest;
 use crate::dto::{
     AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto,
-    HardwareProfileDto, HeadphoneGateStatusDto, HealthCheckResultDto, MicCalibrationStatusDto,
-    OpenSessionLimitsDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
-    SmartResumeImportDto, UserDto, WebSourceDto,
+    HardwareProfileDto, HeadphoneGateStatusDto, HealthCheckResultDto, LiveReadinessReportDto,
+    MicCalibrationStatusDto, OpenSessionLimitsDto, RecordingConsentStatusDto, SessionConfigDto,
+    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_calibration_mic_complete, emit_calibration_system_complete, emit_mock_coach_feedback,
@@ -407,6 +407,75 @@ pub async fn run_health_check(
         .into_iter()
         .map(HealthCheckResultDto::from)
         .collect())
+}
+
+#[tauri::command]
+pub async fn run_live_readiness_check(
+    state: State<'_, AppState>,
+    _session_id: String,
+) -> Result<LiveReadinessReportDto, String> {
+    let fingerprint = device_fingerprint_or_fallback();
+    let mic_passed = state
+        .persistence
+        .get_mic_calibration_passed(&fingerprint)
+        .map_err(|e| e.to_string())?;
+    let phone_call_mode = *state.phone_call_mode.lock().await;
+    let headphone_override = state
+        .persistence
+        .get_headphone_gate_override()
+        .map_err(|e| e.to_string())?;
+
+    let report = checks::run_live_readiness_check(
+        phone_call_mode,
+        headphone_override,
+        mic_passed,
+        fingerprint,
+        &state.plugins,
+    )
+    .await;
+
+    Ok(LiveReadinessReportDto::from(report))
+}
+
+async fn require_recording_consent(state: &AppState, session_id: Uuid) -> Result<(), String> {
+    let accepted_at = state
+        .persistence
+        .get_recording_consent_accepted_at(session_id)
+        .map_err(|e| e.to_string())?;
+    if accepted_at.is_none() {
+        return Err(
+            "You must confirm recording consent before starting a live session.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_recording_consent_status(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<RecordingConsentStatusDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    let accepted_at = state
+        .persistence
+        .get_recording_consent_accepted_at(sid)
+        .map_err(|e| e.to_string())?;
+    Ok(RecordingConsentStatusDto {
+        accepted: accepted_at.is_some(),
+        accepted_at,
+    })
+}
+
+#[tauri::command]
+pub async fn accept_recording_consent(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<(), String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    state
+        .persistence
+        .set_recording_consent_accepted(sid)
+        .map_err(|e| e.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -3167,6 +3236,8 @@ pub async fn start_session(
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
 
+    require_recording_consent(state.inner(), sid).await?;
+
     if !keychain::is_rehearsal_completed() {
         return Err("Complete rehearsal before starting a live session.".to_string());
     }
@@ -3174,7 +3245,7 @@ pub async fn start_session(
     let plan = open_session_plan(state.inner()).await;
     crate::billing::validate_live_session_billing(plan)?;
 
-    checks::run_stealth_self_test()?;
+    checks::run_private_mode_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
 
@@ -3400,6 +3471,7 @@ pub async fn start_session(
 /// teardown semantics, and neither should emit `session_state_change` if the
 /// state already moved on (e.g. `commit_live_preview` won the race).
 async fn teardown_live_preview(app: &AppHandle, state: &AppState, handles: LivePreviewTaskHandles) {
+    let return_state = handles.return_state;
     let _ = handles.stop_tx.send(());
     let _ = tokio::time::timeout(Duration::from_secs(2), handles.zeroed_rx).await;
     handles.pipeline.abort();
@@ -3409,17 +3481,21 @@ async fn teardown_live_preview(app: &AppHandle, state: &AppState, handles: LiveP
         if *machine.current() != SessionState::LivePreview {
             false
         } else {
-            match machine.transition(SessionState::Ready) {
+            match machine.transition(return_state) {
                 Ok(()) => true,
                 Err(e) => {
-                    warn!(error = %e, "failed to transition LIVE_PREVIEW -> READY during teardown");
+                    warn!(
+                        error = %e,
+                        ?return_state,
+                        "failed to transition LIVE_PREVIEW during teardown"
+                    );
                     false
                 }
             }
         }
     };
     if transitioned {
-        emit_state(app, SessionState::Ready);
+        emit_state(app, return_state);
     }
 }
 
@@ -3427,24 +3503,33 @@ async fn teardown_live_preview(app: &AppHandle, state: &AppState, handles: LiveP
 /// only — deliberately no orchestrator, so no responses are generated
 /// during the preview window.
 ///
-/// Valid from: `READY` only. Auto-cancels back to `READY` after 60s unless
-/// `commit_live_preview` or `cancel_live_preview` resolves it first.
+/// Valid from: `READY` (post-rehearsal gate) or `REHEARSING` when
+/// `rehearsal_test` is true. Auto-cancels back to the originating state after
+/// 60s unless `commit_live_preview` or `cancel_live_preview` resolves it first.
 #[tauri::command]
 pub async fn start_live_preview(
     app: AppHandle,
     state: State<'_, AppState>,
     session_id: String,
+    rehearsal_test: Option<bool>,
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
+    let from_rehearsal_test = rehearsal_test.unwrap_or(false);
 
-    if !keychain::is_rehearsal_completed() {
+    if !from_rehearsal_test && !keychain::is_rehearsal_completed() {
         return Err("Complete rehearsal before starting a live preview.".to_string());
     }
+
+    let return_state = if from_rehearsal_test {
+        SessionState::Rehearsing
+    } else {
+        SessionState::Ready
+    };
 
     let plan = open_session_plan(state.inner()).await;
     crate::billing::validate_live_session_billing(plan)?;
 
-    checks::run_stealth_self_test()?;
+    checks::run_private_mode_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
     if !is_phone_call_mode {
@@ -3473,10 +3558,20 @@ pub async fn start_live_preview(
 
     {
         let machine = state.state_machine.lock().await;
-        if *machine.current() != SessionState::Ready {
+        let current = *machine.current();
+        let allowed = if from_rehearsal_test {
+            current == SessionState::Rehearsing
+        } else {
+            current == SessionState::Ready
+        };
+        if !allowed {
             return Err(format!(
-                "start_live_preview requires READY (current: {})",
-                machine.current()
+                "start_live_preview requires {} (current: {current})",
+                if from_rehearsal_test {
+                    "REHEARSING with rehearsal_test"
+                } else {
+                    "READY"
+                }
             ));
         }
     }
@@ -3592,6 +3687,7 @@ pub async fn start_live_preview(
         local_provider,
         context_window,
         timeout,
+        return_state,
     });
 
     info!(session_id = %sid, "live preview started");
@@ -3612,6 +3708,8 @@ pub async fn commit_live_preview(
     session_id: String,
 ) -> Result<(), String> {
     let sid = validate_session_id(&state, &session_id).await?;
+
+    require_recording_consent(state.inner(), sid).await?;
 
     {
         let machine = state.state_machine.lock().await;

@@ -29,7 +29,7 @@ Uncommitted / untracked work that belongs in this milestone (include):
 - `src/screens/HealthCheck.tsx`, `src/commands/index.ts`, `src/screens/LiveOverlay.tsx`
 - `src/components/WindowResizeGrip.*`
 - `scripts/dev-clean.sh`, `package.json` (`dev:clean`), `README.md`
-- `tests/manual-qa/stealth-audio-validation-runbook.md`, `hosted-supabase-runbook.md` (tracked QA)
+- `tests/manual-qa/private-mode-audio-validation-runbook.md`, `hosted-supabase-runbook.md` (tracked QA)
 
 **Explicitly OUT OF SCOPE — never stage/commit:**
 
@@ -57,7 +57,7 @@ Edit locally on every completed slice; **never `git add docs/`**. Still update t
 
 | Gate | Doc | Notes |
 |------|-----|-------|
-| L1 HealthCheck screenshot | `stealth-audio-validation-runbook.md` | Include `system_audio_isolation` |
+| L1 HealthCheck screenshot | `private-mode-audio-validation-runbook.md` | Include `system_audio_isolation` |
 | L2 System audio loopback | same | Retest after pulse-first fix; YouTube → INTERVIEWER only |
 | L5 OBS / screen capture | same | Document Wayland outcome |
 | Installer signing / notarization | `installer-signing-runbook.md` | Needs Apple + Windows certs |
@@ -211,7 +211,7 @@ Initialize `.cursor/flint-loop-state.json`:
 - Unit test: isolation check runs without panic
 
 **Gate:** `cargo test --lib health::checks`, `cargo clippy -- -D warnings`, `npm run test`  
-**Docs (local):** ROADMAP — note system_audio_isolation shipped; stealth runbook root-cause section accurate.
+**Docs (local):** ROADMAP — note system_audio_isolation shipped; private mode runbook root-cause section accurate.
 
 ---
 
@@ -241,7 +241,7 @@ Initialize `.cursor/flint-loop-state.json`:
 
 ### Slice 5: `v1p2-s5-tracked-runbooks` (SIMPLE)
 
-**Goal:** Update tracked `tests/manual-qa/stealth-audio-validation-runbook.md` (and hosted-supabase notes if needed): L1 includes `system_audio_isolation`; L2 retest note; root-cause section; do **not** mark L2 PASS without device evidence.
+**Goal:** Update tracked `tests/manual-qa/private-mode-audio-validation-runbook.md` (and hosted-supabase notes if needed): L1 includes `system_audio_isolation`; L2 retest note; root-cause section; do **not** mark L2 PASS without device evidence.
 
 **Gate:** File review only.
 

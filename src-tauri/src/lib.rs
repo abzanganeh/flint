@@ -22,12 +22,12 @@ pub mod knowledge;
 pub mod llm;
 pub mod mock;
 pub mod orchestrator;
+mod private_mode;
 pub mod rag;
 pub mod research;
 pub mod session;
 pub mod smart_resume;
 mod state;
-mod stealth;
 mod supabase;
 pub mod transcription;
 
@@ -120,9 +120,9 @@ pub fn run() {
 
             // Show a visible, centred window immediately — do not block on embedder init.
             #[cfg(debug_assertions)]
-            stealth::configure_dev_window(app.handle());
+            private_mode::configure_dev_window(app.handle());
             #[cfg(not(debug_assertions))]
-            stealth::place_on_non_primary_monitor(app.handle());
+            private_mode::place_on_non_primary_monitor(app.handle());
             deep_link::present_main_window(app.handle());
 
             health::hardware::assess_hardware();
@@ -178,7 +178,7 @@ pub fn run() {
             });
 
             hotkeys::register_hotkeys(app.handle());
-            stealth::apply_capture_exclusion(app.handle());
+            private_mode::apply_capture_exclusion(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -194,6 +194,9 @@ pub fn run() {
             commands::get_current_user,
             commands::get_hardware_profile,
             commands::run_health_check,
+            commands::run_live_readiness_check,
+            commands::get_recording_consent_status,
+            commands::accept_recording_consent,
             // Session design (Phase 2 / Phase 5.5.1)
             commands::create_session,
             commands::ingest_context,

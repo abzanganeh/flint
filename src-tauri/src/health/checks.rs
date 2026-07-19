@@ -9,6 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 
 use crate::health::hardware::{self, WhisperModel};
+use crate::health::headphone_gate::HeadphoneGateStatus;
 use crate::keychain;
 use crate::llm::stack;
 use crate::supabase::{resolve_supabase_config, SupabaseConfig};
@@ -28,7 +29,7 @@ pub enum HealthCheck {
     #[serde(rename = "rnnoise_preprocessing")]
     RNNoisePreprocessing,
     WhisperModel,
-    StealthApi,
+    PrivateModeApi,
     PrimaryLlm,
     OllamaAvailability,
     OsKeychain,
@@ -70,7 +71,7 @@ pub async fn run_health_check(
         check_system_audio_loopback(),
         check_rnnoise_preprocessing(),
         check_whisper_model(profile.recommended_whisper_model),
-        check_stealth_api(),
+        check_private_mode_api(),
         check_primary_llm(),
         check_ollama_availability().await,
         check_os_keychain(),
@@ -167,7 +168,7 @@ fn check_system_audio_loopback_linux() -> HealthCheckResult {
     if is_x11_session() {
         return warn(
             HealthCheck::SystemAudioLoopback,
-            "System audio loopback may work, but stealth mode requires Wayland.",
+            "System audio loopback may work, but private mode requires Wayland.",
             "PipeWire is required. Flint captures system audio from your default sink's .monitor source — do NOT run `pactl load-module module-loopback` (that routes your mic to your speakers).",
         );
     }
@@ -256,25 +257,25 @@ fn whisper_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn check_stealth_api() -> HealthCheckResult {
+fn check_private_mode_api() -> HealthCheckResult {
     #[cfg(target_os = "linux")]
     {
         if is_x11_session() {
             return fail(
-                HealthCheck::StealthApi,
-                "Stealth mode requires Wayland. X11 is not supported.",
+                HealthCheck::PrivateModeApi,
+                "Private mode requires Wayland. X11 is not supported.",
                 "Log out and start a Wayland session (e.g. Ubuntu on Wayland), then re-run the health check.",
             );
         }
         if is_wayland_session() {
             return pass(
-                HealthCheck::StealthApi,
+                HealthCheck::PrivateModeApi,
                 "Wayland session detected — compositor capture exclusion is supported.",
             );
         }
         warn(
-            HealthCheck::StealthApi,
-            "Could not confirm a Wayland session for stealth mode.",
+            HealthCheck::PrivateModeApi,
+            "Could not confirm a Wayland session for private mode.",
             "Use a Wayland desktop session. X11 cannot hide the overlay from screen capture.",
         )
     }
@@ -282,7 +283,7 @@ fn check_stealth_api() -> HealthCheckResult {
     #[cfg(target_os = "windows")]
     {
         return pass(
-            HealthCheck::StealthApi,
+            HealthCheck::PrivateModeApi,
             "Windows display affinity API is available for capture exclusion.",
         );
     }
@@ -290,7 +291,7 @@ fn check_stealth_api() -> HealthCheckResult {
     #[cfg(target_os = "macos")]
     {
         return pass(
-            HealthCheck::StealthApi,
+            HealthCheck::PrivateModeApi,
             "macOS window sharing exclusion (NSWindow.sharingType = .none) is available.",
         );
     }
@@ -298,9 +299,9 @@ fn check_stealth_api() -> HealthCheckResult {
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         warn(
-            HealthCheck::StealthApi,
-            "Stealth capture exclusion could not be verified on this platform.",
-            "Confirm overlay stealth support before starting a live session.",
+            HealthCheck::PrivateModeApi,
+            "Private mode capture exclusion could not be verified on this platform.",
+            "Confirm overlay private mode support before starting a live session.",
         )
     }
 }
@@ -757,12 +758,127 @@ pub fn check_system_audio_isolation() -> HealthCheckResult {
     }
 }
 
-/// Stealth gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
-pub fn run_stealth_self_test() -> Result<(), String> {
-    let result = check_stealth_api();
+/// Private mode gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
+pub fn run_private_mode_self_test() -> Result<(), String> {
+    let result = check_private_mode_api();
     match result.status {
         CheckStatus::Pass | CheckStatus::Warn => Ok(()),
         CheckStatus::Fail => Err(result.message),
+    }
+}
+
+/// Snapshot of settings that invalidate a prior "Test Live Session" pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveReadinessConfigFingerprint {
+    pub phone_call_mode: bool,
+    pub headphone_override: bool,
+    pub mic_calibration_passed: bool,
+    pub device_fingerprint: String,
+    pub pulse_system_source: Option<String>,
+    pub pulse_mic_source: Option<String>,
+}
+
+/// Curated readiness report for Rehearsal "Test Live Session".
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveReadinessReport {
+    pub ready: bool,
+    pub checks: Vec<HealthCheckResult>,
+    pub headphone_gate: HeadphoneGateStatus,
+    pub config_fingerprint: LiveReadinessConfigFingerprint,
+}
+
+pub fn build_live_readiness_fingerprint(
+    phone_call_mode: bool,
+    headphone_override: bool,
+    mic_calibration_passed: bool,
+    device_fingerprint: String,
+) -> LiveReadinessConfigFingerprint {
+    #[cfg(target_os = "linux")]
+    let (pulse_system_source, pulse_mic_source) =
+        match crate::audio::capture::linux_pulse_isolation_probe() {
+            Ok((sys, mic)) => (Some(sys), Some(mic)),
+            Err(_) => (None, None),
+        };
+    #[cfg(not(target_os = "linux"))]
+    let (pulse_system_source, pulse_mic_source) = (None, None);
+
+    LiveReadinessConfigFingerprint {
+        phone_call_mode,
+        headphone_override,
+        mic_calibration_passed,
+        device_fingerprint,
+        pulse_system_source,
+        pulse_mic_source,
+    }
+}
+
+/// Run installation + live-gate checks relevant before the first real session.
+pub async fn run_live_readiness_check(
+    phone_call_mode: bool,
+    headphone_override: bool,
+    mic_calibration_passed: bool,
+    device_fingerprint: String,
+    plugins: &std::collections::HashMap<String, serde_json::Value>,
+) -> LiveReadinessReport {
+    let profile = hardware::assess_hardware();
+
+    let mut checks = vec![
+        check_private_mode_api(),
+        check_whisper_model(profile.recommended_whisper_model),
+        check_primary_llm(),
+        check_system_audio_loopback(),
+        check_os_keychain(),
+        check_echo_cancellation(),
+    ];
+
+    if !phone_call_mode {
+        checks.push(check_system_audio_isolation());
+    }
+
+    if mic_calibration_passed {
+        checks.push(pass(
+            HealthCheck::MicrophoneAccess,
+            "Microphone calibration passed on this device.",
+        ));
+    } else {
+        checks.push(warn(
+            HealthCheck::MicrophoneAccess,
+            "Microphone calibration has not passed on this device.",
+            "Open Mic Calibration from session setup (or Settings) and complete the read-aloud test before going live.",
+        ));
+    }
+
+    let gate = crate::health::headphone_gate::evaluate(phone_call_mode, headphone_override);
+
+    // Ollama is optional fallback — warn only, never block readiness.
+    let ollama = check_ollama_availability().await;
+    if ollama.status == CheckStatus::Fail {
+        checks.push(warn(
+            HealthCheck::OllamaAvailability,
+            ollama.message,
+            ollama
+                .fix_instruction
+                .unwrap_or_else(|| "Install Ollama for local fallback.".into()),
+        ));
+    } else {
+        checks.push(ollama);
+    }
+
+    let _ = plugins; // reserved for future Supabase-aware checks
+
+    let ready = !gate.blocked && !checks.iter().any(|c| c.status == CheckStatus::Fail);
+    let config_fingerprint = build_live_readiness_fingerprint(
+        phone_call_mode,
+        headphone_override,
+        mic_calibration_passed,
+        device_fingerprint,
+    );
+
+    LiveReadinessReport {
+        ready,
+        checks,
+        headphone_gate: gate,
+        config_fingerprint,
     }
 }
 

@@ -11,7 +11,7 @@ and attach them to the QA report.
 
 ## Prerequisites
 
-- Linux Wayland session (X11 will fail the stealth gate).
+- Linux Wayland session (X11 will fail the private mode gate).
 - Whisper model installed at `~/.cache/whisper/ggml-small.en.bin` (or the
   tier-appropriate model).
 - Groq or DeepSeek API key configured in keychain.
@@ -72,7 +72,7 @@ revert any `FLINT_MIC_SOURCE` override and restart Flint).
 
 Goal: phone-call mode end-to-end. Manual Ctrl+Q drives the orchestrator.
 
-- [ ] HealthCheck steps required (mic, stealth) all pass before LIVE.
+- [ ] HealthCheck steps required (mic, private mode) all pass before LIVE.
 - [ ] Auto question detection is off (`phone_mode_manual_only = true`).
 - [ ] Pressing Ctrl+Q dispatches the buffered interviewer text exactly
   once per question.

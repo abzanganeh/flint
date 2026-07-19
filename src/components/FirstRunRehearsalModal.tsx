@@ -58,6 +58,13 @@ export default function FirstRunRehearsalModal({
         <h2 className="first-run-modal__title">Before you rehearse</h2>
 
         <p className="first-run-modal__body">
+          Before your real interview, run a quick <strong>Test Live Session</strong> from
+          Rehearsal. Flint checks Private Mode, microphone routing, API keys, and audio
+          isolation (or phone-interview settings), then offers a 60-second audio preview
+          with no AI responses.
+        </p>
+
+        <p className="first-run-modal__body">
           Rehearsal is where you turn prep into answers you can actually say in the
           interview. Flint drafts from your pasted context — then you edit and save
           each answer as your <strong>preferred answer</strong>. Those saved scripts
@@ -98,7 +105,7 @@ export default function FirstRunRehearsalModal({
               checked={dontShowAgain}
               onChange={(e) => setDontShowAgain(e.target.checked)}
             />
-            <span>Don&apos;t show again for this session</span>
+            <span>Don&apos;t show again</span>
           </label>
           <button className="first-run-modal__dismiss-btn" onClick={handleDismiss}>
             Got it, start rehearsing

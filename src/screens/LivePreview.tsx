@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 
+import RecordingConsentModal from "../components/RecordingConsentModal";
 import {
+  acceptRecordingConsent,
   cancelLivePreview,
   commitLivePreview,
+  getRecordingConsentStatus,
   getSessionSnapshot,
 } from "../commands";
 import { onSessionStateChange } from "../events";
@@ -22,12 +25,22 @@ const LivePreview = ({ sessionId, onGoLive, onBack }: LivePreviewProps) => {
   const [busy, setBusy] = useState<"commit" | "cancel" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [phoneCallMode, setPhoneCallMode] = useState(false);
+  const [consentAccepted, setConsentAccepted] = useState<boolean | null>(null);
+  const [showConsentModal, setShowConsentModal] = useState(false);
 
   useEffect(() => {
     void getSessionSnapshot()
       .then((snapshot) => setPhoneCallMode(snapshot.phoneCallMode ?? false))
       .catch(() => undefined);
   }, []);
+
+  useEffect(() => {
+    void getRecordingConsentStatus(sessionId)
+      .then((status) => {
+        setConsentAccepted(status.accepted);
+      })
+      .catch(() => setConsentAccepted(false));
+  }, [sessionId]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -40,7 +53,7 @@ const LivePreview = ({ sessionId, onGoLive, onBack }: LivePreviewProps) => {
     let active = true;
     const unlistenPromise = onSessionStateChange(({ state }) => {
       if (!active) return;
-      if (state === SessionState.READY) {
+      if (state === SessionState.READY || state === SessionState.REHEARSING) {
         onBack();
       }
       if (state === SessionState.LIVE) {
@@ -53,7 +66,7 @@ const LivePreview = ({ sessionId, onGoLive, onBack }: LivePreviewProps) => {
     };
   }, [onBack, onGoLive]);
 
-  const handleGoLive = useCallback(async () => {
+  const commitLive = useCallback(async () => {
     setError(null);
     setBusy("commit");
     try {
@@ -65,6 +78,51 @@ const LivePreview = ({ sessionId, onGoLive, onBack }: LivePreviewProps) => {
       setBusy(null);
     }
   }, [onGoLive, sessionId]);
+
+  const handleGoLive = useCallback(() => {
+    if (consentAccepted === null) {
+      return;
+    }
+    if (consentAccepted) {
+      void commitLive();
+      return;
+    }
+    setShowConsentModal(true);
+  }, [commitLive, consentAccepted]);
+
+  const handleConsentConfirm = useCallback(async () => {
+    setBusy("commit");
+    setError(null);
+    try {
+      await acceptRecordingConsent(sessionId);
+      setConsentAccepted(true);
+      setShowConsentModal(false);
+      await commitLivePreview(sessionId);
+      onGoLive();
+    } catch (e: unknown) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }, [onGoLive, sessionId]);
+
+  const handleConsentCancel = useCallback(() => {
+    setShowConsentModal(false);
+    window.alert(
+      "You must confirm recording consent before starting a live session. Flint cannot go live without it.",
+    );
+    void (async () => {
+      setBusy("cancel");
+      try {
+        await cancelLivePreview(sessionId);
+        onBack();
+      } catch (e: unknown) {
+        setError(String(e));
+      } finally {
+        setBusy(null);
+      }
+    })();
+  }, [onBack, sessionId]);
 
   const handleBack = useCallback(async () => {
     setError(null);
@@ -90,6 +148,13 @@ const LivePreview = ({ sessionId, onGoLive, onBack }: LivePreviewProps) => {
         fontFamily: "'Inter', 'SF Pro Text', system-ui, sans-serif",
       }}
     >
+      {showConsentModal && (
+        <RecordingConsentModal
+          onConfirm={() => void handleConsentConfirm()}
+          onCancel={handleConsentCancel}
+        />
+      )}
+
       <div
         style={{
           padding: "10px 16px",
@@ -179,7 +244,7 @@ const LivePreview = ({ sessionId, onGoLive, onBack }: LivePreviewProps) => {
         <button
           type="button"
           data-testid="live-preview-go-live-button"
-          disabled={busy !== null}
+          disabled={busy !== null || consentAccepted === null}
           onClick={() => void handleGoLive()}
           style={{
             padding: "8px 20px",

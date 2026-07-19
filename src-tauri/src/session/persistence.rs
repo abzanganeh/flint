@@ -204,7 +204,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 18;
+const SCHEMA_VERSION: u32 = 19;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -526,6 +526,18 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v18")?;
         info!("sqlite schema migrated to version 18");
+    }
+
+    if current < 19 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN recording_consent_accepted_at INTEGER;
+
+            PRAGMA user_version = 19;
+            ",
+        )
+        .context("schema migration v19")?;
+        info!("sqlite schema migrated to version 19");
     }
 
     Ok(())
@@ -2392,6 +2404,35 @@ impl SessionPersistence {
         self.delete_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY)
     }
 
+    pub fn get_recording_consent_accepted_at(&self, session_id: Uuid) -> Result<Option<i64>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let value = conn
+            .query_row(
+                "SELECT recording_consent_accepted_at FROM sessions WHERE id = ?1",
+                params![sid],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .context("load recording consent")?;
+        Ok(value.flatten())
+    }
+
+    pub fn set_recording_consent_accepted(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let rows = conn
+            .execute(
+                "UPDATE sessions SET recording_consent_accepted_at = strftime('%s','now'),
+                        updated_at = strftime('%s','now')
+                 WHERE id = ?1",
+                params![sid],
+            )
+            .context("persist recording consent")?;
+        anyhow::ensure!(rows == 1, "session not found for recording consent");
+        Ok(())
+    }
+
     /// Delete all persisted data for `session_id`.
     ///
     /// Called after a session is successfully ended and synced, or when the
@@ -3308,14 +3349,22 @@ mod tests {
     }
 
     #[test]
-    fn fresh_db_migrates_to_v18_with_empty_round_type_default() {
+    fn fresh_db_migrates_to_v19_with_recording_consent_column() {
         let db = new_db();
         let conn = db.db.lock().unwrap();
         let version: u32 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(SCHEMA_VERSION, 18);
+        assert_eq!(SCHEMA_VERSION, 19);
+        let has_consent_col: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'recording_consent_accepted_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(has_consent_col, 1);
         drop(conn);
 
         let sid = Uuid::new_v4();
@@ -3326,31 +3375,26 @@ mod tests {
     }
 
     #[test]
-    fn old_v17_db_upgrades_to_v18_with_round_type_column_present() {
-        // Build a genuine pre-v18 (v17-shaped) database on disk: migrate a
-        // fresh file all the way forward, then strip exactly what v18 added
-        // (the `round_type` column) and roll `user_version` back to 17 —
-        // reproducing what a real user's v17 database looks like.
+    fn old_v18_db_upgrades_to_v19_with_recording_consent_column() {
         use std::path::PathBuf;
         let dir = std::env::temp_dir();
-        let db_path: PathBuf = dir.join(format!("flint_v17_upgrade_{}.sqlite", Uuid::new_v4()));
+        let db_path: PathBuf = dir.join(format!("flint_v18_upgrade_{}.sqlite", Uuid::new_v4()));
         let path_str = db_path.to_str().unwrap().to_string();
         {
             let seed = SessionPersistence::new(&path_str).expect("seed db must migrate");
             drop(seed);
             let raw = rusqlite::Connection::open(&path_str).unwrap();
             raw.execute_batch(
-                "ALTER TABLE sessions DROP COLUMN round_type; PRAGMA user_version = 17;",
+                "ALTER TABLE sessions DROP COLUMN recording_consent_accepted_at; PRAGMA user_version = 18;",
             )
-            .expect("roll schema back to v17 shape");
+            .expect("roll schema back to v18 shape");
         }
 
-        let db = SessionPersistence::new(&path_str).expect("v17 DB must upgrade to v18");
+        let db = SessionPersistence::new(&path_str).expect("v18 DB must upgrade to v19");
         let sid = Uuid::new_v4();
         db.create_session_row(sid, "Legacy", "interview", "swe")
             .unwrap();
-        let loaded = db.load_session_focus(sid).unwrap();
-        assert_eq!(loaded.round_type, "");
+        assert!(db.get_recording_consent_accepted_at(sid).unwrap().is_none());
         drop(db);
         let _ = std::fs::remove_file(&db_path);
     }

@@ -1,9 +1,9 @@
-//! Platform-specific stealth helpers: capture exclusion + multi-monitor
+//! Platform-specific Private Mode helpers: capture exclusion + multi-monitor
 //! placement.
 //!
 //! References:
-//! - `.cursor/rules/flint-security.mdc` — Stealth Mode Requirements
-//! - `flint_system_design_v3.md` §17 — Stealth & Screen Capture
+//! - `.cursor/rules/flint-security.mdc` — Private Mode Requirements
+//! - `flint_system_design_v3.md` §17 — Private Mode & Screen Capture
 //!
 //! Capture exclusion is best-effort and OS-dependent. The X11 path is hard-
 //! failed at health-check time so this module assumes Wayland on Linux. On
@@ -119,7 +119,7 @@ fn apply_capture_exclusion_impl<R: Runtime>(window: &tauri::WebviewWindow<R>) {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn apply_capture_exclusion_impl<R: Runtime>(_window: &tauri::WebviewWindow<R>) {
     // Wayland has no portable compositor exclusion protocol; the X11 path is
-    // hard-failed in `health/checks.rs::check_stealth_api`. The user-facing
+    // hard-failed in `health/checks.rs::check_private_mode_api`. The user-facing
     // protection on Wayland is the PipeWire portal, which is per-source and
     // user-controlled — there is nothing to call at the Rust level.
     info!(
@@ -199,7 +199,7 @@ pub fn place_on_non_primary_monitor<R: Runtime>(app: &AppHandle<R>) {
 /// Dev-only window setup: draggable chrome, taskbar entry, primary monitor.
 ///
 /// Release builds keep frameless always-on-top placement on the non-primary
-/// display (stealth overlay). Debug builds are easier to move and find.
+/// display (private overlay). Debug builds are easier to move and find.
 #[cfg(debug_assertions)]
 pub fn configure_dev_window<R: Runtime>(app: &AppHandle<R>) {
     let Some(window) = app.get_webview_window("main") else {

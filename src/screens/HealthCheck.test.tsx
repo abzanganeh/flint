@@ -42,9 +42,9 @@ describe("HealthCheck", () => {
     vi.mocked(runHealthCheck).mockResolvedValue([
       passResult("os_keychain"),
       {
-        check: "stealth_api",
+        check: "private_mode_api",
         status: "fail",
-        message: "Stealth mode requires Wayland. X11 is not supported.",
+        message: "Private mode requires Wayland. X11 is not supported.",
         fixInstruction: "Switch to Wayland.",
       },
     ]);

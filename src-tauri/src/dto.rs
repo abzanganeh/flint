@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::digest::Digest;
-use crate::health::checks::{CheckStatus, HealthCheck, HealthCheckResult};
+use crate::health::checks::{self, CheckStatus, HealthCheck, HealthCheckResult};
 use crate::health::hardware::{HardwareProfile, LLMConfig};
 use crate::interfaces::auth::{Plan, User};
 use crate::session::persistence::SessionContextFields;
@@ -476,6 +476,17 @@ pub struct HeadphoneGateStatusDto {
     pub fix_instruction: Option<String>,
 }
 
+impl From<crate::health::headphone_gate::HeadphoneGateStatus> for HeadphoneGateStatusDto {
+    fn from(status: crate::health::headphone_gate::HeadphoneGateStatus) -> Self {
+        Self {
+            blocked: status.blocked,
+            overridden: status.overridden,
+            message: status.message,
+            fix_instruction: status.fix_instruction,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MicCalibrationStatusDto {
@@ -487,6 +498,61 @@ pub struct MicCalibrationStatusDto {
     pub calibrated_at: Option<i64>,
     pub system_clip_text: String,
     pub mic_paragraph_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveReadinessConfigFingerprintDto {
+    pub phone_call_mode: bool,
+    pub headphone_override: bool,
+    pub mic_calibration_passed: bool,
+    pub device_fingerprint: String,
+    pub pulse_system_source: Option<String>,
+    pub pulse_mic_source: Option<String>,
+}
+
+impl From<checks::LiveReadinessConfigFingerprint> for LiveReadinessConfigFingerprintDto {
+    fn from(fp: checks::LiveReadinessConfigFingerprint) -> Self {
+        Self {
+            phone_call_mode: fp.phone_call_mode,
+            headphone_override: fp.headphone_override,
+            mic_calibration_passed: fp.mic_calibration_passed,
+            device_fingerprint: fp.device_fingerprint,
+            pulse_system_source: fp.pulse_system_source,
+            pulse_mic_source: fp.pulse_mic_source,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveReadinessReportDto {
+    pub ready: bool,
+    pub checks: Vec<HealthCheckResultDto>,
+    pub headphone_gate: HeadphoneGateStatusDto,
+    pub config_fingerprint: LiveReadinessConfigFingerprintDto,
+}
+
+impl From<checks::LiveReadinessReport> for LiveReadinessReportDto {
+    fn from(report: checks::LiveReadinessReport) -> Self {
+        Self {
+            ready: report.ready,
+            checks: report
+                .checks
+                .into_iter()
+                .map(HealthCheckResultDto::from)
+                .collect(),
+            headphone_gate: HeadphoneGateStatusDto::from(report.headphone_gate),
+            config_fingerprint: LiveReadinessConfigFingerprintDto::from(report.config_fingerprint),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingConsentStatusDto {
+    pub accepted: bool,
+    pub accepted_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

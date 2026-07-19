@@ -18,7 +18,7 @@ const CHECK_LABELS: Record<HealthCheckName, string> = {
   system_audio_loopback: "System audio loopback",
   rnnoise_preprocessing: "RNNoise preprocessing",
   whisper_model: "Whisper model",
-  stealth_api: "Stealth mode",
+  private_mode_api: "Private mode",
   primary_llm: "Primary LLM",
   ollama_availability: "Ollama",
   os_keychain: "OS keychain",
@@ -46,11 +46,11 @@ function osFamily(os: string): OsFamily {
   return "other";
 }
 
-function isX11StealthFailure(results: HealthCheckResultDto[]): boolean {
-  const stealth = results.find((r) => r.check === "stealth_api");
+function isX11PrivateModeFailure(results: HealthCheckResultDto[]): boolean {
+  const privateMode = results.find((r) => r.check === "private_mode_api");
   return (
-    stealth?.status === "fail" &&
-    stealth.message.toLowerCase().includes("x11")
+    privateMode?.status === "fail" &&
+    privateMode.message.toLowerCase().includes("x11")
   );
 }
 
@@ -206,7 +206,7 @@ const HealthCheck = ({ onComplete }: HealthCheckProps) => {
     [results],
   );
 
-  const x11Warning = useMemo(() => isX11StealthFailure(results), [results]);
+  const x11Warning = useMemo(() => isX11PrivateModeFailure(results), [results]);
 
   const toggleWarn = (check: HealthCheckName) => {
     setExpandedWarns((prev) => {
@@ -230,7 +230,7 @@ const HealthCheck = ({ onComplete }: HealthCheckProps) => {
 
         {x11Warning ? (
           <div className="platform-banner danger" role="alert">
-            <strong>Stealth mode requires Wayland.</strong> X11 is not supported.
+            <strong>Private mode requires Wayland.</strong> X11 is not supported.
             Screen capture exclusion cannot be guaranteed on X11 — switch to a
             Wayland session before starting a live session.
           </div>

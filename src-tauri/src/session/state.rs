@@ -293,6 +293,7 @@ const fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
             | (PreWarming, Rehearsing)
             | (PreWarming, Ready)
             | (Rehearsing, Ready)
+            | (Rehearsing, LivePreview) // rehearsal "Test Live Session" audio preview
             | (Rehearsing, MockInterview) // user starts mock interview from rehearsal
             | (Rehearsing, Configuring) // user returns to edit pasted context
             | (Ready, MockInterview) // optional mock practice after rehearsal gate (READY draft UI)
@@ -303,6 +304,7 @@ const fn is_valid_transition(from: SessionState, to: SessionState) -> bool {
             | (Ready, Live)
             | (Ready, LivePreview) // user opts into a 60s live preview before going fully live
             | (LivePreview, Ready) // preview cancelled or timed out — back to the READY gate
+            | (LivePreview, Rehearsing) // rehearsal test preview cancelled — back to rehearsal
             | (LivePreview, Live) // preview committed — orchestrator spawns, session goes live
             | (Live, Paused)
             | (Paused, Live)
