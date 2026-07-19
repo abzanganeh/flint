@@ -491,6 +491,7 @@ const Rehearsal = ({
               question={lastAskedQuestion}
               suggestedAnswer={streamingBuffers.answer}
               onSaved={() => setBankRefreshKey((k) => k + 1)}
+              defaultCollapsed
             />
           )}
         </div>
