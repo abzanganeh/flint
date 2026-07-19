@@ -2768,6 +2768,7 @@ pub async fn add_to_question_bank(
     question: String,
     tags: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
+    use crate::session::question_attempts::normalize_question_key;
     use crate::session::question_bank::{bank_questions, BankQuestionEntry};
 
     let sid = validate_session_id(&state, &session_id).await?;
@@ -2780,14 +2781,17 @@ pub async fn add_to_question_bank(
         validate_focus_tag_ids(tags)?;
     }
 
-    let lower = trimmed.to_lowercase();
+    let key = normalize_question_key(&trimmed);
 
     if let Some(tags) = tags {
         let mut entries = state
             .persistence
             .load_question_bank_entries(sid)
             .map_err(|e| e.to_string())?;
-        if !entries.iter().any(|e| e.question.to_lowercase() == lower) {
+        if !entries
+            .iter()
+            .any(|e| normalize_question_key(&e.question) == key)
+        {
             entries.push(BankQuestionEntry::new(trimmed, tags));
             state
                 .persistence
@@ -2802,7 +2806,7 @@ pub async fn add_to_question_bank(
         .load_question_bank(sid)
         .map_err(|e| e.to_string())?;
 
-    if !bank.iter().any(|q| q.to_lowercase() == lower) {
+    if !bank.iter().any(|q| normalize_question_key(q) == key) {
         bank.push(trimmed);
         state
             .persistence
