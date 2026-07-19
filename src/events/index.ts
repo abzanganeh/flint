@@ -344,6 +344,12 @@ export interface MockSuggestedTokenEventPayload {
   token: string;
 }
 
+export interface MockSuggestedDoneEventPayload {
+  turn_n: number;
+  /** Present when generation failed before producing any tokens. */
+  error?: string | null;
+}
+
 export interface MockCoachFeedbackEventPayload {
   turn_n: number;
   coach_json: string;
@@ -385,6 +391,13 @@ export const onMockSuggestedToken = (
   handler: (payload: MockSuggestedTokenEventPayload) => void,
 ): Promise<UnlistenFn> =>
   listen<MockSuggestedTokenEventPayload>("mock_suggested_token", (event) =>
+    handler(event.payload),
+  );
+
+export const onMockSuggestedDone = (
+  handler: (payload: MockSuggestedDoneEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<MockSuggestedDoneEventPayload>("mock_suggested_done", (event) =>
     handler(event.payload),
   );
 

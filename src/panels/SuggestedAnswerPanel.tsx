@@ -1,9 +1,11 @@
 interface Props {
   text: string;
   isStreaming: boolean;
+  /** Set when generation failed before producing any text. */
+  error?: string | null;
 }
 
-const SuggestedAnswerPanel = ({ text, isStreaming }: Props) => {
+const SuggestedAnswerPanel = ({ text, isStreaming, error }: Props) => {
   return (
     <div
       style={{
@@ -47,6 +49,8 @@ const SuggestedAnswerPanel = ({ text, isStreaming }: Props) => {
         >
           {text}
         </p>
+      ) : error ? (
+        <span style={{ color: "#fca5a5", fontSize: "12px" }}>{error}</span>
       ) : (
         <span style={{ color: "#52525b", fontSize: "12px" }}>
           {isStreaming ? "Generating…" : "Waiting for question…"}
