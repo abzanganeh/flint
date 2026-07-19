@@ -528,6 +528,18 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         info!("sqlite schema migrated to version 18");
     }
 
+    if current < 19 {
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN recording_consent_accepted_at INTEGER;
+
+            PRAGMA user_version = 19;
+            ",
+        )
+        .context("schema migration v19")?;
+        info!("sqlite schema migrated to version 19");
+    }
+
     Ok(())
 }
 
@@ -2390,6 +2402,33 @@ impl SessionPersistence {
 
     pub fn clear_headphone_gate_override(&self) -> Result<()> {
         self.delete_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY)
+    }
+
+    pub fn get_recording_consent_accepted_at(&self, session_id: Uuid) -> Result<Option<i64>> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        conn.query_row(
+            "SELECT recording_consent_accepted_at FROM sessions WHERE id = ?1",
+            params![sid],
+            |row| row.get(0),
+        )
+        .optional()
+        .context("load recording consent")
+    }
+
+    pub fn set_recording_consent_accepted(&self, session_id: Uuid) -> Result<()> {
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let rows = conn
+            .execute(
+                "UPDATE sessions SET recording_consent_accepted_at = strftime('%s','now'),
+                        updated_at = strftime('%s','now')
+                 WHERE id = ?1",
+                params![sid],
+            )
+            .context("persist recording consent")?;
+        anyhow::ensure!(rows == 1, "session not found for recording consent");
+        Ok(())
     }
 
     /// Delete all persisted data for `session_id`.

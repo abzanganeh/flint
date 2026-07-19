@@ -59,6 +59,40 @@ export const getHardwareProfile = (): Promise<HardwareProfileDto> =>
 export const runHealthCheck = (): Promise<HealthCheckResultDto[]> =>
   invoke<HealthCheckResultDto[]>("run_health_check");
 
+export interface LiveReadinessConfigFingerprintDto {
+  phoneCallMode: boolean;
+  headphoneOverride: boolean;
+  micCalibrationPassed: boolean;
+  deviceFingerprint: string;
+  pulseSystemSource: string | null;
+  pulseMicSource: string | null;
+}
+
+export interface LiveReadinessReportDto {
+  ready: boolean;
+  checks: HealthCheckResultDto[];
+  headphoneGate: HeadphoneGateStatusDto;
+  configFingerprint: LiveReadinessConfigFingerprintDto;
+}
+
+export interface RecordingConsentStatusDto {
+  accepted: boolean;
+  acceptedAt: number | null;
+}
+
+export const runLiveReadinessCheck = (
+  sessionId: string,
+): Promise<LiveReadinessReportDto> =>
+  invoke<LiveReadinessReportDto>("run_live_readiness_check", { sessionId });
+
+export const getRecordingConsentStatus = (
+  sessionId: string,
+): Promise<RecordingConsentStatusDto> =>
+  invoke<RecordingConsentStatusDto>("get_recording_consent_status", { sessionId });
+
+export const acceptRecordingConsent = (sessionId: string): Promise<void> =>
+  invoke<void>("accept_recording_consent", { sessionId });
+
 export const getLegalConsentAccepted = (): Promise<boolean> =>
   invoke<boolean>("get_legal_consent_accepted");
 
@@ -197,9 +231,15 @@ export const runRehearsalTurn = (
 export const completeRehearsal = (sessionId: string): Promise<void> =>
   invoke<void>("complete_rehearsal", { sessionId });
 
-/** Start a 60s audio-only live preview (READY → LIVE_PREVIEW). */
-export const startLivePreview = (sessionId: string): Promise<void> =>
-  invoke<void>("start_live_preview", { sessionId });
+/** Start a 60s audio-only live preview (READY or REHEARSING → LIVE_PREVIEW). */
+export const startLivePreview = (
+  sessionId: string,
+  rehearsalTest?: boolean,
+): Promise<void> =>
+  invoke<void>("start_live_preview", {
+    sessionId,
+    rehearsalTest: rehearsalTest ?? null,
+  });
 
 /** Commit preview into a full live session (LIVE_PREVIEW → LIVE). */
 export const commitLivePreview = (sessionId: string): Promise<void> =>

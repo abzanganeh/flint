@@ -6,11 +6,15 @@ import LivePreview from "./LivePreview";
 const cancelLivePreview = vi.fn();
 const commitLivePreview = vi.fn();
 const getSessionSnapshot = vi.fn();
+const getRecordingConsentStatus = vi.fn();
+const acceptRecordingConsent = vi.fn();
 
 vi.mock("../commands", () => ({
   cancelLivePreview: (...args: unknown[]) => cancelLivePreview(...args),
   commitLivePreview: (...args: unknown[]) => commitLivePreview(...args),
   getSessionSnapshot: () => getSessionSnapshot(),
+  getRecordingConsentStatus: (...args: unknown[]) => getRecordingConsentStatus(...args),
+  acceptRecordingConsent: (...args: unknown[]) => acceptRecordingConsent(...args),
 }));
 
 vi.mock("../events", () => ({
@@ -25,6 +29,7 @@ describe("LivePreview", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getSessionSnapshot.mockResolvedValue({ phoneCallMode: false });
+    getRecordingConsentStatus.mockResolvedValue({ accepted: true, acceptedAt: 1_700_000_000 });
     cancelLivePreview.mockResolvedValue(undefined);
     commitLivePreview.mockResolvedValue(undefined);
   });
@@ -43,6 +48,9 @@ describe("LivePreview", () => {
     render(
       <LivePreview sessionId="sess-1" onGoLive={onGoLive} onBack={vi.fn()} />,
     );
+    await waitFor(() => {
+      expect(getRecordingConsentStatus).toHaveBeenCalled();
+    });
     fireEvent.click(screen.getByTestId("live-preview-go-live-button"));
     await waitFor(() => {
       expect(commitLivePreview).toHaveBeenCalledWith("sess-1");

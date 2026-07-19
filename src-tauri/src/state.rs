@@ -35,7 +35,7 @@ use crate::rag::embedder::Embedder;
 use crate::rag::store::SqliteVecStore;
 use crate::session::memory::ConversationMemory;
 use crate::session::persistence::SessionPersistence;
-use crate::session::state::SessionStateMachine;
+use crate::session::state::{SessionState, SessionStateMachine};
 use crate::supabase::SupabaseAuth;
 
 // ── Live session handles (Phase 3) ───────────────────────────────────────────
@@ -139,6 +139,8 @@ pub struct LivePreviewTaskHandles {
     /// `commit_live_preview` so it can never fire after the preview has
     /// already been resolved.
     pub timeout: JoinHandle<()>,
+    /// State to restore when preview is cancelled or times out.
+    pub return_state: SessionState,
 }
 
 /// Shared application state for Tauri commands.

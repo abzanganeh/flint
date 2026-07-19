@@ -9,6 +9,7 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
 
 use crate::health::hardware::{self, WhisperModel};
+use crate::health::headphone_gate::HeadphoneGateStatus;
 use crate::keychain;
 use crate::llm::stack;
 use crate::supabase::{resolve_supabase_config, SupabaseConfig};
@@ -763,6 +764,121 @@ pub fn run_private_mode_self_test() -> Result<(), String> {
     match result.status {
         CheckStatus::Pass | CheckStatus::Warn => Ok(()),
         CheckStatus::Fail => Err(result.message),
+    }
+}
+
+/// Snapshot of settings that invalidate a prior "Test Live Session" pass.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LiveReadinessConfigFingerprint {
+    pub phone_call_mode: bool,
+    pub headphone_override: bool,
+    pub mic_calibration_passed: bool,
+    pub device_fingerprint: String,
+    pub pulse_system_source: Option<String>,
+    pub pulse_mic_source: Option<String>,
+}
+
+/// Curated readiness report for Rehearsal "Test Live Session".
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveReadinessReport {
+    pub ready: bool,
+    pub checks: Vec<HealthCheckResult>,
+    pub headphone_gate: HeadphoneGateStatus,
+    pub config_fingerprint: LiveReadinessConfigFingerprint,
+}
+
+pub fn build_live_readiness_fingerprint(
+    phone_call_mode: bool,
+    headphone_override: bool,
+    mic_calibration_passed: bool,
+    device_fingerprint: String,
+) -> LiveReadinessConfigFingerprint {
+    #[cfg(target_os = "linux")]
+    let (pulse_system_source, pulse_mic_source) =
+        match crate::audio::capture::linux_pulse_isolation_probe() {
+            Ok((sys, mic)) => (Some(sys), Some(mic)),
+            Err(_) => (None, None),
+        };
+    #[cfg(not(target_os = "linux"))]
+    let (pulse_system_source, pulse_mic_source) = (None, None);
+
+    LiveReadinessConfigFingerprint {
+        phone_call_mode,
+        headphone_override,
+        mic_calibration_passed,
+        device_fingerprint,
+        pulse_system_source,
+        pulse_mic_source,
+    }
+}
+
+/// Run installation + live-gate checks relevant before the first real session.
+pub async fn run_live_readiness_check(
+    phone_call_mode: bool,
+    headphone_override: bool,
+    mic_calibration_passed: bool,
+    device_fingerprint: String,
+    plugins: &std::collections::HashMap<String, serde_json::Value>,
+) -> LiveReadinessReport {
+    let profile = hardware::assess_hardware();
+
+    let mut checks = vec![
+        check_private_mode_api(),
+        check_whisper_model(profile.recommended_whisper_model),
+        check_primary_llm(),
+        check_system_audio_loopback(),
+        check_os_keychain(),
+        check_echo_cancellation(),
+    ];
+
+    if !phone_call_mode {
+        checks.push(check_system_audio_isolation());
+    }
+
+    if mic_calibration_passed {
+        checks.push(pass(
+            HealthCheck::MicrophoneAccess,
+            "Microphone calibration passed on this device.",
+        ));
+    } else {
+        checks.push(warn(
+            HealthCheck::MicrophoneAccess,
+            "Microphone calibration has not passed on this device.",
+            "Open Mic Calibration from session setup (or Settings) and complete the read-aloud test before going live.",
+        ));
+    }
+
+    let gate = crate::health::headphone_gate::evaluate(phone_call_mode, headphone_override);
+
+    // Ollama is optional fallback — warn only, never block readiness.
+    let ollama = check_ollama_availability().await;
+    if ollama.status == CheckStatus::Fail {
+        checks.push(warn(
+            HealthCheck::OllamaAvailability,
+            ollama.message,
+            ollama
+                .fix_instruction
+                .unwrap_or_else(|| "Install Ollama for local fallback.".into()),
+        ));
+    } else {
+        checks.push(ollama);
+    }
+
+    let _ = plugins; // reserved for future Supabase-aware checks
+
+    let ready = !gate.blocked && !checks.iter().any(|c| c.status == CheckStatus::Fail);
+    let config_fingerprint = build_live_readiness_fingerprint(
+        phone_call_mode,
+        headphone_override,
+        mic_calibration_passed,
+        device_fingerprint,
+    );
+
+    LiveReadinessReport {
+        ready,
+        checks,
+        headphone_gate: gate,
+        config_fingerprint,
     }
 }
 

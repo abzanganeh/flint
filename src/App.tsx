@@ -747,6 +747,16 @@ function App() {
           onReturnToSetup={() => void handleReturnToSessionDesign()}
           onOpenSettings={() => openSettings("rehearsal", "session-focus")}
           onStartMock={() => setScreen("mock-interview")}
+          onStartLivePreviewTest={() => {
+            void (async () => {
+              try {
+                await startLivePreview(sessionId, true);
+                setScreen("live-preview");
+              } catch (err: unknown) {
+                setImportError(String(err));
+              }
+            })();
+          }}
         />
       </Shell>
     );

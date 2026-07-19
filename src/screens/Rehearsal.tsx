@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import InfoPopover from "../components/InfoPopover";
 import PreferredAnswerPanel from "../components/PreferredAnswerPanel";
+import LiveReadinessModal from "../components/LiveReadinessModal";
 import MicQualityBadge from "../components/MicQualityBadge";
 import FirstRunRehearsalModal, {
   isFirstRunModalDismissed,
@@ -20,9 +21,15 @@ import {
   completeRehearsal,
   getCostStatus,
   getSessionContextFields,
+  runLiveReadinessCheck,
   runRehearsalTurn,
+  type LiveReadinessReportDto,
   type SessionContextFields,
 } from "../commands";
+import {
+  isLiveReadinessTestCurrent,
+  saveLiveReadinessTestRecord,
+} from "../lib/liveReadinessStorage";
 import { useCostCap } from "../hooks/useCostCap";
 import { useHotkeys, isRehearsalSubmitChord } from "../hooks/useHotkeys";
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
@@ -44,6 +51,7 @@ export interface RehearsalProps {
   onReturnToSetup?: () => void;
   onOpenSettings?: () => void;
   onStartMock?: () => void;
+  onStartLivePreviewTest?: () => void;
 }
 
 type SideTab = "checklist" | "questions" | "research" | "stories";
@@ -94,6 +102,7 @@ const Rehearsal = ({
   onReturnToSetup,
   onOpenSettings,
   onStartMock,
+  onStartLivePreviewTest,
 }: RehearsalProps) => {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
@@ -102,6 +111,30 @@ const Rehearsal = ({
   const [showFirstRunModal, setShowFirstRunModal] = useState(
     () => !isFirstRunModalDismissed(),
   );
+  const [readinessReport, setReadinessReport] = useState<LiveReadinessReportDto | null>(
+    null,
+  );
+  const [readinessBusy, setReadinessBusy] = useState(false);
+  const [liveTestCurrent, setLiveTestCurrent] = useState(false);
+
+  const refreshLiveTestStatus = useCallback(async () => {
+    try {
+      const report = await runLiveReadinessCheck(sessionId);
+      setLiveTestCurrent(isLiveReadinessTestCurrent(sessionId, report.configFingerprint));
+    } catch {
+      setLiveTestCurrent(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    void refreshLiveTestStatus();
+  }, [refreshLiveTestStatus]);
+
+  useEffect(() => {
+    const onFocus = () => void refreshLiveTestStatus();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshLiveTestStatus]);
   const [sideTab, setSideTab] = useState<SideTab>("checklist");
   const [sideOpen, setSideOpen] = useState(true);
   const [questionInputHeight, setQuestionInputHeight] = useState(
@@ -333,6 +366,35 @@ const Rehearsal = ({
     onComplete();
   };
 
+  const handleTestLiveSession = async () => {
+    setReadinessBusy(true);
+    setError(null);
+    try {
+      const report = await runLiveReadinessCheck(sessionId);
+      setReadinessReport(report);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setReadinessBusy(false);
+    }
+  };
+
+  const closeReadinessModal = () => {
+    if (readinessReport?.ready) {
+      saveLiveReadinessTestRecord(sessionId, readinessReport.configFingerprint);
+      setLiveTestCurrent(true);
+    }
+    setReadinessReport(null);
+  };
+
+  const handleRunAudioPreview = () => {
+    if (!readinessReport?.ready) return;
+    saveLiveReadinessTestRecord(sessionId, readinessReport.configFingerprint);
+    setLiveTestCurrent(true);
+    setReadinessReport(null);
+    onStartLivePreviewTest?.();
+  };
+
   // Wayland/WebKit often omits modifier flags on the target element; capture at
   // document. Refs keep the listener stable (no rebind on every keystroke).
   const askingRef = useRef(asking);
@@ -361,6 +423,14 @@ const Rehearsal = ({
         <FirstRunRehearsalModal
           fields={contextFields}
           onDismiss={() => setShowFirstRunModal(false)}
+        />
+      )}
+      {readinessReport && (
+        <LiveReadinessModal
+          report={readinessReport}
+          busy={readinessBusy}
+          onClose={closeReadinessModal}
+          onRunAudioPreview={handleRunAudioPreview}
         />
       )}
 
@@ -399,6 +469,24 @@ const Rehearsal = ({
           </div>
 
           <div className="rehearsal-header__actions">
+            <button
+              type="button"
+              data-testid="test-live-session-button"
+              disabled={readinessBusy || liveTestCurrent}
+              title={
+                liveTestCurrent
+                  ? "Already tested with current settings — change phone mode, mic calibration, or audio routing to re-test"
+                  : "Run installation and live-session readiness checks"
+              }
+              onClick={() => void handleTestLiveSession()}
+              className="rehearsal-header__ghost-btn"
+            >
+              {readinessBusy
+                ? "Testing…"
+                : liveTestCurrent
+                  ? "Live test complete"
+                  : "Test Live Session"}
+            </button>
             <UsageWidget />
             {onOpenSettings && (
               <button

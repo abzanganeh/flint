@@ -194,6 +194,9 @@ pub fn run() {
             commands::get_current_user,
             commands::get_hardware_profile,
             commands::run_health_check,
+            commands::run_live_readiness_check,
+            commands::get_recording_consent_status,
+            commands::accept_recording_consent,
             // Session design (Phase 2 / Phase 5.5.1)
             commands::create_session,
             commands::ingest_context,
