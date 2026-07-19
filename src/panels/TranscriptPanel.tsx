@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { copyTextToClipboard, relabelTranscriptChunk, triggerResponse } from "../commands";
 import { onSpeakerRefined, onTranscriptChunkRelabeled } from "../events";
 import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
+import { PANEL_ACCENTS } from "../lib/panelColors";
 import type { Speaker } from "../types";
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -331,8 +332,9 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
       <div
         style={{
           padding: "6px 12px",
-          borderBottom: "1px solid #1e2028",
-          color: "#6b7280",
+          borderBottom: `1px solid ${PANEL_ACCENTS.transcript.headerBorder}`,
+          backgroundColor: PANEL_ACCENTS.transcript.headerBg,
+          color: PANEL_ACCENTS.transcript.text,
           fontSize: "11px",
           letterSpacing: "0.08em",
           textTransform: "uppercase",

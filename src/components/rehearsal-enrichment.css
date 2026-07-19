@@ -1230,26 +1230,468 @@
   color: #9ca3af;
 }
 
-/* ── Rehearsal workflow banner ─────────────────────────────────────────── */
-.rehearsal-workflow-banner {
-  padding: 10px 16px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #c4b5fd;
-  background: #1e1533;
-  border-bottom: 1px solid #312e81;
+/* ── Rehearsal compact layout (space-efficient on small viewports) ─────── */
+.rehearsal-screen {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 36px);
+  min-height: 0;
+  background: #0f1117;
+  font-family: "Inter", "SF Pro Text", system-ui, sans-serif;
+}
+
+.rehearsal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #1e2028;
+  flex-shrink: 0;
+  min-height: 36px;
+}
+
+.rehearsal-header__primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.rehearsal-header__mode {
+  color: #a78bfa;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
   flex-shrink: 0;
 }
-.rehearsal-workflow-banner strong {
-  color: #e9d5ff;
+
+.rehearsal-header__actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
 }
+
+.rehearsal-header__ghost-btn {
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  border: 1px solid #374151;
+  background: transparent;
+  color: #9ca3af;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.rehearsal-header__ghost-btn:hover {
+  border-color: #6b7280;
+  color: #e5e7eb;
+}
+
+/* Scrollable workflow — caps chrome height so panels keep ~60% of viewport */
+.rehearsal-workflow-scroll {
+  flex-shrink: 0;
+  max-height: min(38vh, 300px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid #1e2028;
+  scrollbar-gutter: stable;
+}
+
+.rehearsal-question-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.rehearsal-question-input-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rehearsal-question-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  background: #1a1d26;
+  border: 1px solid #2d3748;
+  border-radius: 6px 6px 0 0;
+  color: #e5e7eb;
+  font-size: 13px;
+  line-height: 1.45;
+  font-family: inherit;
+  /* Native corner-resize is unreliable across webviews — the visible grip
+     below drives resizing instead, but this stays as a browser-native
+     fallback. */
+  resize: vertical;
+  outline: none;
+  display: block;
+}
+
+.rehearsal-question-input:focus {
+  border-color: #7c3aed;
+}
+
+/* Explicit drag grip — far more discoverable than the native textarea
+   resize corner, which is easy to miss against the dark theme. */
+.rehearsal-question-resize-handle {
+  height: 9px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #14171f;
+  border: 1px solid #2d3748;
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  cursor: row-resize;
+  touch-action: none;
+}
+
+.rehearsal-question-resize-handle:hover,
+.rehearsal-question-resize-handle:active {
+  background: #1a1d26;
+}
+
+.rehearsal-question-resize-handle__grip {
+  width: 34px;
+  height: 3px;
+  border-radius: 2px;
+  background: #3f4453;
+  transition: background 0.12s;
+}
+
+.rehearsal-question-resize-handle:hover .rehearsal-question-resize-handle__grip,
+.rehearsal-question-resize-handle:active .rehearsal-question-resize-handle__grip {
+  background: #a78bfa;
+}
+
+.rehearsal-ask-btn {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  flex-shrink: 0;
+  cursor: pointer;
+  background: #7c3aed;
+  color: #fff;
+}
+
+.rehearsal-ask-btn:disabled {
+  background: #1e2028;
+  color: #4b5563;
+  cursor: not-allowed;
+}
+
+.rehearsal-inline-alert {
+  font-size: 12px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.rehearsal-inline-alert--error {
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.35);
+  border: 1px solid #7f1d1d;
+}
+
+.rehearsal-inline-alert--warn {
+  color: #fde68a;
+  background: rgba(120, 53, 15, 0.35);
+  border: 1px solid #92400e;
+}
+
+.rehearsal-main {
+  flex: 1;
+  min-height: min(240px, 42vh);
+  overflow: hidden;
+  display: flex;
+}
+
+.rehearsal-panels {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rehearsal-sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  border-left: 1px solid #1e2028;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition: width 0.18s ease, border-color 0.18s ease;
+}
+
+.rehearsal-sidebar--collapsed {
+  width: 34px;
+  border-left: 1px solid rgba(99, 102, 241, 0.4);
+}
+
+/* Toggle bar — indigo identity ties it to the phone-mode banner accent
+   elsewhere in the app, distinct from all four panel hues. Colored in both
+   states, but noticeably bolder when collapsed so it reads as "click to
+   reopen" rather than a stray sliver. */
+.rehearsal-sidebar__toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
+  border: none;
+  border-bottom: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(99, 102, 241, 0.1);
+  color: #a5b4fc;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.rehearsal-sidebar__toggle:hover {
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+}
+
+.rehearsal-sidebar__toggle--expanded {
+  justify-content: space-between;
+}
+
+.rehearsal-sidebar__toggle--collapsed {
+  height: 100%;
+  flex-direction: column;
+  justify-content: center;
+  border-bottom: none;
+  background: rgba(99, 102, 241, 0.16);
+}
+
+.rehearsal-sidebar__toggle--collapsed:hover {
+  background: rgba(99, 102, 241, 0.28);
+}
+
+.rehearsal-sidebar__toggle-icon {
+  font-size: 12px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.rehearsal-sidebar__toggle-vertical {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  letter-spacing: 0.08em;
+}
+
+.rehearsal-sidebar__tabs {
+  display: flex;
+  border-bottom: 1px solid #1e2028;
+  flex-shrink: 0;
+}
+
+.rehearsal-sidebar__tab {
+  flex: 1;
+  padding: 6px 4px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #52525b;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: capitalize;
+  letter-spacing: 0.04em;
+  transition: color 0.12s, border-color 0.12s;
+}
+
+.rehearsal-sidebar__tab:hover {
+  color: #9ca3af;
+}
+
+.rehearsal-sidebar__tab--active {
+  border-bottom-color: #6366f1;
+  color: #a5b4fc;
+}
+
+.rehearsal-sidebar__tab-content {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.rehearsal-footer {
+  padding: 8px 12px;
+  border-top: 1px solid #1e2028;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.rehearsal-footer__hint {
+  color: #52525b;
+  font-size: 10px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.rehearsal-footer__hint--warn {
+  color: #f59e0b;
+}
+
+.rehearsal-footer__mock-btn {
+  padding: 6px 14px;
+  background: #7c3aed;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.rehearsal-footer__complete-btn {
+  padding: 6px 14px;
+  background: transparent;
+  color: #94a3b8;
+  border: 1px solid #374151;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.rehearsal-footer__complete-btn--ready {
+  background: #22c55e;
+  color: #fff;
+  border: none;
+}
+
+.rehearsal-shortcuts-list {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d1d5db;
+}
+
+.rehearsal-shortcuts-list kbd {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  background: #1e2028;
+  border: 1px solid #374151;
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+@media (max-width: 900px) {
+  .rehearsal-workflow-scroll {
+    max-height: min(32vh, 220px);
+  }
+
+  .session-context-badges {
+    max-width: 100%;
+  }
+}
+
+@media (max-height: 720px) {
+  .rehearsal-workflow-scroll {
+    max-height: min(30vh, 180px);
+  }
+
+  .rehearsal-main {
+    min-height: min(200px, 48vh);
+  }
+}
+
+/* ── InfoPopover ([i] help) ─────────────────────────────────────────────── */
+.info-popover {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.info-popover__label {
+  font-size: 10px;
+  color: #6b7280;
+}
+
+.info-popover__trigger {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid #374151;
+  background: #1a1d26;
+  color: #9ca3af;
+  font-size: 11px;
+  font-weight: 700;
+  font-style: italic;
+  font-family: Georgia, "Times New Roman", serif;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.info-popover__trigger:hover,
+.info-popover__trigger[aria-expanded="true"] {
+  border-color: #7c3aed;
+  color: #c4b5fd;
+  background: #1e1533;
+}
+
+.info-popover__panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 200;
+  width: min(320px, 85vw);
+  padding: 10px 12px;
+  background: #161922;
+  border: 1px solid #374151;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d1d5db;
+}
+
+.info-popover__panel p {
+  margin: 0;
+}
+
+.info-popover__panel strong {
+  color: #e5e7eb;
+}
+
 
 /* ── PreferredAnswerPanel ──────────────────────────────────────────────── */
 .preferred-answer-panel {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px;
+  padding: 10px;
   border-radius: 8px;
   border: 1px solid #4338ca;
   background: #13111f;
@@ -1261,6 +1703,25 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+}
+.preferred-answer-panel__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+}
+.preferred-answer-panel__chevron {
+  font-size: 9px;
+  color: #6b7280;
+}
+.preferred-answer-panel__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .preferred-answer-panel__title {
   font-size: 11px;

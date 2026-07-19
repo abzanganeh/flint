@@ -299,6 +299,19 @@ pub struct MockSuggestedTokenPayload {
     pub token: String,
 }
 
+/// Emitted once the suggested-answer generation for a turn finishes — either by
+/// exhausting the stream or by failing outright. Without this, a provider
+/// failure before any token is produced left the UI stuck on "Generating…"
+/// forever with no indication anything went wrong.
+#[derive(Debug, Clone, Serialize)]
+pub struct MockSuggestedDonePayload {
+    pub turn_n: u32,
+    /// Present when generation failed — the UI shows this instead of the
+    /// (empty) suggested answer.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Structured coach feedback emitted once after coach LLM completes.
 #[derive(Debug, Clone, Serialize)]
 pub struct MockCoachFeedbackPayload {
@@ -352,6 +365,10 @@ pub fn emit_mock_suggested_token<R: Runtime>(
     payload: MockSuggestedTokenPayload,
 ) {
     let _ = app.emit("mock_suggested_token", payload);
+}
+
+pub fn emit_mock_suggested_done<R: Runtime>(app: &AppHandle<R>, payload: MockSuggestedDonePayload) {
+    let _ = app.emit("mock_suggested_done", payload);
 }
 
 pub fn emit_mock_coach_feedback<R: Runtime>(app: &AppHandle<R>, payload: MockCoachFeedbackPayload) {

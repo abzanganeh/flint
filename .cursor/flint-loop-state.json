@@ -1,16 +1,18 @@
 {
   "current_milestone": "visual-robustness-and-triggers",
-  "milestone_status": "in_progress",
+  "milestone_status": "ci_green",
   "milestone_branch": { "flint": "feature/visual-robustness-and-triggers" },
-  "current_slice": 13,
-  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-  "current_task_id": "vrt-s13-full-gates-rerun",
-  "loop_stopped": false,
-  "ci_fix_attempts": 0,
+  "current_slice": 14,
+  "completed_slices": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "current_task_id": "vrt-s14-pr-ci-merge",
+  "loop_stopped": true,
+  "ci_fix_attempts": 3,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {},
+  "open_prs": {
+    "39": "merged"
+  },
   "manual_gate_backlog": [
     {
       "gate": "Mermaid diagram device retest",
@@ -23,5 +25,5 @@
     "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slice 11 review: no blocking findings. Slice 12 skipped. Running slice 13 full gates then PR."
+  "notes": "Milestone complete. PR #39 merged (squash). All CI green. Ready for manual live test."
 }

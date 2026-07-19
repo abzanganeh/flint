@@ -23,8 +23,9 @@ use uuid::Uuid;
 use crate::digest::Digest;
 use crate::events::{
     emit_mock_ended, emit_mock_question_spoken, emit_mock_question_started,
-    emit_mock_suggested_token, MockEndedPayload, MockQuestionSpokenPayload,
-    MockQuestionStartedPayload, MockSuggestedTokenPayload,
+    emit_mock_suggested_done, emit_mock_suggested_token, MockEndedPayload,
+    MockQuestionSpokenPayload, MockQuestionStartedPayload, MockSuggestedDonePayload,
+    MockSuggestedTokenPayload,
 };
 use crate::interfaces::vector::VectorInterface;
 use crate::knowledge::{GlobalKnowledgeBase, PackId};
@@ -332,6 +333,13 @@ async fn conductor_loop<R: Runtime>(
                 let text = preferred_answer.clone();
                 tokio::spawn(async move {
                     emit_preferred_suggested_tokens(&app_clone, &text, mode, &buffer_clone);
+                    emit_mock_suggested_done(
+                        &app_clone,
+                        MockSuggestedDonePayload {
+                            turn_n,
+                            error: None,
+                        },
+                    );
                     text
                 })
             } else {
@@ -345,8 +353,8 @@ async fn conductor_loop<R: Runtime>(
                 let company_context_clone = company_context.clone();
                 let speaking_style_clone = speaking_style.clone();
                 tokio::spawn(async move {
-                    run_suggested_answer(
-                        app_clone,
+                    let result = run_suggested_answer(
+                        app_clone.clone(),
                         session_id,
                         &q,
                         &rag_clone,
@@ -358,8 +366,18 @@ async fn conductor_loop<R: Runtime>(
                         mode,
                         buffer_clone,
                     )
-                    .await
-                    .unwrap_or_default()
+                    .await;
+                    // A failure before any token streamed otherwise left the UI stuck on
+                    // "Generating…" forever with no signal that anything went wrong.
+                    let error = result.as_ref().err().map(|e| {
+                        warn!(session_id = %session_id, turn_n, error = %e, "suggested answer generation failed");
+                        "Couldn't generate a suggested answer right now — answer from your prep notes.".to_string()
+                    });
+                    emit_mock_suggested_done(
+                        &app_clone,
+                        MockSuggestedDonePayload { turn_n, error },
+                    );
+                    result.unwrap_or_default()
                 })
             };
 

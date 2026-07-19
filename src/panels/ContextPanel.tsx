@@ -1,4 +1,5 @@
 import { useRagChunks } from "../hooks/useRagChunks";
+import { PANEL_ACCENTS } from "../lib/panelColors";
 import { useUIStore } from "../store/ui";
 import { HistoryCard } from "./TurnCards";
 
@@ -26,8 +27,9 @@ const ContextPanel = ({ sessionId }: ContextPanelProps) => {
       <div
         style={{
           padding: "6px 12px",
-          borderBottom: "1px solid #1e2028",
-          color: "#6b7280",
+          borderBottom: `1px solid ${PANEL_ACCENTS.context.headerBorder}`,
+          backgroundColor: PANEL_ACCENTS.context.headerBg,
+          color: PANEL_ACCENTS.context.text,
           fontSize: "11px",
           letterSpacing: "0.08em",
           textTransform: "uppercase",

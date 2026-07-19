@@ -34,9 +34,15 @@ interface VisualTokenPayload {
   token: string;
 }
 
+interface MockSuggestedDonePayload {
+  turn_n: number;
+  error?: string | null;
+}
+
 const handlers: {
   questionStarted?: (payload: MockQuestionStartedPayload) => void;
   visualToken?: (payload: VisualTokenPayload) => void;
+  suggestedDone?: (payload: MockSuggestedDonePayload) => void;
 } = {};
 
 vi.mock("../events", () => ({
@@ -49,6 +55,10 @@ vi.mock("../events", () => ({
   onMockQuestionSpoken: () => Promise.resolve(() => undefined),
   onMockTurnPhase: () => Promise.resolve(() => undefined),
   onMockSuggestedToken: () => Promise.resolve(() => undefined),
+  onMockSuggestedDone: (handler: (payload: MockSuggestedDonePayload) => void) => {
+    handlers.suggestedDone = handler;
+    return Promise.resolve(() => undefined);
+  },
   onMockUserTranscribed: () => Promise.resolve(() => undefined),
   onAudioQualityStatus: () => Promise.resolve(() => undefined),
   // Consumed by the real `useOrchestratorStreams` hook (intentionally not
@@ -95,6 +105,7 @@ describe("MockInterview Visual support", () => {
     vi.clearAllMocks();
     handlers.questionStarted = undefined;
     handlers.visualToken = undefined;
+    handlers.suggestedDone = undefined;
     useUIStore.setState({
       streamingBuffers: { answer: "", visual: "" },
       currentQuestion: "",
@@ -167,5 +178,51 @@ describe("MockInterview Visual support", () => {
 
     fireEvent.click(screen.getByTestId("mock-visual-toggle-button"));
     expect(await screen.findByTestId("visual-panel")).toBeTruthy();
+  });
+});
+
+describe("MockInterview suggested-answer generation failure", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    handlers.questionStarted = undefined;
+    handlers.visualToken = undefined;
+    handlers.suggestedDone = undefined;
+    useUIStore.setState({
+      streamingBuffers: { answer: "", visual: "" },
+      currentQuestion: "",
+      confidenceLevel: null,
+      depthPrePrepared: false,
+      turnHistory: [],
+    });
+  });
+
+  // Regression: a provider failure before any suggested-answer token streamed
+  // used to be swallowed silently, leaving Study mode stuck on "Generating…"
+  // forever with no indication anything went wrong.
+  it("surfaces an error and stops the streaming indicator when suggested-answer generation fails", async () => {
+    render(
+      <MockInterview sessionId="sess-1" onComplete={vi.fn()} onAbort={vi.fn()} />,
+    );
+
+    await waitFor(() => expect(handlers.questionStarted).toBeDefined());
+    startMockQuestion({ mode: "study" });
+
+    await waitFor(() => expect(handlers.suggestedDone).toBeDefined());
+    act(() => {
+      handlers.suggestedDone?.({
+        turn_n: 1,
+        error: "Couldn't generate a suggested answer right now — answer from your prep notes.",
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Couldn't generate a suggested answer right now — answer from your prep notes.",
+        ),
+      ).toBeTruthy();
+    });
+    expect(screen.queryByText("Generating…")).toBeNull();
+    expect(screen.queryByText("streaming…")).toBeNull();
   });
 });

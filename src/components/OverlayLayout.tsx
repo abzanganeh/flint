@@ -1,16 +1,10 @@
 import type { ReactNode } from "react";
 
 import type { PanelId } from "../types";
+import { PANEL_ACCENTS, PANEL_LABELS } from "../lib/panelColors";
 import { useUIStore } from "../store/ui";
 
 // ── Panel wrapper ─────────────────────────────────────────────────────────────
-
-const PANEL_LABELS: Record<PanelId, string> = {
-  transcript: "Transcript",
-  answer: "Answer",
-  visual: "Visual",
-  context: "Context",
-};
 
 interface PanelSlotProps {
   id: PanelId;
@@ -21,6 +15,7 @@ const PanelSlot = ({ id, children }: PanelSlotProps) => {
   const { panelLayout, togglePanelCollapsed } = useUIStore();
   const collapsed = panelLayout.collapsed[id];
   const size = panelLayout.sizes[id];
+  const accent = PANEL_ACCENTS[id];
 
   return (
     <div
@@ -30,6 +25,7 @@ const PanelSlot = ({ id, children }: PanelSlotProps) => {
         display: "flex",
         flexDirection: "column",
         borderRight: "1px solid #1e2028",
+        borderTop: `3px solid ${accent.stripe}`,
         overflow: "hidden",
         transition: "flex 0.18s ease",
       }}
@@ -45,10 +41,10 @@ const PanelSlot = ({ id, children }: PanelSlotProps) => {
           justifyContent: collapsed ? "center" : "flex-end",
           padding: "0 8px",
           height: collapsed ? 40 : 20,
-          background: "none",
+          background: collapsed ? accent.headerBg : "none",
           border: "none",
           cursor: "pointer",
-          color: "#52525b",
+          color: accent.text,
           fontSize: collapsed ? 10 : 9,
           fontWeight: 600,
           letterSpacing: "0.06em",
@@ -57,10 +53,10 @@ const PanelSlot = ({ id, children }: PanelSlotProps) => {
           width: "100%",
           boxSizing: "border-box",
           writingMode: collapsed ? "vertical-rl" : "horizontal-tb",
-          transition: "color 0.12s",
+          transition: "color 0.12s, background 0.12s",
         }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#9ca3af"; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#52525b"; }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = accent.textStrong; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = accent.text; }}
       >
         {collapsed ? PANEL_LABELS[id] : "◀"}
       </button>
@@ -206,15 +202,17 @@ const StackPanelSlot = ({ id, children }: StackPanelSlotProps) => {
   const { panelLayout, togglePanelCollapsed } = useUIStore();
   const collapsed = panelLayout.collapsed[id];
   const rawSize = panelLayout.sizes[id] ?? STACK_DEFAULT_SIZES[id];
+  const accent = PANEL_ACCENTS[id];
 
   return (
     <div
       style={{
         flex: collapsed ? "0 0 28px" : `${rawSize} 1 0`,
-        minHeight: collapsed ? 28 : 120,
+        minHeight: collapsed ? 28 : 72,
         display: "flex",
         flexDirection: "column",
         borderBottom: "1px solid #1e2028",
+        borderLeft: `3px solid ${accent.stripe}`,
         overflow: "hidden",
         transition: "flex 0.18s ease",
       }}
@@ -228,10 +226,13 @@ const StackPanelSlot = ({ id, children }: StackPanelSlotProps) => {
           justifyContent: "space-between",
           padding: "0 12px",
           height: 28,
-          background: "none",
-          border: "none",
+          background: accent.headerBg,
+          borderTop: "none",
+          borderLeft: "none",
+          borderRight: "none",
+          borderBottom: `1px solid ${accent.headerBorder}`,
           cursor: "pointer",
-          color: "#52525b",
+          color: accent.text,
           fontSize: 10,
           fontWeight: 600,
           letterSpacing: "0.06em",
@@ -239,10 +240,10 @@ const StackPanelSlot = ({ id, children }: StackPanelSlotProps) => {
           flexShrink: 0,
           width: "100%",
           boxSizing: "border-box",
-          transition: "color 0.12s",
+          transition: "color 0.12s, background 0.12s",
         }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#9ca3af"; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = "#52525b"; }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.color = accent.textStrong; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.color = accent.text; }}
       >
         <span>{PANEL_LABELS[id]}</span>
         <span>{collapsed ? "▼" : "▲"}</span>

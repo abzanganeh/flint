@@ -22,6 +22,7 @@ import {
   onMockQuestionStarted,
   onMockQuestionSpoken,
   onMockTurnPhase,
+  onMockSuggestedDone,
   onMockSuggestedToken,
   onMockUserTranscribed,
 } from "../events";
@@ -62,6 +63,8 @@ interface TurnState {
   editTranscript: string;
   suggestedText: string;
   suggestedStreaming: boolean;
+  /** Set when suggested-answer generation failed before producing any text. */
+  suggestedError: string | null;
   coachFeedback: CoachFeedback | null;
   coachLoading: boolean;
   score: number;
@@ -76,6 +79,7 @@ const emptyTurn = (): TurnState => ({
   editTranscript: "",
   suggestedText: "",
   suggestedStreaming: false,
+  suggestedError: null,
   coachFeedback: null,
   coachLoading: false,
   score: 0,
@@ -205,6 +209,12 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
             suggestedText: t.suggestedText + p.token,
             suggestedStreaming: studyModeRef.current === "study" && t.suggestedStreaming,
           }));
+        }),
+        onMockSuggestedDone((p) => {
+          setTurn((t) => {
+            if (p.turn_n !== t.turnN) return t;
+            return { ...t, suggestedStreaming: false, suggestedError: p.error ?? null };
+          });
         }),
         onMockCoachFeedback((p) => {
           setTurn((t) => {
@@ -743,11 +753,13 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
                   </strong>
                   <br />
                   <span style={{ fontSize: "12px", color: "#94a3b8" }}>
-                    Instructions only — play a recorded phone-screen on your phone speaker
-                    near the laptop mic while Mock Interview runs. Enable{" "}
-                    <strong>Phone interview mode</strong> in Session Design (or Settings)
-                    so Flint labels interviewer vs you. Use Live Preview after rehearsal to
-                    verify labels before a real call.
+                    Instructions only — this practices for a real phone screen and has no
+                    effect on Mock Interview itself, which always listens via your mic. Enable{" "}
+                    <strong>Phone interview mode</strong> under{" "}
+                    <strong>Settings → Session Focus</strong> (also settable in Session
+                    Design when starting a new session) so Flint labels interviewer vs you
+                    during the real call. Use Live Preview after rehearsal to verify labels
+                    before a real call.
                   </span>
                 </span>
               </label>
@@ -894,6 +906,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           <SuggestedAnswerPanel
             text={turn.suggestedText}
             isStreaming={turn.suggestedStreaming}
+            error={turn.suggestedError}
           />
         )}
 
