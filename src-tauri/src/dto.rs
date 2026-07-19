@@ -439,6 +439,17 @@ pub struct QuestionBankEntryDto {
     pub tags: Vec<String>,
 }
 
+/// One entry in the canonical focus-tag catalog, with a live per-tag count
+/// of how many bank questions currently carry that tag.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FocusTagCatalogEntryDto {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    pub question_count: usize,
+}
+
 /// Session-level interview focus for rehearsal / mock (never applied live).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -449,6 +460,11 @@ pub struct SessionFocusDto {
     pub focus_notes: String,
     pub focus_confirmed_at: Option<i64>,
     pub needs_focus_refresh: bool,
+    /// Confirmed interview round type (e.g. `recruiter_screen`), empty if
+    /// unspecified. `#[serde(default)]` keeps older callers that predate
+    /// this field working without sending it.
+    #[serde(default)]
+    pub round_type: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

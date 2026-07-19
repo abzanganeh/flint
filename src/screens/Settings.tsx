@@ -8,11 +8,11 @@ import {
   getCostStatus,
   getDiarizationStatus,
   getFeatureFlagsSnapshot,
+  getFocusTagCatalog,
   getSessionFocus,
   getSessionSnapshot,
   isFeatureEnabled,
   liftCostSuspension,
-  listQuestionBankTags,
   logout,
   refreshFeatureFlags,
   resetCostTracker,
@@ -23,6 +23,7 @@ import {
   type CostStatusDto,
   type DeleteAccountReport,
   type FeatureFlagsSnapshot,
+  type FocusTagCatalogEntry,
   type SessionFocusDto,
 } from "../commands";
 import { useUiZoom } from "../hooks/useUiZoom";
@@ -448,7 +449,7 @@ function PrivacyTab() {
 
 function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }) {
   const [focus, setFocus] = useState<SessionFocusDto | null>(null);
-  const [tags, setTags] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<FocusTagCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -464,14 +465,14 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
     }
     setLoading(true);
     try {
-      const [f, t, snapshot, diarization] = await Promise.all([
+      const [f, tagCatalog, snapshot, diarization] = await Promise.all([
         getSessionFocus(sessionId),
-        listQuestionBankTags(sessionId),
+        getFocusTagCatalog(sessionId),
         getSessionSnapshot(),
         getDiarizationStatus().catch(() => null),
       ]);
       setFocus(f);
-      setTags(t);
+      setCatalog(tagCatalog);
       setPhoneCallModeState(snapshot.phoneCallMode ?? false);
       setDiarizationModelsReady(diarization?.modelsReady ?? false);
     } catch (e) {
@@ -578,36 +579,36 @@ function SessionFocusTab({ sessionId }: { sessionId: string | null | undefined }
       </label>
       <div className="settings-tab__field">
         <span className="settings-tab__label">Focus tags — click to select</span>
-        {tags.length === 0 ? (
-          <p className="settings-tab__hint" style={{ marginBottom: 0 }}>
-            No tags yet. Confirm digest first or add questions to the bank — tags are inferred
-            automatically (behavioral, technical, motivation, etc.).
-          </p>
-        ) : (
-          <>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-              {tags.map((tag) => {
-                const selected = focus.focusTags.includes(tag);
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    className={`settings-tab__chip${selected ? " settings-tab__chip--active" : ""}`}
-                    aria-pressed={selected}
-                    onClick={() => toggleTag(tag)}
-                  >
-                    {tag}
-                  </button>
-                );
-              })}
-            </div>
-            <p className="settings-tab__chip-meta">
-              {focus.focusTags.length === 0
-                ? "Select at least one tag to filter rehearsal and mock questions."
-                : `${focus.focusTags.length} selected: ${focus.focusTags.join(", ")}`}
-            </p>
-          </>
-        )}
+        <p className="settings-tab__hint" style={{ marginBottom: 0 }}>
+          Tags showing 0 have no matching bank questions yet — you can still select them.
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
+          {catalog.map((tag) => {
+            const selected = focus.focusTags.includes(tag.id);
+            const isEmpty = tag.questionCount === 0;
+            return (
+              <button
+                key={tag.id}
+                type="button"
+                data-testid={`focus-tag-chip-${tag.id}`}
+                className={`settings-tab__chip${selected ? " settings-tab__chip--active" : ""}${
+                  isEmpty ? " settings-tab__chip--empty" : ""
+                }`}
+                aria-pressed={selected}
+                title={tag.description}
+                onClick={() => toggleTag(tag.id)}
+              >
+                {tag.label}
+                <span className="settings-tab__chip-count">{tag.questionCount}</span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="settings-tab__chip-meta">
+          {focus.focusTags.length === 0
+            ? "Select at least one tag to filter rehearsal and mock questions."
+            : `${focus.focusTags.length} selected: ${focus.focusTags.join(", ")}`}
+        </p>
       </div>
       <label className="settings-tab__field">
         <span className="settings-tab__label">Notes</span>

@@ -165,6 +165,56 @@
   opacity: 0.4;
   cursor: not-allowed;
 }
+.question-bank__tag-toggle {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  color: #7c8797;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.question-bank__tag-toggle:hover {
+  color: #a78bfa;
+}
+.question-bank__tag-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 0 4px;
+}
+.question-bank__tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #2d3748;
+  background: transparent;
+  color: #9ca3af;
+  font-size: 11px;
+  cursor: pointer;
+}
+.question-bank__tag-chip:hover {
+  border-color: #52525b;
+}
+.question-bank__tag-chip--active {
+  border-color: #7c3aed;
+  background: #7c3aed33;
+  color: #c4b5fd;
+}
+.question-bank__tag-chip--muted {
+  opacity: 0.55;
+}
+.question-bank__tag-chip-count {
+  font-size: 9px;
+  min-width: 12px;
+  text-align: center;
+  padding: 0 3px;
+  border-radius: 6px;
+  background: #1e2028;
+  color: #71717a;
+}
 
 /* ── PrepChecklist (5.5.4) ─────────────────────────────────────────────── */
 .prep-checklist {
@@ -1154,6 +1204,9 @@
 }
 .settings-tab__field { display: block; margin-bottom: 16px; }
 .settings-tab__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 6px 12px;
   border-radius: 999px;
   border: 1px solid #374151;
@@ -1174,6 +1227,23 @@
 }
 .settings-tab__chip--active:hover {
   border-color: #8b5cf6;
+  color: #ddd6fe;
+}
+.settings-tab__chip--empty {
+  opacity: 0.55;
+  border-style: dashed;
+}
+.settings-tab__chip-count {
+  font-size: 10px;
+  min-width: 14px;
+  text-align: center;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #27272a;
+  color: #71717a;
+}
+.settings-tab__chip--active .settings-tab__chip-count {
+  background: #4c1d95;
   color: #ddd6fe;
 }
 .settings-tab__chip-meta {

@@ -144,6 +144,10 @@ pub struct SessionFocus {
     pub focus_confirmed_at: Option<i64>,
     /// After live session ends, prompt user to refresh focus before rehearsal.
     pub needs_focus_refresh: bool,
+    /// Confirmed interview round type (e.g. `recruiter_screen`), or empty if
+    /// unspecified. Drives supplemental question-bank seeding — see
+    /// `session::round_questions`.
+    pub round_type: String,
 }
 
 /// Lightweight metadata returned alongside the recovery offer so the user
@@ -200,7 +204,7 @@ pub struct DraftSessionMetadata {
 
 /// Schema version stored in `PRAGMA user_version`. Increment when adding
 /// columns or tables; the migration runner applies deltas sequentially.
-const SCHEMA_VERSION: u32 = 17;
+const SCHEMA_VERSION: u32 = 18;
 
 fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
     let current: u32 = conn
@@ -506,6 +510,22 @@ fn run_migrations(conn: &rusqlite::Connection) -> Result<()> {
         )
         .context("schema migration v17")?;
         info!("sqlite schema migrated to version 17");
+    }
+
+    if current < 18 {
+        // Session Focus Robustness slice 3: explicit interview round type,
+        // used to seed round-appropriate supplemental bank questions.
+        // Empty string means unspecified — backward compatible with every
+        // existing row.
+        conn.execute_batch(
+            "
+            ALTER TABLE sessions ADD COLUMN round_type TEXT NOT NULL DEFAULT '';
+
+            PRAGMA user_version = 18;
+            ",
+        )
+        .context("schema migration v18")?;
+        info!("sqlite schema migrated to version 18");
     }
 
     Ok(())
@@ -1537,7 +1557,7 @@ impl SessionPersistence {
         let sid = session_id.to_string();
         conn.query_row(
             "SELECT focus_name, focus_tags_json, recruiter_brief, focus_notes,
-                    focus_confirmed_at, needs_focus_refresh
+                    focus_confirmed_at, needs_focus_refresh, round_type
              FROM sessions WHERE id = ?1",
             rusqlite::params![sid],
             |r| {
@@ -1550,6 +1570,7 @@ impl SessionPersistence {
                     focus_notes: r.get(3)?,
                     focus_confirmed_at: r.get(4)?,
                     needs_focus_refresh: r.get::<_, i64>(5)? != 0,
+                    round_type: r.get(6)?,
                 })
             },
         )
@@ -1563,7 +1584,7 @@ impl SessionPersistence {
         conn.execute(
             "UPDATE sessions SET focus_name = ?1, focus_tags_json = ?2,
              recruiter_brief = ?3, focus_notes = ?4, focus_confirmed_at = ?5,
-             needs_focus_refresh = ?6 WHERE id = ?7",
+             needs_focus_refresh = ?6, round_type = ?7 WHERE id = ?8",
             rusqlite::params![
                 focus.focus_name,
                 tags_json,
@@ -1571,6 +1592,7 @@ impl SessionPersistence {
                 focus.focus_notes,
                 focus.focus_confirmed_at,
                 i64::from(focus.needs_focus_refresh),
+                focus.round_type,
                 sid,
             ],
         )
@@ -3279,6 +3301,54 @@ mod tests {
     }
 
     #[test]
+    fn fresh_db_migrates_to_v18_with_empty_round_type_default() {
+        let db = new_db();
+        let conn = db.db.lock().unwrap();
+        let version: u32 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(SCHEMA_VERSION, 18);
+        drop(conn);
+
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Round", "interview", "swe")
+            .unwrap();
+        let loaded = db.load_session_focus(sid).unwrap();
+        assert_eq!(loaded.round_type, "");
+    }
+
+    #[test]
+    fn old_v17_db_upgrades_to_v18_with_round_type_column_present() {
+        // Build a genuine pre-v18 (v17-shaped) database on disk: migrate a
+        // fresh file all the way forward, then strip exactly what v18 added
+        // (the `round_type` column) and roll `user_version` back to 17 —
+        // reproducing what a real user's v17 database looks like.
+        use std::path::PathBuf;
+        let dir = std::env::temp_dir();
+        let db_path: PathBuf = dir.join(format!("flint_v17_upgrade_{}.sqlite", Uuid::new_v4()));
+        let path_str = db_path.to_str().unwrap().to_string();
+        {
+            let seed = SessionPersistence::new(&path_str).expect("seed db must migrate");
+            drop(seed);
+            let raw = rusqlite::Connection::open(&path_str).unwrap();
+            raw.execute_batch(
+                "ALTER TABLE sessions DROP COLUMN round_type; PRAGMA user_version = 17;",
+            )
+            .expect("roll schema back to v17 shape");
+        }
+
+        let db = SessionPersistence::new(&path_str).expect("v17 DB must upgrade to v18");
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Legacy", "interview", "swe")
+            .unwrap();
+        let loaded = db.load_session_focus(sid).unwrap();
+        assert_eq!(loaded.round_type, "");
+        drop(db);
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
     fn integrity_check_passes_on_fresh_db() {
         let db = new_db();
         let conn = db.db.lock().unwrap();
@@ -3638,6 +3708,7 @@ mod tests {
             focus_notes: "Emphasise IAM".into(),
             focus_confirmed_at: Some(1_700_000_000),
             needs_focus_refresh: false,
+            round_type: "hiring_manager".into(),
         };
         db.save_session_focus(sid, &focus).unwrap();
         let loaded = db.load_session_focus(sid).unwrap();
@@ -3645,6 +3716,7 @@ mod tests {
         assert_eq!(loaded.focus_tags, focus.focus_tags);
         assert_eq!(loaded.recruiter_brief, "Competency round");
         assert!(!loaded.needs_focus_refresh);
+        assert_eq!(loaded.round_type, "hiring_manager");
     }
 
     #[test]

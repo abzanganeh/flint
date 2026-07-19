@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  getFocusTagCatalog,
   getSessionFocus,
-  listQuestionBankTags,
   saveSessionFocus,
+  type FocusTagCatalogEntry,
   type SessionFocusDto,
 } from "../commands";
 
@@ -23,7 +24,7 @@ const emptyFocus = (): SessionFocusDto => ({
 
 export default function SessionFocusGate({ sessionId, onComplete }: Props) {
   const [focus, setFocus] = useState<SessionFocusDto>(emptyFocus);
-  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<FocusTagCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -32,12 +33,12 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const [focusData, tags] = await Promise.all([
+      const [focusData, tagCatalog] = await Promise.all([
         getSessionFocus(sessionId),
-        listQuestionBankTags(sessionId),
+        getFocusTagCatalog(sessionId),
       ]);
       setFocus(focusData);
-      setAvailableTags(tags);
+      setCatalog(tagCatalog);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -150,35 +151,53 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
         <span style={{ display: "block", fontSize: 12, color: "#64748b", marginBottom: 8 }}>
           Focus tags — select all that apply
         </span>
-        {availableTags.length === 0 ? (
-          <p style={{ color: "#64748b", fontSize: 13 }}>
-            No tags inferred yet. Confirm digest first or add questions to the bank.
-          </p>
-        ) : (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {availableTags.map((tag) => {
-              const selected = focus.focusTags.includes(tag);
-              return (
-                <button
-                  key={tag}
-                  type="button"
-                  onClick={() => toggleTag(tag)}
+        <p style={{ color: "#64748b", fontSize: 12, marginBottom: 8, marginTop: 0 }}>
+          Tags showing 0 have no matching bank questions yet — you can still select them.
+        </p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {catalog.map((tag) => {
+            const selected = focus.focusTags.includes(tag.id);
+            const isEmpty = tag.questionCount === 0;
+            return (
+              <button
+                key={tag.id}
+                type="button"
+                data-testid={`focus-tag-chip-${tag.id}`}
+                title={tag.description}
+                onClick={() => toggleTag(tag.id)}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "6px 12px",
+                  borderRadius: 999,
+                  border: selected ? "1px solid #7c3aed" : "1px solid #374151",
+                  background: selected ? "#7c3aed33" : "transparent",
+                  color: selected ? "#c4b5fd" : isEmpty ? "#52525b" : "#94a3b8",
+                  fontSize: 12,
+                  cursor: "pointer",
+                  opacity: isEmpty ? 0.55 : 1,
+                }}
+              >
+                {tag.label}
+                <span
+                  data-testid={`focus-tag-count-${tag.id}`}
                   style={{
-                    padding: "6px 12px",
-                    borderRadius: 999,
-                    border: selected ? "1px solid #7c3aed" : "1px solid #374151",
-                    background: selected ? "#7c3aed33" : "transparent",
-                    color: selected ? "#c4b5fd" : "#94a3b8",
-                    fontSize: 12,
-                    cursor: "pointer",
+                    fontSize: 10,
+                    minWidth: 14,
+                    textAlign: "center",
+                    padding: "0 4px",
+                    borderRadius: 8,
+                    background: isEmpty ? "#27272a" : "#1e2028",
+                    color: isEmpty ? "#71717a" : "#a78bfa",
                   }}
                 >
-                  {tag}
-                </button>
-              );
-            })}
-          </div>
-        )}
+                  {tag.questionCount}
+                </span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <label style={{ display: "block", marginBottom: 24 }}>

@@ -2380,6 +2380,7 @@ fn session_focus_to_dto(
         focus_notes: focus.focus_notes,
         focus_confirmed_at: focus.focus_confirmed_at,
         needs_focus_refresh: focus.needs_focus_refresh,
+        round_type: focus.round_type,
     }
 }
 
@@ -2414,6 +2415,11 @@ pub async fn save_session_focus(
                 .unwrap_or_else(|| chrono::Utc::now().timestamp()),
         )
     };
+    let previous_round_type = state
+        .persistence
+        .load_session_focus(sid)
+        .map(|f| f.round_type)
+        .unwrap_or_default();
     let rust_focus = crate::session::persistence::SessionFocus {
         focus_name: focus.focus_name,
         focus_tags: focus.focus_tags,
@@ -2421,11 +2427,58 @@ pub async fn save_session_focus(
         focus_notes: focus.focus_notes,
         focus_confirmed_at: confirmed_at,
         needs_focus_refresh: false,
+        round_type: focus.round_type,
     };
+    if !rust_focus.round_type.is_empty() && rust_focus.round_type != previous_round_type {
+        merge_supplemental_round_questions(&state.persistence, sid, &rust_focus.round_type)
+            .map_err(|e| e.to_string())?;
+    }
     state
         .persistence
         .save_session_focus(sid, &rust_focus)
         .map_err(|e| e.to_string())
+}
+
+/// Merge round-appropriate supplemental questions into the session's bank —
+/// additive union only, never overwrites or removes existing JD-derived
+/// entries. Dedup uses the same normalized key as preferred-answer lookup so
+/// a supplemental question never duplicates one that already exists with
+/// different casing/whitespace.
+fn merge_supplemental_round_questions(
+    persistence: &SessionPersistence,
+    session_id: Uuid,
+    round_type: &str,
+) -> anyhow::Result<()> {
+    use crate::session::question_attempts::normalize_question_key;
+
+    let supplemental = crate::session::round_questions::supplemental_questions_for_round(round_type);
+    if supplemental.is_empty() {
+        return Ok(());
+    }
+
+    let mut entries = persistence.load_question_bank_entries(session_id)?;
+    let mut seen_keys: std::collections::HashSet<String> = entries
+        .iter()
+        .map(|e| normalize_question_key(&e.question))
+        .collect();
+
+    for candidate in supplemental {
+        let key = normalize_question_key(&candidate.question);
+        if seen_keys.insert(key) {
+            entries.push(candidate);
+        }
+    }
+
+    persistence.store_question_bank_entries(session_id, &entries)?;
+    Ok(())
+}
+
+/// Heuristic interview-round inference from a pasted recruiter brief — a
+/// suggestion the frontend can pre-select, never authoritative on its own.
+#[tauri::command]
+pub async fn infer_round_type_from_brief(recruiter_brief: String) -> Result<Option<String>, String> {
+    Ok(crate::session::round_questions::infer_round_type(&recruiter_brief)
+        .map(|s| s.to_string()))
 }
 
 /// Toggle phone-call mode for the active session.
@@ -2452,6 +2505,60 @@ pub async fn list_question_bank_tags(
         .map_err(|e| e.to_string())
 }
 
+/// Map bank entries to the canonical 8-tag catalog with live counts.
+fn build_focus_tag_catalog(
+    entries: &[crate::session::question_bank::BankQuestionEntry],
+) -> Vec<crate::dto::FocusTagCatalogEntryDto> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for entry in entries {
+        for tag in &entry.tags {
+            *counts.entry(tag.as_str()).or_insert(0) += 1;
+        }
+    }
+    crate::session::focus_tags::FOCUS_TAG_TAXONOMY
+        .iter()
+        .map(|def| crate::dto::FocusTagCatalogEntryDto {
+            id: def.id.to_string(),
+            label: def.label.to_string(),
+            description: def.description.to_string(),
+            question_count: counts.get(def.id).copied().unwrap_or(0),
+        })
+        .collect()
+}
+
+/// The canonical focus-tag catalog for a session, always all 8 taxonomy
+/// entries with a live per-tag question count (0 when nothing matches yet).
+#[tauri::command]
+pub async fn get_focus_tag_catalog(
+    state: State<'_, AppState>,
+    session_id: String,
+) -> Result<Vec<crate::dto::FocusTagCatalogEntryDto>, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+    let entries = state
+        .persistence
+        .load_question_bank_entries(sid)
+        .map_err(|e| e.to_string())?;
+    Ok(build_focus_tag_catalog(&entries))
+}
+
+/// Reject any tag id not present in `FOCUS_TAG_TAXONOMY`, with a message
+/// listing the valid ids so the caller can fix a typo immediately.
+fn validate_focus_tag_ids(tags: &[String]) -> Result<(), String> {
+    for tag in tags {
+        if !crate::session::focus_tags::is_valid_tag_id(tag) {
+            let valid: Vec<&str> = crate::session::focus_tags::FOCUS_TAG_TAXONOMY
+                .iter()
+                .map(|def| def.id)
+                .collect();
+            return Err(format!(
+                "Unknown focus tag \"{tag}\". Valid tags: {}",
+                valid.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Return the question bank for a session.
 ///
 /// Returns digest `likely_questions` merged with any user-added questions,
@@ -2465,7 +2572,6 @@ pub async fn get_question_bank(
 ) -> Result<Vec<crate::dto::QuestionBankEntryDto>, String> {
     use crate::session::question_attempts::normalize_question_key;
     use crate::session::question_bank::filter_by_focus_tags;
-    use std::collections::HashMap;
 
     let sid = validate_session_id(&state, &session_id).await?;
     let shuffle = shuffle.unwrap_or(false);
@@ -2541,15 +2647,9 @@ pub async fn get_question_bank(
     let (mut pending, completed): (Vec<_>, Vec<_>) =
         entries.into_iter().partition(|e| !e.satisfied);
 
-    if shuffle && pending.len() > 1 {
-        let mut order: Vec<String> = pending.iter().map(|e| e.question.clone()).collect();
-        crate::session::shuffle::shuffle_strings(
-            &mut order,
-            crate::session::shuffle::session_shuffle_seed(sid),
-        );
-        let rank: HashMap<String, usize> =
-            order.into_iter().enumerate().map(|(i, q)| (q, i)).collect();
-        pending.sort_by_key(|e| rank.get(&e.question).copied().unwrap_or(0));
+    if shuffle {
+        let seed = crate::session::shuffle::session_shuffle_seed(sid);
+        pending.sort_by_key(|e| crate::session::shuffle::stable_shuffle_key(&e.question, seed));
     }
 
     pending.extend(completed);
@@ -2656,16 +2756,45 @@ pub async fn save_preferred_answer(
 }
 
 /// Add a question to the session question bank (dedup by lowercase trim).
+///
+/// `tags`: `None` keeps today's behavior — heuristic-infer tags for new
+/// entries. `Some(tags)` lets the caller assign tags explicitly, overriding
+/// the heuristic; each tag id is validated against `FOCUS_TAG_TAXONOMY` and
+/// the whole call is rejected if any id is unknown.
 #[tauri::command]
 pub async fn add_to_question_bank(
     state: State<'_, AppState>,
     session_id: String,
     question: String,
+    tags: Option<Vec<String>>,
 ) -> Result<Vec<String>, String> {
+    use crate::session::question_bank::{bank_questions, BankQuestionEntry};
+
     let sid = validate_session_id(&state, &session_id).await?;
     let trimmed = question.trim().to_string();
     if trimmed.is_empty() {
         return Err("Question must not be empty.".to_string());
+    }
+
+    if let Some(tags) = &tags {
+        validate_focus_tag_ids(tags)?;
+    }
+
+    let lower = trimmed.to_lowercase();
+
+    if let Some(tags) = tags {
+        let mut entries = state
+            .persistence
+            .load_question_bank_entries(sid)
+            .map_err(|e| e.to_string())?;
+        if !entries.iter().any(|e| e.question.to_lowercase() == lower) {
+            entries.push(BankQuestionEntry::new(trimmed, tags));
+            state
+                .persistence
+                .store_question_bank_entries(sid, &entries)
+                .map_err(|e| e.to_string())?;
+        }
+        return Ok(bank_questions(&entries));
     }
 
     let mut bank = state
@@ -2673,7 +2802,6 @@ pub async fn add_to_question_bank(
         .load_question_bank(sid)
         .map_err(|e| e.to_string())?;
 
-    let lower = trimmed.to_lowercase();
     if !bank.iter().any(|q| q.to_lowercase() == lower) {
         bank.push(trimmed);
         state
@@ -6372,6 +6500,143 @@ pub struct MockTurnDto {
     pub coach_json: String,
     pub suggested: String,
     pub score: u8,
+}
+
+#[cfg(test)]
+mod focus_tag_catalog_tests {
+    use super::{build_focus_tag_catalog, validate_focus_tag_ids};
+    use crate::session::question_bank::BankQuestionEntry;
+
+    #[test]
+    fn catalog_always_has_eight_entries_even_with_empty_bank() {
+        let catalog = build_focus_tag_catalog(&[]);
+        assert_eq!(catalog.len(), 8);
+        assert!(catalog.iter().all(|e| e.question_count == 0));
+    }
+
+    #[test]
+    fn catalog_counts_match_bank_tags() {
+        let entries = vec![
+            BankQuestionEntry::new("Q1", vec!["motivation".into()]),
+            BankQuestionEntry::new("Q2", vec!["motivation".into(), "logistics".into()]),
+            BankQuestionEntry::new("Q3", vec!["technical".into()]),
+        ];
+        let catalog = build_focus_tag_catalog(&entries);
+        assert_eq!(catalog.len(), 8);
+
+        let count_for = |id: &str| catalog.iter().find(|e| e.id == id).unwrap().question_count;
+        assert_eq!(count_for("motivation"), 2);
+        assert_eq!(count_for("logistics"), 1);
+        assert_eq!(count_for("technical"), 1);
+        assert_eq!(count_for("culture"), 0);
+        assert_eq!(count_for("general"), 0);
+    }
+
+    #[test]
+    fn validate_accepts_known_tag_ids() {
+        assert!(validate_focus_tag_ids(&["motivation".to_string(), "general".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_unknown_tag_id_with_clear_message() {
+        let err = validate_focus_tag_ids(&["motivaton".to_string()])
+            .expect_err("typo'd tag id must be rejected");
+        assert!(err.contains("motivaton"));
+        assert!(err.contains("motivation"));
+    }
+
+    #[test]
+    fn validate_rejects_whole_call_if_any_id_invalid() {
+        let err = validate_focus_tag_ids(&["general".to_string(), "bogus".to_string()])
+            .expect_err("one invalid id among valid ones must still fail");
+        assert!(err.contains("bogus"));
+    }
+}
+
+#[cfg(test)]
+mod round_type_merge_tests {
+    use super::merge_supplemental_round_questions;
+    use crate::session::persistence::SessionPersistence;
+    use crate::session::question_bank::BankQuestionEntry;
+    use uuid::Uuid;
+
+    fn new_db() -> SessionPersistence {
+        SessionPersistence::new(":memory:").expect("open :memory: db")
+    }
+
+    #[test]
+    fn merge_is_additive_and_never_removes_existing_entries() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Merge", "interview", "swe")
+            .unwrap();
+        db.store_question_bank_entries(
+            sid,
+            &[BankQuestionEntry::new(
+                "Describe a distributed systems outage you debugged.",
+                vec!["technical".into()],
+            )],
+        )
+        .unwrap();
+
+        merge_supplemental_round_questions(&db, sid, "recruiter_screen").unwrap();
+
+        let entries = db.load_question_bank_entries(sid).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.question == "Describe a distributed systems outage you debugged."));
+        assert_eq!(entries.len(), 1 + 6);
+    }
+
+    #[test]
+    fn merge_dedups_across_case_and_whitespace() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Dedup", "interview", "swe")
+            .unwrap();
+        // Differs from the recruiter_screen supplemental question only by
+        // trailing whitespace and case — must be treated as a duplicate.
+        db.store_question_bank_entries(
+            sid,
+            &[BankQuestionEntry::new(
+                "  TELL ME ABOUT YOURSELF AND YOUR BACKGROUND. ",
+                vec!["general".into()],
+            )],
+        )
+        .unwrap();
+
+        merge_supplemental_round_questions(&db, sid, "recruiter_screen").unwrap();
+
+        let entries = db.load_question_bank_entries(sid).unwrap();
+        let self_intro_count = entries
+            .iter()
+            .filter(|e| e.question.to_lowercase().trim() == "tell me about yourself and your background.")
+            .count();
+        assert_eq!(
+            self_intro_count, 1,
+            "must not duplicate an existing question that differs only by case/whitespace"
+        );
+        // The other 5 recruiter_screen questions are still genuinely new.
+        assert_eq!(entries.len(), 1 + 5);
+    }
+
+    #[test]
+    fn merge_with_unknown_round_type_is_a_no_op() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "NoOp", "interview", "swe")
+            .unwrap();
+        db.store_question_bank_entries(
+            sid,
+            &[BankQuestionEntry::new("Existing question.", vec![])],
+        )
+        .unwrap();
+
+        merge_supplemental_round_questions(&db, sid, "technical").unwrap();
+
+        let entries = db.load_question_bank_entries(sid).unwrap();
+        assert_eq!(entries.len(), 1);
+    }
 }
 
 #[cfg(test)]

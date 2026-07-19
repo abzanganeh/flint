@@ -795,6 +795,17 @@ export const saveSessionFocus = (
 export const listQuestionBankTags = (sessionId: string): Promise<string[]> =>
   invoke<string[]>("list_question_bank_tags", { sessionId });
 
+export interface FocusTagCatalogEntry {
+  id: string;
+  label: string;
+  description: string;
+  questionCount: number;
+}
+
+/** Canonical 8-tag catalog with live per-tag question counts (0 included). */
+export const getFocusTagCatalog = (sessionId: string): Promise<FocusTagCatalogEntry[]> =>
+  invoke<FocusTagCatalogEntry[]>("get_focus_tag_catalog", { sessionId });
+
 export const setPhoneCallMode = (enabled: boolean): Promise<void> =>
   invoke<void>("set_phone_call_mode", { enabled });
 
@@ -822,8 +833,11 @@ export const getQuestionBank = (
     filterByFocus,
   });
 
-export const addToQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
-  invoke<string[]>("add_to_question_bank", { sessionId, question });
+export const addToQuestionBank = (
+  sessionId: string,
+  question: string,
+  tags?: string[],
+): Promise<string[]> => invoke<string[]>("add_to_question_bank", { sessionId, question, tags });
 
 export const removeFromQuestionBank = (sessionId: string, question: string): Promise<string[]> =>
   invoke<string[]>("remove_from_question_bank", { sessionId, question });
