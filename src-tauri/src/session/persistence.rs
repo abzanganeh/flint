@@ -3394,10 +3394,7 @@ mod tests {
         let sid = Uuid::new_v4();
         db.create_session_row(sid, "Legacy", "interview", "swe")
             .unwrap();
-        assert!(db
-            .get_recording_consent_accepted_at(sid)
-            .unwrap()
-            .is_none());
+        assert!(db.get_recording_consent_accepted_at(sid).unwrap().is_none());
         drop(db);
         let _ = std::fs::remove_file(&db_path);
     }
