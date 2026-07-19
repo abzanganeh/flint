@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn stable_shuffle_key_is_unaffected_by_other_items() {
         let seed = 42u64;
-        let questions = vec!["a", "b", "c", "d", "e"];
+        let questions = ["a", "b", "c", "d", "e"];
         let keys_before: Vec<u64> = questions
             .iter()
             .map(|q| stable_shuffle_key(q, seed))
