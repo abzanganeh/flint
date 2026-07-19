@@ -15,7 +15,7 @@ export type HealthCheckName =
   | "system_audio_loopback"
   | "rnnoise_preprocessing"
   | "whisper_model"
-  | "stealth_api"
+  | "private_mode_api"
   | "primary_llm"
   | "ollama_availability"
   | "os_keychain"

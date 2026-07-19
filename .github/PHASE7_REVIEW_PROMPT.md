@@ -161,7 +161,7 @@ Confirm:
 - [ ] `tracing_subscriber` initialised in `lib.rs::run()` with `FLINT_LOG` override.
 - [ ] Provider keys: `save_provider_key`, `is_provider_key_present`, `clear_provider_key` with `KNOWN_API_PROVIDERS` allowlist.
 - [ ] Digest prompt uses `[data]` block for `{pasted_context}`, not system role injection.
-- [ ] Stealth window flags in `tauri.conf.json`; X11 fails health check / stealth self-test.
+- [ ] Private Mode window flags in `tauri.conf.json`; X11 fails health check / private mode self-test.
 
 ### Step 3 — Architecture rule compliance (spot-check)
 
@@ -173,7 +173,7 @@ Confirm:
 
 ### Step 4 — Phase 7 Review Gate (ROADMAP)
 
-Update ROADMAP checkboxes ONLY for items you verified with evidence (command output, test name, or file:line). Do not check items you did not run (e.g. OBS stealth on device, clean VM installers).
+Update ROADMAP checkboxes ONLY for items you verified with evidence (command output, test name, or file:line). Do not check items you did not run (e.g. OBS private mode on device, clean VM installers).
 
 | Gate | How to verify | If unverifiable in this environment |
 |------|---------------|-------------------------------------|
@@ -183,7 +183,7 @@ Update ROADMAP checkboxes ONLY for items you verified with evidence (command out
 | Zero audio on disk | Code audit + optional `strace` during live session | Code audit alone is sufficient for this review |
 | GDPR deletion E2E | `cargo test --test gdpr` | — |
 | Crash recovery E2E | `cargo test --test crash_recovery` | — |
-| Installers / stealth capture | **Manual** — note as open, do not block on 7.1–7.7 | — |
+| Installers / private mode capture | **Manual** — note as open, do not block on 7.1–7.7 | — |
 
 Items marked `Manual` do not count as open BLOCKER/HIGH findings. Surface them in the handoff note instead.
 

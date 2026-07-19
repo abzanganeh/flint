@@ -8,7 +8,7 @@ interface PanicRestoreShellProps {
 }
 
 /**
- * When panic hide is active, hides all stealth chrome and shows only a small
+ * When panic hide is active, hides all private-mode chrome and shows only a small
  * restore control. OverlayLayout alone is insufficient — rehearsal/live also
  * render question inputs, sidebars, and footers outside the panel stack.
  */

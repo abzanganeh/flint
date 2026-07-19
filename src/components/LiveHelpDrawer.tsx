@@ -25,7 +25,7 @@ const SECTIONS = [
     body: "Click Swap on any transcript line to relabel Interviewer vs You. User relabels always win over the classifier.",
   },
   {
-    title: "Stealth hotkeys",
+    title: "Private mode hotkeys",
     body: "Ctrl+Alt+Space — answer now. Hold 2s — longer answer. Double-tap — cancel generation. Ctrl+Alt+Shift+Space — panic hide overlay.",
   },
 ] as const;

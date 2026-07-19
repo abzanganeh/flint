@@ -7,7 +7,7 @@ Visual orchestrator, mermaid/shiki rendering, four-panel overlay).
 
 ## Prerequisites
 
-- `npm run tauri dev` on Linux Wayland (X11 fails the stealth gate before
+- `npm run tauri dev` on Linux Wayland (X11 fails the private mode gate before
   LIVE is reachable).
 - A session past Digest Review with a job description that mentions
   system design or architecture (needed for the Visual classifier to

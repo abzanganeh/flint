@@ -74,7 +74,7 @@ const LiveOverlay = ({ sessionId, onEnded, onReturnToSetup }: LiveOverlayProps) 
     const timeoutId = window.setTimeout(() => {
       if (!active) return;
       setError(
-        "Live session is taking too long to start. Check audio/stealth health, then go back to setup.",
+        "Live session is taking too long to start. Check audio/private-mode health, then go back to setup.",
       );
       setStarting(false);
     }, START_TIMEOUT_MS);

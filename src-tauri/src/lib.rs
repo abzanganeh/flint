@@ -26,8 +26,8 @@ pub mod rag;
 pub mod research;
 pub mod session;
 pub mod smart_resume;
+mod private_mode;
 mod state;
-mod stealth;
 mod supabase;
 pub mod transcription;
 
@@ -120,9 +120,9 @@ pub fn run() {
 
             // Show a visible, centred window immediately — do not block on embedder init.
             #[cfg(debug_assertions)]
-            stealth::configure_dev_window(app.handle());
+            private_mode::configure_dev_window(app.handle());
             #[cfg(not(debug_assertions))]
-            stealth::place_on_non_primary_monitor(app.handle());
+            private_mode::place_on_non_primary_monitor(app.handle());
             deep_link::present_main_window(app.handle());
 
             health::hardware::assess_hardware();
@@ -178,7 +178,7 @@ pub fn run() {
             });
 
             hotkeys::register_hotkeys(app.handle());
-            stealth::apply_capture_exclusion(app.handle());
+            private_mode::apply_capture_exclusion(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

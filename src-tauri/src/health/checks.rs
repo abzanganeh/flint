@@ -28,7 +28,7 @@ pub enum HealthCheck {
     #[serde(rename = "rnnoise_preprocessing")]
     RNNoisePreprocessing,
     WhisperModel,
-    StealthApi,
+    PrivateModeApi,
     PrimaryLlm,
     OllamaAvailability,
     OsKeychain,
@@ -70,7 +70,7 @@ pub async fn run_health_check(
         check_system_audio_loopback(),
         check_rnnoise_preprocessing(),
         check_whisper_model(profile.recommended_whisper_model),
-        check_stealth_api(),
+        check_private_mode_api(),
         check_primary_llm(),
         check_ollama_availability().await,
         check_os_keychain(),
@@ -167,7 +167,7 @@ fn check_system_audio_loopback_linux() -> HealthCheckResult {
     if is_x11_session() {
         return warn(
             HealthCheck::SystemAudioLoopback,
-            "System audio loopback may work, but stealth mode requires Wayland.",
+            "System audio loopback may work, but private mode requires Wayland.",
             "PipeWire is required. Flint captures system audio from your default sink's .monitor source — do NOT run `pactl load-module module-loopback` (that routes your mic to your speakers).",
         );
     }
@@ -256,25 +256,25 @@ fn whisper_search_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-fn check_stealth_api() -> HealthCheckResult {
+fn check_private_mode_api() -> HealthCheckResult {
     #[cfg(target_os = "linux")]
     {
         if is_x11_session() {
             return fail(
-                HealthCheck::StealthApi,
-                "Stealth mode requires Wayland. X11 is not supported.",
+                HealthCheck::PrivateModeApi,
+                "Private mode requires Wayland. X11 is not supported.",
                 "Log out and start a Wayland session (e.g. Ubuntu on Wayland), then re-run the health check.",
             );
         }
         if is_wayland_session() {
             return pass(
-                HealthCheck::StealthApi,
+                HealthCheck::PrivateModeApi,
                 "Wayland session detected — compositor capture exclusion is supported.",
             );
         }
         warn(
-            HealthCheck::StealthApi,
-            "Could not confirm a Wayland session for stealth mode.",
+            HealthCheck::PrivateModeApi,
+            "Could not confirm a Wayland session for private mode.",
             "Use a Wayland desktop session. X11 cannot hide the overlay from screen capture.",
         )
     }
@@ -282,7 +282,7 @@ fn check_stealth_api() -> HealthCheckResult {
     #[cfg(target_os = "windows")]
     {
         return pass(
-            HealthCheck::StealthApi,
+            HealthCheck::PrivateModeApi,
             "Windows display affinity API is available for capture exclusion.",
         );
     }
@@ -290,7 +290,7 @@ fn check_stealth_api() -> HealthCheckResult {
     #[cfg(target_os = "macos")]
     {
         return pass(
-            HealthCheck::StealthApi,
+            HealthCheck::PrivateModeApi,
             "macOS window sharing exclusion (NSWindow.sharingType = .none) is available.",
         );
     }
@@ -298,9 +298,9 @@ fn check_stealth_api() -> HealthCheckResult {
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
         warn(
-            HealthCheck::StealthApi,
-            "Stealth capture exclusion could not be verified on this platform.",
-            "Confirm overlay stealth support before starting a live session.",
+            HealthCheck::PrivateModeApi,
+            "Private mode capture exclusion could not be verified on this platform.",
+            "Confirm overlay private mode support before starting a live session.",
         )
     }
 }
@@ -757,9 +757,9 @@ pub fn check_system_audio_isolation() -> HealthCheckResult {
     }
 }
 
-/// Stealth gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
-pub fn run_stealth_self_test() -> Result<(), String> {
-    let result = check_stealth_api();
+/// Private mode gate before `READY → LIVE`. Hard-fails on X11 (§flint-security).
+pub fn run_private_mode_self_test() -> Result<(), String> {
+    let result = check_private_mode_api();
     match result.status {
         CheckStatus::Pass | CheckStatus::Warn => Ok(()),
         CheckStatus::Fail => Err(result.message),

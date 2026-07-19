@@ -3174,7 +3174,7 @@ pub async fn start_session(
     let plan = open_session_plan(state.inner()).await;
     crate::billing::validate_live_session_billing(plan)?;
 
-    checks::run_stealth_self_test()?;
+    checks::run_private_mode_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
 
@@ -3444,7 +3444,7 @@ pub async fn start_live_preview(
     let plan = open_session_plan(state.inner()).await;
     crate::billing::validate_live_session_billing(plan)?;
 
-    checks::run_stealth_self_test()?;
+    checks::run_private_mode_self_test()?;
 
     let is_phone_call_mode = *state.phone_call_mode.lock().await;
     if !is_phone_call_mode {

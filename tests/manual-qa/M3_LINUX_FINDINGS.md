@@ -34,7 +34,7 @@ Hotkeys: **Ctrl+Alt+Space** (tap / hold / double), **Ctrl+Alt+Shift+Space** (pan
 | 5 | OBS capture | Partial | Full monitor capture includes Flint (Wayland limitation) |
 | 6a | 1920×1080 | Pass | |
 | 6b | 4K | Partial | Readable but small at 3840×2160 |
-| 7 | Stealth 3 tools | Partial | Screenshot tools capture Flint on Wayland |
+| 7 | Private Mode 3 tools | Partial | Screenshot tools capture Flint on Wayland |
 
 **Wayland constraint:** Global hotkeys only work when Flint is focused unless portal/CLI integration is added.
 
@@ -133,7 +133,7 @@ Verified in SQLite (Linux):
 | Wayland global hotkeys unfocused | P2 | Needs xdg-desktop-portal or similar |
 | Overlay text size at 4K | P2 | Per-panel height + font scaling |
 | Answer Now badge not clickable | P3 | Badge-only in current UX |
-| OBS / stealth on Wayland | Accepted | Document in health check |
+| OBS / private mode on Wayland | Accepted | Document in health check |
 | Duplicate mock_turn rows (historical) | Fixed | Old sessions may still have bad rows |
 
 ## SQLite / Paths (Linux)

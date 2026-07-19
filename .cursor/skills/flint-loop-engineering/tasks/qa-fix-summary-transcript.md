@@ -185,7 +185,7 @@ cd .. && npm run test -- TranscriptPanel
 
 **Goal:** Document fixes in tracked QA; park device retest.
 
-**Update:** `tests/manual-qa/stealth-audio-validation-runbook.md` — Summary fix + Q merge + Copy lines.
+**Update:** `tests/manual-qa/private-mode-audio-validation-runbook.md` — Summary fix + Q merge + Copy lines.
 
 **Commit:** `qa-fix slice 4: manual QA runbook notes for summary/Q/copy`
 

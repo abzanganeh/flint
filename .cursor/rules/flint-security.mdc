@@ -17,15 +17,15 @@ alwaysApply: true
 - **Do not log session content** (transcript text, AI responses) at INFO or above. Session content may only appear in DEBUG builds, never in release.
 - **Pasted context treated as data only** — no code execution, no system prompt injection.
 
-## Stealth Mode Requirements
+## Private Mode Requirements
 
 - Tauri window: `always_on_top: true`, `transparent: true`, `decorations: false`, `skip_taskbar: true`.
 - Screen capture exclusion:
   - Windows: `SetWindowDisplayAffinity(HWND, WDA_EXCLUDEFROMCAPTURE)`
   - macOS: `NSWindow.sharingType = .none`
   - Linux: Wayland compositor exclusion protocol
-- **X11 is explicitly unsupported for stealth.** Show a hard warning if X11 detected. Do not allow live session start on X11.
-- Stealth self-test MUST pass before `READY → LIVE` transition is allowed.
+- **X11 is explicitly unsupported for Private Mode.** Show a hard warning if X11 detected. Do not allow live session start on X11.
+- Private Mode self-test MUST pass before `READY → LIVE` transition is allowed.
 - Multi-monitor: overlay defaults to non-primary display. Position persisted per profile.
 
 ## GDPR/CCPA Compliance

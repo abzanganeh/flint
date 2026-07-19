@@ -1,4 +1,4 @@
-# Stealth & audio hardware validation (manual gate)
+# Private Mode & audio hardware validation (manual gate)
 
 These checks require real hardware and OS-specific audio/screen-capture stacks.
 They cannot be fully automated in CI. Do **not** mark ROADMAP items 22/24 closed
@@ -33,8 +33,8 @@ Documented in `tests/manual-qa/M3_LINUX_FINDINGS.md`:
 | Item | Status | Notes |
 | --- | --- | --- |
 | Wayland global hotkeys without focus | **Open P2** | `tauri-plugin-global-shortcut` only fires when Flint is focused on Wayland; xdg-desktop-portal integration is future work — **do not fabricate a fix** |
-| OBS / stealth on Wayland | **Accepted** | Full-monitor screencast may include Flint; content protection is best-effort |
-| macOS stealth | Requires capture exclusion APIs | Verified via HealthCheck + `run_stealth_self_test` at live start |
+| OBS / private mode on Wayland | **Accepted** | Full-monitor screencast may include Flint; content protection is best-effort |
+| macOS private mode | Requires capture exclusion APIs | Verified via HealthCheck + `run_private_mode_self_test` at live start |
 
 ---
 
@@ -44,11 +44,11 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 
 ### Linux (Wayland)
 
-**Prerequisites:** PipeWire, Wayland session (X11 fails stealth gate), screencast permission.
+**Prerequisites:** PipeWire, Wayland session (X11 fails private mode gate), screencast permission.
 
 | # | Scenario | Pass criteria | Result |
 | --- | --- | --- | --- |
-| L1 | HealthCheck | `stealth_api`, `system_audio_loopback`, `microphone_access`, `global_hotkey`, `system_audio_isolation` all pass/warn acceptably | ☑ 2026-07-10 — all Pass except `microphone_access` Warn (expected stub; never probes mic) |
+| L1 | HealthCheck | `private_mode_api`, `system_audio_loopback`, `microphone_access`, `global_hotkey`, `system_audio_isolation` all pass/warn acceptably | ☑ 2026-07-10 — all Pass except `microphone_access` Warn (expected stub; never probes mic) |
 | L2 | System audio loopback | Play YouTube/browser audio — must appear on **System** channel only (not Mic). Zoom/Meet also valid (see `m13-live-pipeline-checklist.md` §A). **Do not mark PASS without device evidence.** | ☑ **PASS with headphones** (2026-07-10) — interviewer audio on INTERVIEWER only. **FAIL without headphones** — same utterance on YOU + INTERVIEWER (speaker→mic acoustic bleed; not pulse-first device collision). Checklist: [`L2-loopback-retest-checklist.md`](./L2-loopback-retest-checklist.md). Follow-ups (not L2): auto question detect **intermittent** (sometimes fires, sometimes needs UI **Q**); ~2s lag; open-speaker echo garbled YOU lines |
 | L3 | Hotkeys **with focus** | Ctrl+Alt+Space re-ask and Ctrl+Alt+Shift+Space panic hide work while Flint/overlay focused; Linux fallbacks (Ctrl+Shift+Space, F8 dev) documented in slice 3 | ☑ **PASS** (2026-07-10, Rehearsal, focused) — Ctrl+Alt+Space trigger OK; Ctrl+Alt+Shift+Space panic hide OK. Fallbacks Ctrl+Shift+Space / F8 = same trigger as primary (no separate UI); if primary already works, pressing them looks like “nothing new.” **Nit:** panic hide leaves shell chrome visible (FLINT / New session / Past sessions / Settings / window − □ ×) — overlay panels hide, title bar does not |
 | L4 | Hotkeys **without focus** | Record pass/fail — expected fail on Wayland until portal work lands | ☑ **FAIL (accepted P2)** (2026-07-10) — none of Ctrl+Alt+Space, Ctrl+Shift+Space, F8, or Ctrl+Alt+Shift+Space work when another app has focus. Matches known Wayland global-shortcut limitation |
@@ -58,13 +58,13 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 
 | Item | Result |
 | --- | --- |
-| L1 HealthCheck | Pass for isolation/loopback/stealth/etc.; `microphone_access` Warn only (stub — never probes mic) |
+| L1 HealthCheck | Pass for isolation/loopback/private mode/etc.; `microphone_access` Warn only (stub — never probes mic) |
 | L2 with headphones | **PASS** — interviewer/YouTube on INTERVIEWER only; YOU separate when speaking |
 | L2 without headphones | **FAIL (acoustic bleed)** — same utterance on YOU + INTERVIEWER; garbled YOU echo. Confirmed 2026-07-10 Zoom: echo lines were from the no-headphones segment only. Follow-up: harden open-speaker path (PipeWire `module-echo-cancel` + HealthCheck AEC + tune Jaccard gate). Not pulse-first device collision |
 | Auto question detect | **Intermittent** — sometimes fires after silence; sometimes needs UI **Q** click. Manual Q always works. Parked as M10 soft issue, not L2 fail |
 | Transcription lag | ~2s observed — within NFR warn band |
 | Post-session summary | **FAIL / unavailable** — after ending Live, UI shows “Summary unavailable for this session.” (reproduced 2026-07-10). Frontend shows this when `generate_session_summary` returns non-JSON or invoke errors; soft fallback JSON would instead show “rate limited or offline…”. Non-blocking for L2/M10; park for summary JSON extraction / provider fix |
-| L3 hotkeys (Rehearsal, focused) | **PASS** — Ctrl+Alt+Space trigger OK; panic hide (Ctrl+Alt+Shift+Space) OK. Ctrl+Shift+Space / F8 are **aliases** of the same trigger (for when Ctrl+Alt is blocked); no separate effect when primary already works. Panic hide leaves **title/nav bar** visible (stealth nit on shell screens) |
+| L3 hotkeys (Rehearsal, focused) | **PASS** — Ctrl+Alt+Space trigger OK; panic hide (Ctrl+Alt+Shift+Space) OK. Ctrl+Shift+Space / F8 are **aliases** of the same trigger (for when Ctrl+Alt is blocked); no separate effect when primary already works. Panic hide leaves **title/nav bar** visible (private mode nit on shell screens) |
 | L4 hotkeys (unfocused) | **FAIL (accepted P2)** — no hotkeys work when browser/other app focused; expected on Wayland until portal integration |
 | L5 OBS Display Capture | **VISIBLE** — Flint shown in OBS preview for Rehearsal + Live. Accepted Wayland outcome. Recording file missing after Stop (check `~/` for `YYYY-MM-DD HH-MM-SS.mkv`; NVENC encoder may have blocked write) |
 | M10 Zoom live (standard) | **Partial PASS** (2026-07-10) — works after non-BT output + headphones. Issues: BT HFP → no/watchdog audio; transcript WER poor; **Q per VAD chunk** splits questions so click answers half-question; context/answers weak. Prefer **Ctrl+Q once at end of question**. Details: `M10_LIVE_RELIABILITY.md` |
@@ -72,7 +72,7 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 
 **L2 gate status:** closed for Linux headphones path. Use headphones for all further live tests.
 
-**Linux stealth matrix (L1–L5):** complete for this machine (2026-07-10).
+**Linux private mode matrix (L1–L5):** complete for this machine (2026-07-10).
 
 ---
 
@@ -82,7 +82,7 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 
 | # | Scenario | Pass criteria | Result |
 | --- | --- | --- | --- |
-| M1 | HealthCheck | BlackHole detected; stealth + mic checks pass | ☐ |
+| M1 | HealthCheck | BlackHole detected; private mode + mic checks pass | ☐ |
 | M2 | System audio via BlackHole | Interviewer audio on System channel during live session | ☐ |
 | M3 | OBS capture | Overlay excluded or documented as visible (record which) | ☐ |
 | M4 | Global hotkeys unfocused | Ctrl+Q works while another app is focused | ☐ |
@@ -95,7 +95,7 @@ Run before v1 release. Attach logs (`RUST_LOG=info`) and HealthCheck screenshot.
 | --- | --- | --- | --- |
 | W1 | HealthCheck | System audio loopback reported as supported | ☐ |
 | W2 | WASAPI loopback | Meet/Zoom/browser audio on System channel | ☐ |
-| W3 | OBS capture | Stealth / capture-exclusion behavior recorded | ☐ |
+| W3 | OBS capture | Private Mode / capture-exclusion behavior recorded | ☐ |
 | W4 | Global hotkeys unfocused | Ctrl+Q works while another app is focused | ☐ |
 
 ---
@@ -121,13 +121,13 @@ For each run, save:
 3. Pass/fail per row above
 4. Link to `~/.flint/metrics.log` session summary if live pipeline tested
 
-File results under `tests/manual-qa/` as `stealth-audio-validation-YYYY-MM-DD.md` when complete.
+File results under `tests/manual-qa/` as `private-mode-audio-validation-YYYY-MM-DD.md` when complete.
 
 ---
 
 ## Manual gate closure
 
-Mark **stealth/audio hardware validation** done in release docs only when:
+Mark **private mode/audio hardware validation** done in release docs only when:
 
 - [ ] All platform rows L1–L4 / M1–M4 / W1–W4 have recorded pass/fail
 - [ ] Wayland hotkey-without-focus outcome explicitly documented (pass or accepted fail)

@@ -2,7 +2,7 @@
 <p align="center">
   <img src="src/assets/flint-hero.png" alt="Flint hero" width="720" />
 </p>
-Real-time AI co-pilot desktop app for live conversations (e.g. job interviews). Flint listens to system audio, transcribes locally, and surfaces parallel AI guidance in a stealth overlay — invisible to the other party.
+Real-time AI co-pilot desktop app for live conversations (e.g. job interviews). Flint listens to system audio, transcribes locally, and surfaces parallel AI guidance in a private overlay — invisible to the other party.
 
 **Repository:** [github.com/abzanganeh/flint](https://github.com/abzanganeh/flint)
 
@@ -12,7 +12,7 @@ Real-time AI co-pilot desktop app for live conversations (e.g. job interviews). 
 - Runs **local** transcription (Whisper), noise suppression (RNNoise), and VAD
 - Fires **parallel** directional, depth, and clarifying LLM threads on detected questions
 - **RAG** over session context via sqlite-vec + local embeddings
-- **Stealth overlay** (Tauri): always-on-top, transparent, excluded from screen capture where the OS allows
+- **Private overlay** (Tauri): always-on-top, transparent, excluded from screen capture where the OS allows
 - **Groq** cloud inference with **Ollama** fallback; API keys in the OS keychain only
 - **Rehearsal** with question bank, session focus tags, and **preferred answers** (exact + semantic match at 0.85 cosine)
 - **Mock interview** with preferred-answer short-circuit in Study mode

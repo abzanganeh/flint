@@ -3,7 +3,7 @@
 One-page manual QA for **L2** after the pulse-first loopback fix (PR #34).
 Use this after merge — do **not** mark PASS without device evidence.
 
-**Related:** [stealth-audio-validation-runbook.md](./stealth-audio-validation-runbook.md) (root-cause section) · [M13 live pipeline checklist](./m13-live-pipeline-checklist.md)
+**Related:** [private-mode-audio-validation-runbook.md](./private-mode-audio-validation-runbook.md) (root-cause section) · [M13 live pipeline checklist](./m13-live-pipeline-checklist.md)
 
 ---
 
@@ -23,7 +23,7 @@ Use this after merge — do **not** mark PASS without device evidence.
 2. Confirm **`system_audio_isolation`** is **Pass** or an acceptable **Warn** with actionable fix text.
 3. If **Fail:** follow the fix instruction (typically install `pipewire-pulse` / verify PipeWire). **Stop here** — do not proceed to live audio until this passes or is explained.
 
-Also note: `system_audio_loopback`, `microphone_access`, `stealth_api` — record pass/warn/fail.
+Also note: `system_audio_loopback`, `microphone_access`, `private_mode_api` — record pass/warn/fail.
 
 ---
 
@@ -67,11 +67,11 @@ Include the log snippet (device names, `system_audio_isolation`, capture start) 
 
 ## Step 5 — Record result
 
-1. Update the **L2** row in [stealth-audio-validation-runbook.md](./stealth-audio-validation-runbook.md):
+1. Update the **L2** row in [private-mode-audio-validation-runbook.md](./private-mode-audio-validation-runbook.md):
 
    `| L2 | System audio loopback | … | ☑ PASS / ☑ FAIL — <date>, <evidence link or log path> |`
 
-2. Optionally file `tests/manual-qa/stealth-audio-validation-YYYY-MM-DD.md` with OS version and HealthCheck screenshot.
+2. Optionally file `tests/manual-qa/private-mode-audio-validation-YYYY-MM-DD.md` with OS version and HealthCheck screenshot.
 
 ---
 
