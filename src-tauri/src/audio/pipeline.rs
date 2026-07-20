@@ -31,6 +31,7 @@
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
 
@@ -385,6 +386,8 @@ pub async fn run_audio_pipeline(
     phone_mode_manual_only: bool,
     diarizer: Option<Arc<SyncMutex<DiarizerManager>>>,
     speaker_classifier: Option<Arc<SpeakerClassifier>>,
+    whisper_pending: Arc<AtomicUsize>,
+    system_buffer_epoch: Arc<AtomicU64>,
 ) -> Result<()> {
     let mut sys_proc = ChannelProcessor::new_system()?;
     let mut mic_proc = ChannelProcessor::new_mic()?;
@@ -392,34 +395,41 @@ pub async fn run_audio_pipeline(
     let near_duplicate = SyncMutex::new(NearDuplicateTracker::new());
     let phone_heuristic = SyncMutex::new(PhoneHeuristicState::new());
     let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
-    let (whisper_worker, mut whisper_results) = LiveWhisperWorker::start(Arc::clone(&whisper));
+    let (whisper_worker, mut whisper_results) =
+        LiveWhisperWorker::start(Arc::clone(&whisper), Arc::clone(&whisper_pending));
+
+    let dispatch_whisper_result = |meta: LiveWhisperJobMeta, outcome: LiveWhisperOutcome| async {
+        let result = handle_transcription_result(
+            meta,
+            outcome,
+            &app_handle,
+            session_id,
+            &hybrid,
+            &system_buffer,
+            &system_buffer_epoch,
+            &question_tx,
+            &persistence,
+            &dedup,
+            &near_duplicate,
+            &phone_heuristic,
+            &mic_quality,
+            &audit,
+            echo_suppression_enabled,
+            phone_mode_manual_only,
+            &diarizer,
+            &rolling_contexts,
+            &speaker_classifier,
+        )
+        .await;
+        whisper_pending.fetch_sub(1, Ordering::Release);
+        result
+    };
 
     loop {
         tokio::select! {
             result = whisper_results.recv() => {
                 if let Some((meta, outcome)) = result {
-                    if let Err(e) = handle_transcription_result(
-                        meta,
-                        outcome,
-                        &app_handle,
-                        session_id,
-                        &hybrid,
-                        &system_buffer,
-                        &question_tx,
-                        &persistence,
-                        &dedup,
-                        &near_duplicate,
-                        &phone_heuristic,
-                        &mic_quality,
-                        &audit,
-                        echo_suppression_enabled,
-                        phone_mode_manual_only,
-                        &diarizer,
-                        &rolling_contexts,
-                        &speaker_classifier,
-                    )
-                    .await
-                    {
+                    if let Err(e) = dispatch_whisper_result(meta, outcome).await {
                         tracing::warn!(error = %e, "transcription result handler error — continuing");
                     }
                 }
@@ -431,6 +441,8 @@ pub async fn run_audio_pipeline(
                         &mut sys_proc,
                         &app_handle,
                         &whisper_worker,
+                        &whisper_pending,
+                        &system_buffer_epoch,
                         session_id,
                         &hybrid,
                         &system_buffer,
@@ -453,6 +465,8 @@ pub async fn run_audio_pipeline(
                         &mut mic_proc,
                         &app_handle,
                         &whisper_worker,
+                        &whisper_pending,
+                        &system_buffer_epoch,
                         session_id,
                         &hybrid,
                         &system_buffer,
@@ -472,28 +486,7 @@ pub async fn run_audio_pipeline(
     }
 
     while let Some((meta, outcome)) = whisper_results.recv().await {
-        if let Err(e) = handle_transcription_result(
-            meta,
-            outcome,
-            &app_handle,
-            session_id,
-            &hybrid,
-            &system_buffer,
-            &question_tx,
-            &persistence,
-            &dedup,
-            &near_duplicate,
-            &phone_heuristic,
-            &mic_quality,
-            &audit,
-            echo_suppression_enabled,
-            phone_mode_manual_only,
-            &diarizer,
-            &rolling_contexts,
-            &speaker_classifier,
-        )
-        .await
-        {
+        if let Err(e) = dispatch_whisper_result(meta, outcome).await {
             tracing::warn!(error = %e, "transcription drain error — continuing");
         }
     }
@@ -514,6 +507,8 @@ async fn process_frame(
     proc: &mut ChannelProcessor,
     app_handle: &AppHandle,
     whisper_worker: &LiveWhisperWorker,
+    whisper_pending: &AtomicUsize,
+    system_buffer_epoch: &AtomicU64,
     session_id: Uuid,
     hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
     system_buffer: &Arc<SyncMutex<SystemTranscriptBuffer>>,
@@ -554,6 +549,16 @@ async fn process_frame(
 
     let Some(chunk) = proc.vad.process_frame(&downsampled, source) else {
         if source == AudioSource::System && !phone_mode_manual_only {
+            if LiveWhisperWorker::pending_jobs(whisper_pending) > 0 {
+                return Ok(());
+            }
+            let uncertain = system_buffer
+                .lock()
+                .map(|b| b.has_uncertain_speaker())
+                .unwrap_or(false);
+            if uncertain {
+                return Ok(());
+            }
             let plan = {
                 let mut guard = hybrid.lock().await;
                 guard.check_silence(silence_ms)
@@ -593,6 +598,7 @@ async fn process_frame(
             chunk_ready_at,
             chunk_rms_dbfs,
             chunk_duration_ms,
+            buffer_epoch: system_buffer_epoch.load(Ordering::Acquire),
         },
         chunk,
         rolling_context,
@@ -609,6 +615,7 @@ async fn handle_transcription_result(
     session_id: Uuid,
     hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
     system_buffer: &Arc<SyncMutex<SystemTranscriptBuffer>>,
+    system_buffer_epoch: &AtomicU64,
     question_tx: &mpsc::Sender<DetectedQuestion>,
     persistence: &Arc<SessionPersistence>,
     dedup: &SyncMutex<CrossChannelDedup>,
@@ -933,11 +940,17 @@ async fn handle_transcription_result(
         return Ok(());
     }
 
-    {
+    let buffer_epoch_live = system_buffer_epoch.load(Ordering::Acquire);
+    let buffer_current = meta.buffer_epoch == buffer_epoch_live;
+    if buffer_current {
         let mut buf = system_buffer
             .lock()
             .map_err(|_| anyhow::anyhow!("system transcript buffer mutex poisoned"))?;
         buf.append_chunk(&result.text, Some(chunk_id.to_string()), label_source);
+    }
+
+    if !buffer_current {
+        return Ok(());
     }
 
     if phone_mode_manual_only {
@@ -949,6 +962,14 @@ async fn handle_transcription_result(
         if !allow_auto {
             return Ok(());
         }
+    }
+
+    let uncertain_speaker = system_buffer
+        .lock()
+        .map(|b| b.has_uncertain_speaker())
+        .unwrap_or(false);
+    if uncertain_speaker {
+        return Ok(());
     }
 
     let accumulated = {
