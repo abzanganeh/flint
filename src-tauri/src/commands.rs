@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::audio::capture::{AudioCapture, AudioFrame};
 use crate::audio::diarizer::DiarizerManager;
+use crate::audio::live_whisper_worker::LiveWhisperWorker;
 use crate::audio::pipeline::{run_audio_pipeline, DetectedQuestion, MicQualityMonitor};
 use crate::audio::speaker_classifier::SpeakerClassifier;
 use crate::calibration::{
@@ -3307,6 +3308,8 @@ pub async fn start_session(
     let hybrid_for_handles = Arc::clone(&hybrid);
     let system_transcript_buffer =
         Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
+    let whisper_pending = Arc::new(AtomicUsize::new(0));
+    let system_buffer_epoch = Arc::new(AtomicU64::new(0));
 
     // ── 3. Audio channels ─────────────────────────────────────────────────
     //
@@ -3401,6 +3404,8 @@ pub async fn start_session(
             None
         },
         speaker_classifier,
+        Arc::clone(&whisper_pending),
+        Arc::clone(&system_buffer_epoch),
     ));
 
     // Live audio-flow watchdog: warns the user if no audio is captured after
@@ -3423,6 +3428,8 @@ pub async fn start_session(
         turn_cancel: turn_cancel_slot,
         system_transcript_buffer,
         hybrid_question_detector: hybrid_for_handles,
+        whisper_pending,
+        system_buffer_epoch,
         diarizer: Arc::clone(&diarizer),
         audit,
         watchdog,
@@ -3600,6 +3607,8 @@ pub async fn start_live_preview(
     let hybrid_for_preview = Arc::clone(&hybrid);
     let system_transcript_buffer =
         Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
+    let whisper_pending = Arc::new(AtomicUsize::new(0));
+    let system_buffer_epoch = Arc::new(AtomicU64::new(0));
 
     // ── 3. Audio channels + capture thread — pipeline only, no orchestrator
     let (system_tx, system_rx) = tokio::sync::mpsc::channel(1024);
@@ -3646,6 +3655,8 @@ pub async fn start_live_preview(
             None
         },
         speaker_classifier,
+        Arc::clone(&whisper_pending),
+        Arc::clone(&system_buffer_epoch),
     ));
 
     let turn_cancel_slot: Arc<tokio::sync::Mutex<Option<crate::state::TurnCancelFlag>>> =
@@ -3684,6 +3695,8 @@ pub async fn start_live_preview(
         question_rx,
         system_transcript_buffer,
         hybrid_question_detector: hybrid_for_preview,
+        whisper_pending,
+        system_buffer_epoch,
         diarizer,
         audit,
         turn_cancel: turn_cancel_slot,
@@ -3756,16 +3769,17 @@ pub async fn commit_live_preview(
 
     // Preview/test speech must not pollute the first live Ctrl+Q span or
     // auto-detect after commit (DAT-style rehearsal → real call handoff).
-    {
-        if let Ok(mut buf) = preview.system_transcript_buffer.lock() {
-            buf.clear();
-        }
-        preview
-            .hybrid_question_detector
-            .lock()
-            .await
-            .reset_after_dispatch();
+    preview
+        .system_buffer_epoch
+        .fetch_add(1, Ordering::Release);
+    if let Ok(mut buf) = preview.system_transcript_buffer.lock() {
+        buf.clear();
     }
+    preview
+        .hybrid_question_detector
+        .lock()
+        .await
+        .reset_after_dispatch();
 
     let orch_config = OrchestratorConfig {
         session_id: sid,
@@ -3806,6 +3820,8 @@ pub async fn commit_live_preview(
         turn_cancel: preview.turn_cancel,
         system_transcript_buffer: preview.system_transcript_buffer,
         hybrid_question_detector: preview.hybrid_question_detector,
+        whisper_pending: preview.whisper_pending,
+        system_buffer_epoch: preview.system_buffer_epoch,
         diarizer: preview.diarizer,
         audit: preview.audit,
         watchdog,
@@ -4255,6 +4271,12 @@ pub async fn signal_question_ended(
     let Some(handles) = guard.as_ref() else {
         return Err("No active live session handles.".to_string());
     };
+
+    if LiveWhisperWorker::pending_jobs(&handles.whisper_pending) > 0 {
+        return Err(
+            "Still transcribing interviewer speech — wait a moment and try again.".to_string(),
+        );
+    }
 
     let question_text = {
         let mut buf = handles

@@ -24,6 +24,9 @@ pub struct LiveWhisperJobMeta {
     pub chunk_ready_at: Instant,
     pub chunk_rms_dbfs: f32,
     pub chunk_duration_ms: u32,
+    /// Snapshot of `system_buffer_epoch` at enqueue — stale preview-era jobs
+    /// must not repopulate the buffer after `commit_live_preview`.
+    pub buffer_epoch: u64,
 }
 
 pub struct LiveWhisperJob {
@@ -48,20 +51,20 @@ pub struct LiveWhisperWorker {
 impl LiveWhisperWorker {
     pub fn start(
         whisper: Arc<WhisperEngine>,
+        pending: Arc<AtomicUsize>,
     ) -> (
         Self,
         mpsc::UnboundedReceiver<(LiveWhisperJobMeta, LiveWhisperOutcome)>,
     ) {
         let (job_tx, job_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = mpsc::unbounded_channel();
-        let pending = Arc::new(AtomicUsize::new(0));
         let pending_worker = Arc::clone(&pending);
-        let task = tokio::spawn(worker_loop(whisper, job_rx, result_tx, pending_worker));
+        let task = tokio::spawn(worker_loop(whisper, job_rx, result_tx));
         (
             Self {
                 job_tx,
                 task,
-                pending,
+                pending: pending_worker,
             },
             result_rx,
         )
@@ -75,11 +78,10 @@ impl LiveWhisperWorker {
         }
     }
 
-    /// Number of VAD chunks waiting on or inside Whisper decode. Silence-based
-    /// question confirmation must wait until this reaches zero so Ctrl+Q and
-    /// auto-detect see the full interviewer utterance, not a partial fragment.
-    pub fn pending_jobs(&self) -> usize {
-        self.pending.load(Ordering::Acquire)
+    /// Jobs waiting on or inside Whisper decode. Decremented by the pipeline
+    /// only after `handle_transcription_result` finishes processing a result.
+    pub fn pending_jobs(pending: &AtomicUsize) -> usize {
+        pending.load(Ordering::Acquire)
     }
 
     pub async fn shutdown(self) -> Result<()> {
@@ -94,7 +96,6 @@ async fn worker_loop(
     whisper: Arc<WhisperEngine>,
     mut job_rx: mpsc::UnboundedReceiver<LiveWhisperJob>,
     result_tx: mpsc::UnboundedSender<(LiveWhisperJobMeta, LiveWhisperOutcome)>,
-    pending: Arc<AtomicUsize>,
 ) {
     while let Some(job) = job_rx.recv().await {
         let LiveWhisperJob {
@@ -121,7 +122,6 @@ async fn worker_loop(
             }
         };
 
-        pending.fetch_sub(1, Ordering::Release);
         if result_tx.send((meta, outcome)).is_err() {
             break;
         }

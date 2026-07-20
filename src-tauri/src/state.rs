@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize};
 use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
@@ -95,6 +95,11 @@ pub struct LiveTaskHandles {
     /// Hybrid question detector — shared with the audio pipeline so manual
     /// Ctrl+Q and preview→live commit can reset detection state.
     pub hybrid_question_detector: Arc<tokio::sync::Mutex<HybridQuestionDetector>>,
+    /// Whisper jobs not yet fully processed by the pipeline result handler.
+    pub whisper_pending: Arc<AtomicUsize>,
+    /// Incremented on `commit_live_preview` so preview-era STT cannot refill
+    /// the System buffer after the handoff to LIVE.
+    pub system_buffer_epoch: Arc<AtomicU64>,
     /// Phone-mode diarization state (M10 Slice 8).
     pub diarizer: Arc<std::sync::Mutex<DiarizerManager>>,
     /// M13 S6 — audio pipeline audit counters. Snapshotted on session end and
@@ -133,6 +138,8 @@ pub struct LivePreviewTaskHandles {
     pub question_rx: mpsc::Receiver<DetectedQuestion>,
     pub system_transcript_buffer: Arc<std::sync::Mutex<SystemTranscriptBuffer>>,
     pub hybrid_question_detector: Arc<tokio::sync::Mutex<HybridQuestionDetector>>,
+    pub whisper_pending: Arc<AtomicUsize>,
+    pub system_buffer_epoch: Arc<AtomicU64>,
     pub diarizer: Arc<std::sync::Mutex<DiarizerManager>>,
     pub audit: Arc<crate::audio::audit::AudioAuditCounters>,
     pub turn_cancel: Arc<Mutex<Option<TurnCancelFlag>>>,
