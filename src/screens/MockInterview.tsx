@@ -29,6 +29,7 @@ import {
 import { useOrchestratorStreams } from "../hooks/useOrchestratorStreams";
 import CoachPanel from "../panels/CoachPanel";
 import MockSaveForLiveModal from "../components/MockSaveForLiveModal";
+import PreLiveTimingModal from "../components/PreLiveTimingModal";
 import MicQualityBadge from "../components/MicQualityBadge";
 import SuggestedAnswerPanel from "../panels/SuggestedAnswerPanel";
 import VisualPanel from "../panels/VisualPanel";
@@ -100,6 +101,7 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
   >("idle");
   const [savePreferredError, setSavePreferredError] = useState<string | null>(null);
   const [saveConfirmOpen, setSaveConfirmOpen] = useState(false);
+  const [showTimingModal, setShowTimingModal] = useState(true);
   const [showVisual, setShowVisual] = useState(true);
   const unlisteners = useRef<UnlistenFn[]>([]);
   const paceRef = useRef<MockPace>(pace);
@@ -504,6 +506,9 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
         overflow: "hidden",
       }}
     >
+      {showTimingModal && (
+        <PreLiveTimingModal onDismiss={() => setShowTimingModal(false)} />
+      )}
       {/* Header */}
       <div
         style={{

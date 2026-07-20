@@ -8,8 +8,12 @@ use crate::interfaces::vector::QA_EMBED_CONFIDENCE_THRESHOLD;
 pub const MOCK_COACH_SATISFIED_THRESHOLD: u8 = 70;
 
 /// Cosine similarity threshold for matching rephrased questions to saved preferred answers.
-/// Same threshold as the pre-warm cache (§13 / flint-performance NFR).
-pub const PREFERRED_ANSWER_MATCH_THRESHOLD: f32 = 0.85;
+/// Live Whisper transcripts often rephrase bank wording; 0.75 catches those while
+/// staying above unrelated questions (pre-warm cache remains at 0.85).
+pub const PREFERRED_ANSWER_MATCH_THRESHOLD: f32 = 0.75;
+
+/// Token Jaccard threshold when comparing normalized question keys (Whisper typos / fillers).
+pub const PREFERRED_KEY_OVERLAP_THRESHOLD: f32 = 0.65;
 
 /// Dot product of two same-length unit-norm vectors equals cosine similarity.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -36,6 +40,48 @@ pub fn best_preferred_semantic_match<'a>(
         },
     );
     if best_sim >= PREFERRED_ANSWER_MATCH_THRESHOLD {
+        best_answer
+    } else {
+        None
+    }
+}
+
+fn question_word_set(question: &str) -> std::collections::HashSet<String> {
+    normalize_question_key(question)
+        .split_whitespace()
+        .map(|w| w.to_string())
+        .collect()
+}
+
+/// Token Jaccard similarity between two normalized question keys.
+pub fn question_key_jaccard(a: &str, b: &str) -> f32 {
+    let set_a = question_word_set(a);
+    let set_b = question_word_set(b);
+    if set_a.is_empty() || set_b.is_empty() {
+        return 0.0;
+    }
+    let inter = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    inter / union
+}
+
+/// Match a live question to a saved preferred answer by normalized-key overlap.
+pub fn best_preferred_key_overlap<'a>(
+    query: &str,
+    candidates: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Option<&'a str> {
+    let (best_answer, best_score) =
+        candidates
+            .into_iter()
+            .fold((None, 0.0_f32), |(best_a, best_s), (stored_q, answer)| {
+                let score = question_key_jaccard(query, stored_q);
+                if score > best_s {
+                    (Some(answer), score)
+                } else {
+                    (best_a, best_s)
+                }
+            });
+    if best_score >= PREFERRED_KEY_OVERLAP_THRESHOLD {
         best_answer
     } else {
         None
@@ -288,5 +334,27 @@ mod tests {
         let v = vec![0.1_f32, -0.2, 3.0];
         let blob = encode_embedding_blob(&v);
         assert_eq!(decode_embedding_blob(&blob), Some(v));
+    }
+
+    #[test]
+    fn key_overlap_matches_rephrased_live_question() {
+        let live = "What parts of this stuff excited the most";
+        let bank = "What parts of this stuff excite you the most";
+        let score = question_key_jaccard(live, bank);
+        assert!(
+            score >= PREFERRED_KEY_OVERLAP_THRESHOLD,
+            "jaccard {score} should match garbled live STT"
+        );
+        let answer = best_preferred_key_overlap(live, [(bank, "My excitement script")]);
+        assert_eq!(answer, Some("My excitement script"));
+    }
+
+    #[test]
+    fn key_overlap_misses_unrelated_questions() {
+        assert!(best_preferred_key_overlap(
+            "Design a rate limiter",
+            [("Tell me about yourself", "Intro")],
+        )
+        .is_none());
     }
 }

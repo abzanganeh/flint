@@ -476,7 +476,7 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     .context("embed task panicked")?
     .context("embed failed")?;
 
-    // ── 2. Preferred answer lookup (exact key, then cosine ≥ 0.85) ────────
+    // ── 2. Preferred answer lookup (exact key, overlap, then cosine ≥ 0.75) ─
     let preferred_answer = cfg
         .persistence
         .resolve_preferred_answer(cfg.session_id, &cfg.question_text, Some(&embedding))
@@ -532,26 +532,49 @@ async fn run_turn<R: Runtime>(cfg: OrchestratorTurnConfig, app: AppHandle<R>) ->
     let prompt_chunks = retrieve_rag(&cfg, &embedding).await?;
     let rag_latency_ms = rag_start.elapsed().as_millis() as u64;
 
+    let rag_chunks_payload: Vec<RagChunkPayload> = if from_preferred {
+        vec![RagChunkPayload {
+            text: "Serving your saved preferred answer for this question.".to_string(),
+            score: 1.0,
+        }]
+    } else {
+        prompt_chunks
+            .context
+            .iter()
+            .chain(prompt_chunks.qa.iter())
+            .take(10)
+            .map(|c| RagChunkPayload {
+                text: c.chunk.text.clone(),
+                score: c.score,
+            })
+            .collect()
+    };
+
     emit_rag_chunks_update(
         &app,
         RagChunksUpdatePayload {
-            chunks: prompt_chunks
-                .context
-                .iter()
-                .chain(prompt_chunks.qa.iter())
-                .take(10)
-                .map(|c| RagChunkPayload {
-                    text: c.chunk.text.clone(),
-                    score: c.score,
-                })
-                .collect(),
+            chunks: rag_chunks_payload,
         },
     );
     let rag_chunks = prompt_chunks.context.clone();
     let qa_chunks = prompt_chunks.qa.clone();
 
-    if from_cache {
-        emit_response_metadata(&app, ResponseMetadataPayload { pre_prepared: true });
+    if from_preferred {
+        emit_response_metadata(
+            &app,
+            ResponseMetadataPayload {
+                pre_prepared: true,
+                from_preferred: true,
+            },
+        );
+    } else if from_cache {
+        emit_response_metadata(
+            &app,
+            ResponseMetadataPayload {
+                pre_prepared: true,
+                from_preferred: false,
+            },
+        );
     }
 
     // ── 3. Build memory context ───────────────────────────────────────────
