@@ -103,6 +103,9 @@ pub struct RagChunksUpdatePayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct ResponseMetadataPayload {
     pub pre_prepared: bool,
+    /// True when the directional answer was served from a user-saved preferred script.
+    #[serde(default)]
+    pub from_preferred: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

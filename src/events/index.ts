@@ -79,6 +79,7 @@ export interface RagChunksUpdateEventPayload {
 
 export interface ResponseMetadataEventPayload {
   pre_prepared: boolean;
+  from_preferred?: boolean;
 }
 
 export interface OverlayVisibilityEventPayload {

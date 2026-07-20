@@ -7,6 +7,7 @@ import MicQualityBadge from "../components/MicQualityBadge";
 import FirstRunRehearsalModal, {
   isFirstRunModalDismissed,
 } from "../components/FirstRunRehearsalModal";
+import PreLiveTimingModal from "../components/PreLiveTimingModal";
 import AddContextPanel from "../components/AddContextPanel";
 import StoryEditor from "../components/StoryEditor";
 import OverlayLayout from "../components/OverlayLayout";
@@ -108,9 +109,8 @@ const Rehearsal = ({
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [contextFields, setContextFields] = useState<SessionContextFields>(emptyFields);
-  const [showFirstRunModal, setShowFirstRunModal] = useState(
-    () => !isFirstRunModalDismissed(),
-  );
+  const [showTimingModal, setShowTimingModal] = useState(true);
+  const [showFirstRunModal, setShowFirstRunModal] = useState(false);
   const [readinessReport, setReadinessReport] = useState<LiveReadinessReportDto | null>(
     null,
   );
@@ -419,6 +419,16 @@ const Rehearsal = ({
   return (
     <PanicRestoreShell>
       <>
+      {showTimingModal && (
+        <PreLiveTimingModal
+          onDismiss={() => {
+            setShowTimingModal(false);
+            if (!isFirstRunModalDismissed()) {
+              setShowFirstRunModal(true);
+            }
+          }}
+        />
+      )}
       {showFirstRunModal && (
         <FirstRunRehearsalModal
           fields={contextFields}

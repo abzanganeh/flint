@@ -43,6 +43,21 @@ describe("LivePreview", () => {
     expect(screen.getByTestId("transcript-panel-stub")).toBeTruthy();
   });
 
+  it("shows TEST NOT LIVE watermark and pre-live warnings", () => {
+    render(
+      <LivePreview sessionId="sess-1" onGoLive={vi.fn()} onBack={vi.fn()} />,
+    );
+    expect(screen.getByTestId("live-preview-watermark").textContent).toMatch(
+      /TEST — NOT LIVE/,
+    );
+    expect(screen.getByTestId("live-preview-mode-badge").textContent).toMatch(
+      /Test — Not Live/i,
+    );
+    expect(screen.getByTestId("live-preview-warning").textContent).toMatch(
+      /2 minutes before/i,
+    );
+  });
+
   it("invokes commitLivePreview on Go Live", async () => {
     const onGoLive = vi.fn();
     render(

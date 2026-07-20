@@ -1768,7 +1768,7 @@ impl SessionPersistence {
         })
     }
 
-    /// Resolve a saved preferred answer: normalized key first, then cosine ≥ 0.85.
+    /// Resolve a saved preferred answer: normalized key, token overlap, then cosine ≥ 0.75.
     pub fn resolve_preferred_answer(
         &self,
         session_id: Uuid,
@@ -1779,10 +1779,46 @@ impl SessionPersistence {
         if !exact.trim().is_empty() {
             return Ok(exact);
         }
+        if let Some(overlap) = self.find_preferred_by_key_overlap(session_id, question)? {
+            return Ok(overlap);
+        }
         let Some(query) = query_embedding else {
             return Ok(String::new());
         };
         self.find_preferred_answer_semantic(session_id, query)
+    }
+
+    fn find_preferred_by_key_overlap(
+        &self,
+        session_id: Uuid,
+        question: &str,
+    ) -> Result<Option<String>> {
+        use crate::session::question_attempts::best_preferred_key_overlap;
+
+        let conn = self.db.lock().expect("session persistence mutex poisoned");
+        let sid = session_id.to_string();
+        let mut stmt = conn
+            .prepare(
+                "SELECT question, preferred_answer FROM question_attempts
+                 WHERE session_id = ?1 AND preferred_answer != ''",
+            )
+            .context("prepare preferred overlap lookup")?;
+        let rows = stmt
+            .query_map(params![sid], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .context("query preferred overlap candidates")?;
+
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for row in rows {
+            let (q, a) = row.context("read preferred overlap row")?;
+            pairs.push((q, a));
+        }
+        let refs: Vec<(&str, &str)> = pairs
+            .iter()
+            .map(|(q, a)| (q.as_str(), a.as_str()))
+            .collect();
+        Ok(best_preferred_key_overlap(question, refs).map(|s| s.to_string()))
     }
 
     fn find_preferred_answer_semantic(
@@ -3840,6 +3876,29 @@ mod tests {
         // Stored blob round-trip sanity.
         let blob = encode_embedding_blob(&stored_emb);
         assert!(!blob.is_empty());
+    }
+
+    #[test]
+    fn resolve_preferred_answer_key_overlap_before_semantic() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Overlap", "interview", "swe")
+            .unwrap();
+
+        db.save_preferred_answer(
+            sid,
+            "What parts of this stuff excite you the most",
+            "My saved excitement answer",
+            None,
+        )
+        .unwrap();
+
+        let live_garbled = "What parts of this stuff excited the most";
+        assert_eq!(
+            db.resolve_preferred_answer(sid, live_garbled, None)
+                .unwrap(),
+            "My saved excitement answer"
+        );
     }
 
     #[test]
