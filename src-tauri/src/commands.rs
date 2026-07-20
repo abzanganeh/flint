@@ -3304,6 +3304,7 @@ pub async fn start_session(
         HybridQuestionDetector::new(Arc::clone(&failover), &prompts_base_dir())
             .map_err(|e| start_session_step_err("hybrid question detector init", e))?,
     ));
+    let hybrid_for_handles = Arc::clone(&hybrid);
     let system_transcript_buffer =
         Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
 
@@ -3421,6 +3422,7 @@ pub async fn start_session(
         question_tx,
         turn_cancel: turn_cancel_slot,
         system_transcript_buffer,
+        hybrid_question_detector: hybrid_for_handles,
         diarizer: Arc::clone(&diarizer),
         audit,
         watchdog,
@@ -3595,6 +3597,7 @@ pub async fn start_live_preview(
         HybridQuestionDetector::new(Arc::clone(&failover), &prompts_base_dir())
             .map_err(|e| start_session_step_err("hybrid question detector init", e))?,
     ));
+    let hybrid_for_preview = Arc::clone(&hybrid);
     let system_transcript_buffer =
         Arc::new(std::sync::Mutex::new(SystemTranscriptBuffer::default()));
 
@@ -3680,6 +3683,7 @@ pub async fn start_live_preview(
         question_tx,
         question_rx,
         system_transcript_buffer,
+        hybrid_question_detector: hybrid_for_preview,
         diarizer,
         audit,
         turn_cancel: turn_cancel_slot,
@@ -3750,6 +3754,19 @@ pub async fn commit_live_preview(
 
     *state.session_memory.lock().await = Some(Arc::clone(&memory));
 
+    // Preview/test speech must not pollute the first live Ctrl+Q span or
+    // auto-detect after commit (DAT-style rehearsal → real call handoff).
+    {
+        if let Ok(mut buf) = preview.system_transcript_buffer.lock() {
+            buf.clear();
+        }
+        preview
+            .hybrid_question_detector
+            .lock()
+            .await
+            .reset_after_dispatch();
+    }
+
     let orch_config = OrchestratorConfig {
         session_id: sid,
         digest: Arc::new(digest),
@@ -3788,6 +3805,7 @@ pub async fn commit_live_preview(
         question_tx: preview.question_tx,
         turn_cancel: preview.turn_cancel,
         system_transcript_buffer: preview.system_transcript_buffer,
+        hybrid_question_detector: preview.hybrid_question_detector,
         diarizer: preview.diarizer,
         audit: preview.audit,
         watchdog,
@@ -4262,6 +4280,12 @@ pub async fn signal_question_ended(
         .question_tx
         .try_send(detected)
         .map_err(|e| format!("Failed to send question to orchestrator: {e}"))?;
+
+    handles
+        .hybrid_question_detector
+        .lock()
+        .await
+        .reset_after_dispatch();
 
     info!(
         session_id = %sid,

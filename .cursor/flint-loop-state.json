@@ -1,21 +1,21 @@
 {
-  "current_milestone": "mock-stt-reliability",
+  "current_milestone": "m10-dat-interview-reliability",
   "milestone_status": "in_progress",
-  "milestone_branch": { "flint": "feature/mock-stt-reliability" },
-  "current_slice": 4,
-  "completed_slices": [1, 2, 3],
-  "current_task_id": "mock-stt-s4-pr-ci",
+  "milestone_branch": { "flint": "feature/m10-dat-interview-reliability" },
+  "current_slice": 5,
+  "completed_slices": [1, 2, 3, 4, 5],
+  "current_task_id": "m10-dat-s5-q-unification",
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": { "46": "superseded", "47": "pending" },
+  "open_prs": {},
   "manual_gate_backlog": [
     {
-      "gate": "Mock study mode 90s answer STT",
-      "doc": "tests/manual-qa/m13-live-pipeline-checklist.md",
-      "notes": "After merge: mock interview study, one question, speak full intro answer; transcript should track in near-real-time and include ending"
+      "gate": "DAT-style noisy headset live retest",
+      "doc": "tests/manual-qa/M10_LIVE_RELIABILITY.md",
+      "notes": "Rehearse → Test Live Session → commit live → real Zoom call; verify preview text absent from first Ctrl+Q and latest Q uses backend buffer"
     }
   ],
   "agent_ladder": {
@@ -23,5 +23,5 @@
     "medium": "cursor-grok-4.5-high-fast",
     "complex": "claude-sonnet-5-thinking-high"
   },
-  "notes": "Slices 1-3 implemented: WhisperWorker decouples STT from capture; Paused UI-only; EndTurn force_end_segment+flush. Includes SIGFPE fix from e7da085."
+  "notes": "Fixes from Jul 20 DAT interview post-mortem: preview buffer reset, Q/Ctrl+Q unification, whisper backlog gate, uncertain-speaker auto-detect block."
 }

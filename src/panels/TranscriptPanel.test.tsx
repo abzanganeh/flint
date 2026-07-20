@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import TranscriptPanel, {
   __relabelImpl,
+  __signalQuestionEndedImpl,
   __triggerResponseImpl,
   appendLine,
   applyChunkRelabel,
@@ -37,6 +38,7 @@ vi.mock("../hooks/useTranscriptionStream", () => ({
 
 vi.mock("../commands", () => ({
   triggerResponse: vi.fn(),
+  signalQuestionEnded: vi.fn(),
   copyTextToClipboard: vi.fn(),
   relabelTranscriptChunk: vi.fn(),
 }));
@@ -159,6 +161,7 @@ describe("Q-per-utterance chip", () => {
   beforeEach(() => {
     streamHandlerRef.current = null;
     __triggerResponseImpl.fn = vi.fn().mockResolvedValue(undefined);
+    __signalQuestionEndedImpl.fn = vi.fn().mockResolvedValue(undefined);
     __relabelImpl.fn = vi.fn().mockResolvedValue(undefined);
     vi.mocked(copyTextToClipboard).mockReset();
     vi.mocked(copyTextToClipboard).mockResolvedValue(undefined);
@@ -174,9 +177,9 @@ describe("Q-per-utterance chip", () => {
     expect(chips[0].textContent).toBe("Q");
   });
 
-  it("dispatches the full merged utterance via triggerResponse", async () => {
-    const trigger = vi.fn().mockResolvedValue(undefined);
-    __triggerResponseImpl.fn = trigger;
+  it("dispatches the latest merged interviewer utterance via signalQuestionEnded", async () => {
+    const signal = vi.fn().mockResolvedValue(undefined);
+    __signalQuestionEndedImpl.fn = signal;
 
     render(<TranscriptPanel sessionId="sess-1" />);
     pushChunk({ text: "Hi there!", speaker: "System" });
@@ -186,19 +189,39 @@ describe("Q-per-utterance chip", () => {
     fireEvent.click(chip);
 
     await waitFor(() => {
-      expect(trigger).toHaveBeenCalledTimes(1);
+      expect(signal).toHaveBeenCalledTimes(1);
     });
-    expect(trigger).toHaveBeenCalledWith(
-      "Hi there! Tell me about yourself.",
-      "sess-1",
-    );
+    expect(signal).toHaveBeenCalledWith("sess-1");
+    expect(__triggerResponseImpl.fn).not.toHaveBeenCalled();
     expect(chip.getAttribute("data-status")).toBe("asking");
     expect(chip.disabled).toBe(true);
   });
 
-  it("only one chip is in 'asking' state at a time", async () => {
+  it("dispatches older interviewer lines via triggerResponse", async () => {
     const trigger = vi.fn().mockResolvedValue(undefined);
     __triggerResponseImpl.fn = trigger;
+
+    render(<TranscriptPanel sessionId="sess-1" />);
+    pushChunk({ text: "First question?", speaker: "System" });
+    pushChunk({ text: "I am answering.", speaker: "Microphone" });
+    pushChunk({ text: "Second question?", speaker: "System" });
+
+    const chips = screen.getAllByTestId("q-chip");
+    expect(chips).toHaveLength(2);
+    fireEvent.click(chips[0]);
+
+    await waitFor(() => {
+      expect(trigger).toHaveBeenCalledTimes(1);
+    });
+    expect(trigger).toHaveBeenCalledWith("First question?", "sess-1");
+    expect(__signalQuestionEndedImpl.fn).not.toHaveBeenCalled();
+  });
+
+  it("only one chip is in 'asking' state at a time", async () => {
+    const trigger = vi.fn().mockResolvedValue(undefined);
+    const signal = vi.fn().mockResolvedValue(undefined);
+    __triggerResponseImpl.fn = trigger;
+    __signalQuestionEndedImpl.fn = signal;
 
     render(<TranscriptPanel sessionId="sess-1" />);
     pushChunk({ text: "First question?", speaker: "System" });
@@ -211,7 +234,7 @@ describe("Q-per-utterance chip", () => {
     await waitFor(() => expect(trigger).toHaveBeenCalledTimes(1));
 
     fireEvent.click(chips[1] as HTMLButtonElement);
-    await waitFor(() => expect(trigger).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(signal).toHaveBeenCalledTimes(1));
 
     expect(chips[0].getAttribute("data-status")).toBe("idle");
     expect(chips[1].getAttribute("data-status")).toBe("asking");
@@ -260,7 +283,7 @@ describe("Q-per-utterance chip", () => {
   });
 
   it("surfaces an error message and re-enables the chip on failure", async () => {
-    __triggerResponseImpl.fn = vi.fn().mockRejectedValue(new Error("offline"));
+    __signalQuestionEndedImpl.fn = vi.fn().mockRejectedValue(new Error("offline"));
 
     render(<TranscriptPanel sessionId="sess-1" />);
     pushChunk({ text: "Tell me about yourself.", speaker: "System" });

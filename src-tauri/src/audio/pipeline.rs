@@ -554,6 +554,16 @@ async fn process_frame(
 
     let Some(chunk) = proc.vad.process_frame(&downsampled, source) else {
         if source == AudioSource::System && !phone_mode_manual_only {
+            if whisper_worker.pending_jobs() > 0 {
+                return Ok(());
+            }
+            let uncertain = system_buffer
+                .lock()
+                .map(|b| b.has_uncertain_speaker())
+                .unwrap_or(false);
+            if uncertain {
+                return Ok(());
+            }
             let plan = {
                 let mut guard = hybrid.lock().await;
                 guard.check_silence(silence_ms)
@@ -949,6 +959,14 @@ async fn handle_transcription_result(
         if !allow_auto {
             return Ok(());
         }
+    }
+
+    let uncertain_speaker = system_buffer
+        .lock()
+        .map(|b| b.has_uncertain_speaker())
+        .unwrap_or(false);
+    if uncertain_speaker {
+        return Ok(());
     }
 
     let accumulated = {

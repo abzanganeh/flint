@@ -122,6 +122,12 @@ impl SystemTranscriptBuffer {
         self.chunks.clear();
     }
 
+    /// True when the buffer holds preview/rehearsal text that must not feed
+    /// the first live Ctrl+Q span or auto-detect after `commit_live_preview`.
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
     pub fn accumulated_text(&self) -> String {
         self.active_chunks()
             .map(|c| c.text.as_str())
@@ -358,6 +364,16 @@ impl HybridQuestionDetector {
     }
 }
 
+/// Clear the rolling System buffer and hybrid detector so the next question
+/// boundary starts from a clean slate (preview→live commit or manual reset).
+pub fn reset_live_question_state(
+    buffer: &mut SystemTranscriptBuffer,
+    detector: &mut HybridQuestionDetector,
+) {
+    buffer.clear();
+    detector.reset_after_dispatch();
+}
+
 /// Run optional LLM verification without holding the detector mutex during the network call.
 pub async fn finalize_confirmation<R: Runtime>(
     hybrid: &Arc<tokio::sync::Mutex<HybridQuestionDetector>>,
@@ -533,8 +549,35 @@ mod tests {
         let mut buf = SystemTranscriptBuffer::default();
         buf.append("Hi there");
         buf.append("how are you today");
+        assert!(!buf.is_empty());
         buf.clear();
+        assert!(buf.is_empty());
         assert!(buf.accumulated_text().is_empty());
+    }
+
+    #[test]
+    fn reset_live_question_state_clears_buffer_and_detector() {
+        let failover = mock_failover("YES");
+        let mut buf = SystemTranscriptBuffer::default();
+        buf.append("preview rehearsal text should not reach live");
+        let mut detector = HybridQuestionDetector::new(failover, &prompts_dir()).unwrap();
+        let _ = detector.ingest_transcript(
+            "tell me about a challenge you faced recently at work",
+            SILENCE_CONFIRM_MS,
+        );
+        reset_live_question_state(&mut buf, &mut detector);
+        assert!(buf.is_empty());
+        assert!(detector.last_checked_snapshot.is_empty());
+        assert!(detector.candidate.is_none());
+    }
+
+    #[test]
+    fn uncertain_speaker_blocks_until_confirmed() {
+        let mut buf = SystemTranscriptBuffer::default();
+        buf.append_chunk("what team is this role on", Some("c1".into()), "channel");
+        assert!(buf.has_uncertain_speaker());
+        buf.confirm_chunk("c1", "classifier");
+        assert!(!buf.has_uncertain_speaker());
     }
 
     #[test]

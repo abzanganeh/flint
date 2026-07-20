@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { copyTextToClipboard, relabelTranscriptChunk, triggerResponse } from "../commands";
+import { copyTextToClipboard, relabelTranscriptChunk, signalQuestionEnded, triggerResponse } from "../commands";
 import { onSpeakerRefined, onTranscriptChunkRelabeled } from "../events";
 import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
 import { PANEL_ACCENTS } from "../lib/panelColors";
@@ -150,6 +150,7 @@ export function applyChunkRelabel(
 
 // Keep async dispatch testable without awaiting an internal click handler.
 export const __triggerResponseImpl = { fn: triggerResponse };
+export const __signalQuestionEndedImpl = { fn: signalQuestionEnded };
 export const __relabelImpl = { fn: relabelTranscriptChunk };
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -236,7 +237,7 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
   }, []);
 
   const handleAsk = useCallback(
-    async (key: string, utterance: string) => {
+    async (key: string, utterance: string, useBackendBuffer: boolean) => {
       const text = utterance.trim();
       if (text.length === 0) return;
 
@@ -251,7 +252,11 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
       }, Q_ASKING_LATCH_MS);
 
       try {
-        await __triggerResponseImpl.fn(text, sessionId);
+        if (useBackendBuffer) {
+          await __signalQuestionEndedImpl.fn(sessionId);
+        } else {
+          await __triggerResponseImpl.fn(text, sessionId);
+        }
       } catch (e: unknown) {
         setAskError(String(e));
         setAskingKey((current) => (current === key ? null : current));
@@ -455,6 +460,15 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
             onAsk={handleAsk}
             onSwap={handleSwapSpeaker}
             swapping={swappingLineId === line.id}
+            useBackendBuffer={
+              line.speaker === "System" &&
+              !isAudioGap(line.text) &&
+              line.id ===
+                [...lines]
+                  .reverse()
+                  .find((entry) => entry.speaker === "System" && !isAudioGap(entry.text))
+                  ?.id
+            }
           />
         ))}
         <div ref={bottomRef} />
@@ -468,9 +482,10 @@ const TranscriptPanel = ({ sessionId }: TranscriptPanelProps) => {
 interface TranscriptLineRowProps {
   line: TranscriptLine;
   askingKey: string | null;
-  onAsk: (key: string, utterance: string) => void;
+  onAsk: (key: string, utterance: string, useBackendBuffer: boolean) => void;
   onSwap: (line: TranscriptLine) => void;
   swapping: boolean;
+  useBackendBuffer: boolean;
 }
 
 const TranscriptLineRow = ({
@@ -479,6 +494,7 @@ const TranscriptLineRow = ({
   onAsk,
   onSwap,
   swapping,
+  useBackendBuffer,
 }: TranscriptLineRowProps) => {
   if (isAudioGap(line.text)) {
     return <AudioGapRow text={line.text} />;
@@ -549,7 +565,7 @@ const TranscriptLineRow = ({
             type="button"
             data-testid="q-chip"
             data-status={status}
-            onClick={() => onAsk(key, utterance)}
+            onClick={() => onAsk(key, utterance, useBackendBuffer)}
             disabled={status === "asking"}
             title={
               status === "asking"

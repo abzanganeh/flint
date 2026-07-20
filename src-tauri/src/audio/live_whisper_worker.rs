@@ -4,6 +4,7 @@
 //! running while Whisper decodes prior segments. Jobs are processed FIFO on an
 //! unbounded queue — chunks are never dropped under backlog.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -40,6 +41,8 @@ pub enum LiveWhisperOutcome {
 pub struct LiveWhisperWorker {
     job_tx: mpsc::UnboundedSender<LiveWhisperJob>,
     task: JoinHandle<()>,
+    /// Jobs enqueued but not yet returned on the result channel.
+    pending: Arc<AtomicUsize>,
 }
 
 impl LiveWhisperWorker {
@@ -51,14 +54,32 @@ impl LiveWhisperWorker {
     ) {
         let (job_tx, job_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = mpsc::unbounded_channel();
-        let task = tokio::spawn(worker_loop(whisper, job_rx, result_tx));
-        (Self { job_tx, task }, result_rx)
+        let pending = Arc::new(AtomicUsize::new(0));
+        let pending_worker = Arc::clone(&pending);
+        let task = tokio::spawn(worker_loop(whisper, job_rx, result_tx, pending_worker));
+        (
+            Self {
+                job_tx,
+                task,
+                pending,
+            },
+            result_rx,
+        )
     }
 
     pub fn enqueue(&self, job: LiveWhisperJob) {
         if self.job_tx.send(job).is_err() {
             warn!("live whisper worker channel closed — dropping chunk");
+        } else {
+            self.pending.fetch_add(1, Ordering::Release);
         }
+    }
+
+    /// Number of VAD chunks waiting on or inside Whisper decode. Silence-based
+    /// question confirmation must wait until this reaches zero so Ctrl+Q and
+    /// auto-detect see the full interviewer utterance, not a partial fragment.
+    pub fn pending_jobs(&self) -> usize {
+        self.pending.load(Ordering::Acquire)
     }
 
     pub async fn shutdown(self) -> Result<()> {
@@ -73,6 +94,7 @@ async fn worker_loop(
     whisper: Arc<WhisperEngine>,
     mut job_rx: mpsc::UnboundedReceiver<LiveWhisperJob>,
     result_tx: mpsc::UnboundedSender<(LiveWhisperJobMeta, LiveWhisperOutcome)>,
+    pending: Arc<AtomicUsize>,
 ) {
     while let Some(job) = job_rx.recv().await {
         let LiveWhisperJob {
@@ -99,6 +121,7 @@ async fn worker_loop(
             }
         };
 
+        pending.fetch_sub(1, Ordering::Release);
         if result_tx.send((meta, outcome)).is_err() {
             break;
         }
