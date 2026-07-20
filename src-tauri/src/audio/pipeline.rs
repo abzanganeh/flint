@@ -398,33 +398,31 @@ pub async fn run_audio_pipeline(
     let (whisper_worker, mut whisper_results) =
         LiveWhisperWorker::start(Arc::clone(&whisper), Arc::clone(&whisper_pending));
 
-    let dispatch_whisper_result = |meta: LiveWhisperJobMeta, outcome: LiveWhisperOutcome| {
-        async {
-            let result = handle_transcription_result(
-                meta,
-                outcome,
-                &app_handle,
-                session_id,
-                &hybrid,
-                &system_buffer,
-                &system_buffer_epoch,
-                &question_tx,
-                &persistence,
-                &dedup,
-                &near_duplicate,
-                &phone_heuristic,
-                &mic_quality,
-                &audit,
-                echo_suppression_enabled,
-                phone_mode_manual_only,
-                &diarizer,
-                &rolling_contexts,
-                &speaker_classifier,
-            )
-            .await;
-            whisper_pending.fetch_sub(1, Ordering::Release);
-            result
-        }
+    let dispatch_whisper_result = |meta: LiveWhisperJobMeta, outcome: LiveWhisperOutcome| async {
+        let result = handle_transcription_result(
+            meta,
+            outcome,
+            &app_handle,
+            session_id,
+            &hybrid,
+            &system_buffer,
+            &system_buffer_epoch,
+            &question_tx,
+            &persistence,
+            &dedup,
+            &near_duplicate,
+            &phone_heuristic,
+            &mic_quality,
+            &audit,
+            echo_suppression_enabled,
+            phone_mode_manual_only,
+            &diarizer,
+            &rolling_contexts,
+            &speaker_classifier,
+        )
+        .await;
+        whisper_pending.fetch_sub(1, Ordering::Release);
+        result
     };
 
     loop {

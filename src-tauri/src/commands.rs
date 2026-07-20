@@ -3769,9 +3769,7 @@ pub async fn commit_live_preview(
 
     // Preview/test speech must not pollute the first live Ctrl+Q span or
     // auto-detect after commit (DAT-style rehearsal → real call handoff).
-    preview
-        .system_buffer_epoch
-        .fetch_add(1, Ordering::Release);
+    preview.system_buffer_epoch.fetch_add(1, Ordering::Release);
     if let Ok(mut buf) = preview.system_transcript_buffer.lock() {
         buf.clear();
     }
