@@ -72,6 +72,11 @@ const MAX_SILENCE_FRAMES: u32 = MAX_SILENCE_GAP_MS / FRAME_MS; // = 30
 /// The value is a compromise: long enough that a single complete answer fits in
 /// one chunk most of the time, short enough that Whisper latency stays under
 /// ~3 seconds on Tier-1 hardware.
+/// Mock answers benefit from smaller chunks so Whisper decode keeps pace with
+/// speech and the UI updates before the user finishes a long utterance.
+pub const MOCK_MAX_CHUNK_DURATION_MS: u32 = 8_000;
+const MOCK_MAX_CHUNK_FRAMES: u32 = MOCK_MAX_CHUNK_DURATION_MS / FRAME_MS;
+
 const MAX_CHUNK_DURATION_MS: u32 = 30_000;
 const MAX_CHUNK_FRAMES: u32 = MAX_CHUNK_DURATION_MS / FRAME_MS; // = 1500
 
@@ -144,6 +149,8 @@ pub struct VadChunker {
     pre_roll: VecDeque<Vec<f32>>,
     /// Timestamp of the most recent speech-classified frame.
     last_speech_at: Option<Instant>,
+    /// Force mid-utterance flush after this many speech frames (mock uses smaller value).
+    max_chunk_frames: u32,
 }
 
 // `webrtc_vad::Vad` wraps a C pointer from bindgen, so it is not `Send` by
@@ -155,10 +162,16 @@ impl VadChunker {
     /// Create a VadChunker with exact §26 parameters.
     pub fn new() -> Result<Self> {
         let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
-        Ok(Self::with_vad(vad))
+        Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES))
     }
 
-    fn with_vad(vad: Vad) -> Self {
+    /// Mock interview capture — same VAD thresholds, smaller max chunk for streaming STT.
+    pub fn new_for_mock() -> Result<Self> {
+        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
+        Ok(Self::with_vad(vad, MOCK_MAX_CHUNK_FRAMES))
+    }
+
+    fn with_vad(vad: Vad, max_chunk_frames: u32) -> Self {
         Self {
             vad,
             state: State::Idle,
@@ -170,6 +183,7 @@ impl VadChunker {
             current_source: AudioSource::System,
             pre_roll: VecDeque::new(),
             last_speech_at: None,
+            max_chunk_frames,
         }
     }
 
@@ -201,10 +215,9 @@ impl VadChunker {
         self.speech_buf = padded;
     }
 
-    fn append_post_padding(&mut self) {
+    fn append_post_padding_to(buf: &mut Vec<f32>) {
         let pad_samples = (PRE_POST_PADDING_MS as usize * VAD_SAMPLE_RATE as usize) / 1000;
-        self.speech_buf
-            .extend(std::iter::repeat_n(0.0f32, pad_samples));
+        buf.extend(std::iter::repeat_n(0.0f32, pad_samples));
     }
 
     /// Process one frame of 16kHz PCM mono audio.
@@ -257,7 +270,7 @@ impl VadChunker {
                     // Force-flush when the segment reaches the maximum chunk
                     // duration. Speech is still active so we stay in Collecting
                     // and start a fresh buffer immediately — no transition to Idle.
-                    if self.speech_frames >= MAX_CHUNK_FRAMES {
+                    if self.speech_frames >= self.max_chunk_frames {
                         return self.flush_and_continue();
                     }
 
@@ -310,7 +323,7 @@ impl VadChunker {
     /// Emits a `VadChunk` if the segment meets `MIN_SPEECH_MS`; silently
     /// discards it otherwise (noise artefact).  Always resets to `Idle`.
     fn finalise_segment(&mut self) -> Option<VadChunk> {
-        let speech_buf = std::mem::take(&mut self.speech_buf);
+        let mut speech_buf = std::mem::take(&mut self.speech_buf);
         let speech_frames = self.speech_frames;
         let source = self.current_source;
 
@@ -320,10 +333,10 @@ impl VadChunker {
         self.state = State::Idle;
 
         if speech_frames < MIN_SPEECH_FRAMES {
-            return None; // below minimum speech duration — noise artefact
+            return None;
         }
 
-        self.append_post_padding();
+        Self::append_post_padding_to(&mut speech_buf);
         let duration_ms = (speech_buf.len() as u32 * 1000) / VAD_SAMPLE_RATE;
         Some(VadChunk {
             samples: speech_buf,
@@ -339,22 +352,21 @@ impl VadChunker {
     /// returned chunk to Whisper; the next frame continues filling a fresh
     /// buffer in the `Collecting` state so there is no audio gap.
     fn flush_and_continue(&mut self) -> Option<VadChunk> {
-        let speech_buf = std::mem::take(&mut self.speech_buf);
+        let mut speech_buf = std::mem::take(&mut self.speech_buf);
         let speech_frames = self.speech_frames;
         let source = self.current_source;
 
-        // Reset counters but stay in Collecting — speech is still live.
         self.speech_frames = 0;
 
         if speech_frames < MIN_SPEECH_FRAMES {
             return None;
         }
 
-        self.append_post_padding();
+        Self::append_post_padding_to(&mut speech_buf);
         let duration_ms = (speech_buf.len() as u32 * 1000) / VAD_SAMPLE_RATE;
         tracing::debug!(
             duration_ms,
-            max_chunk_frames = MAX_CHUNK_FRAMES,
+            max_chunk_frames = self.max_chunk_frames,
             "VAD max-chunk flush — splitting long utterance"
         );
         Some(VadChunk {
@@ -471,7 +483,7 @@ mod tests {
         /// All timing parameters match production `new()` exactly.
         fn new_for_testing() -> Result<Self> {
             let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Quality);
-            Ok(Self::with_vad(vad))
+            Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES))
         }
     }
 
@@ -694,5 +706,32 @@ mod tests {
         for chunk in &chunks {
             assert_eq!(chunk.source, AudioSource::Microphone);
         }
+    }
+
+    /// Post-padding must be appended to the emitted chunk, not the next segment buffer.
+    #[test]
+    fn post_padding_applied_to_emitted_chunk_not_next_segment() {
+        let mut chunker = VadChunker::new_for_testing().unwrap();
+        let speech: Vec<Vec<f32>> = (0..SPEECH_FRAMES_200MS).map(speech_frame).collect();
+        let mut chunks = Vec::new();
+        run_frames(&mut chunker, &speech, AudioSource::Microphone, &mut chunks);
+        let silence: Vec<Vec<f32>> = (0..SILENCE_FRAMES_700MS).map(|_| silence_frame()).collect();
+        run_frames(&mut chunker, &silence, AudioSource::Microphone, &mut chunks);
+
+        let chunk = chunks
+            .into_iter()
+            .next()
+            .expect("expected one finalised chunk");
+        let pad_samples = (PRE_POST_PADDING_MS as usize * VAD_SAMPLE_RATE as usize) / 1000;
+        assert!(
+            chunk.samples.len() >= pad_samples,
+            "chunk should include trailing post-padding samples"
+        );
+        assert!(
+            chunk.samples[chunk.samples.len() - pad_samples..]
+                .iter()
+                .all(|&s| s == 0.0),
+            "post-padding region must be zero samples"
+        );
     }
 }

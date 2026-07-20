@@ -197,10 +197,15 @@ const MockInterview = ({ sessionId: _sessionId, onComplete, onAbort }: MockInter
           }
         }),
         onMockUserTranscribed((p) => {
-          setTurn((t) => ({
-            ...t,
-            userTranscript: t.userTranscript + (t.userTranscript ? " " : "") + p.text,
-          }));
+          setTurn((t) => {
+            if (p.turn_n !== t.turnN) return t;
+            const next =
+              p.full_transcript?.trim() ||
+              (t.userTranscript
+                ? `${t.userTranscript} ${p.text}`.trim()
+                : p.text);
+            return { ...t, userTranscript: next };
+          });
         }),
         onMockSuggestedToken((p) => {
           setTurn((t) => ({

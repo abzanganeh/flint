@@ -27,7 +27,7 @@ use crate::audio::capture::{
     build_resampled_mono_stream, find_mock_mic_device, AudioSource, FRAME_SAMPLES,
 };
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
-use crate::audio::vad::VadChunker;
+use crate::audio::vad::{VadChunker, WHISPER_MIN_SEGMENT_MS};
 use crate::events::{emit_mock_turn_phase, MockTurnPhasePayload};
 use crate::transcription::engine::WhisperEngine;
 
@@ -308,7 +308,7 @@ async fn capture_loop<R: Runtime>(
             return;
         }
     };
-    let mut vad = match VadChunker::new() {
+    let mut vad = match VadChunker::new_for_mock() {
         Ok(v) => v,
         Err(e) => {
             error!(error = %e, "failed to init VAD for mock capture");
@@ -444,8 +444,9 @@ async fn capture_loop<R: Runtime>(
                                         .await;
                                 }
 
-                                let transcript =
-                                    worker_ref.flush(epoch, WHISPER_FLUSH_TIMEOUT).await;
+                                let transcript = worker_ref
+                                    .flush(epoch, turn_n, WHISPER_FLUSH_TIMEOUT)
+                                    .await;
                                 let writer = audio_writer.take();
                                 let path = writer
                                     .map(|w| w.finish().unwrap_or_default())
@@ -558,7 +559,7 @@ async fn begin_listening<R: Runtime>(
     if let Ok(d) = Downsampler::new() {
         *downsampler = d;
     }
-    if let Ok(v) = VadChunker::new() {
+    if let Ok(v) = VadChunker::new_for_mock() {
         *vad = v;
     }
 
@@ -602,7 +603,7 @@ async fn abort_active_turn<R: Runtime>(
 
     audio_writer.take();
     speech_tracker.reset();
-    if let Ok(v) = VadChunker::new() {
+    if let Ok(v) = VadChunker::new_for_mock() {
         *vad = v;
     }
 
@@ -735,7 +736,9 @@ fn process_mock_frame<R: Runtime>(
 
         if mock_phase.captures_speech() {
             if let Some(vad_chunk) = chunk {
-                worker.try_transcribe(epoch, turn_n, vad_chunk);
+                if vad_chunk.duration_ms >= WHISPER_MIN_SEGMENT_MS {
+                    worker.enqueue_transcribe(epoch, turn_n, vad_chunk);
+                }
             }
 
             if *mock_phase == MockMicPhase::Answering
@@ -814,7 +817,7 @@ mod tests {
             "EndTurn must flush trailing VAD segment"
         );
         assert!(
-            body.contains("worker_ref.flush"),
+            body.contains(".flush("),
             "EndTurn must barrier-flush whisper worker"
         );
         assert!(
@@ -839,7 +842,7 @@ mod tests {
             "process_mock_frame must stay synchronous"
         );
         assert!(
-            body.contains("try_transcribe"),
+            body.contains("enqueue_transcribe"),
             "process_mock_frame must enqueue STT without blocking"
         );
     }

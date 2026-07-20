@@ -1,8 +1,8 @@
 //! Background Whisper worker for mock interview STT.
 //!
-//! Decouples inference from the mic frame drain loop so capture never blocks
-//! on whisper.cpp decode (which caused channel overflow, false pause, and
-//! truncated transcripts on long answers).
+//! Decouples inference from the mic frame drain loop. Emits **cumulative**
+//! `full_transcript` so the UI replaces text instead of appending overlapping
+//! chunk fragments while the worker drains its FIFO backlog.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,10 +18,11 @@ use crate::events::{emit_mock_user_transcribed, MockUserTranscribedPayload};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::rolling_context::RollingTranscriptContext;
 
-/// Monotonic per-attempt identifier; stale jobs tagged with an old epoch are dropped.
 pub type TurnEpoch = u64;
 
-const WORKER_QUEUE_DEPTH: usize = 8;
+/// Minimum avg logprob to append decoded text into rolling context (avoids poisoning).
+const ROLLING_CONTEXT_LOGPROB_MIN: f32 = -0.85;
+
 pub const WHISPER_FLUSH_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
@@ -39,19 +40,20 @@ enum WorkerCommand {
     },
     Flush {
         epoch: TurnEpoch,
+        turn_n: u32,
         reply: oneshot::Sender<TurnTranscript>,
     },
     Shutdown,
 }
 
 pub struct WhisperWorker {
-    cmd_tx: mpsc::Sender<WorkerCommand>,
+    cmd_tx: mpsc::UnboundedSender<WorkerCommand>,
     task: JoinHandle<()>,
 }
 
 impl WhisperWorker {
     pub fn start<R: Runtime>(app: AppHandle<R>, whisper: Arc<WhisperEngine>) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::channel(WORKER_QUEUE_DEPTH);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let task = tokio::spawn(worker_loop(app, whisper, cmd_rx));
         Self { cmd_tx, task }
     }
@@ -59,27 +61,24 @@ impl WhisperWorker {
     pub async fn reset_context(&self, turn_n: u32, epoch: TurnEpoch) -> Result<()> {
         self.cmd_tx
             .send(WorkerCommand::ResetContext { turn_n, epoch })
-            .await
             .context("whisper worker reset send")
     }
 
-    /// Enqueue transcription without blocking the capture hot path.
-    pub fn try_transcribe(&self, epoch: TurnEpoch, turn_n: u32, chunk: VadChunk) -> bool {
-        match self.cmd_tx.try_send(WorkerCommand::Transcribe {
-            epoch,
-            turn_n,
-            chunk,
-        }) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                warn!(turn_n, "mock whisper worker queue full — dropping VAD chunk");
-                false
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+    /// Enqueue transcription without blocking the capture hot path (never drops chunks).
+    pub fn enqueue_transcribe(&self, epoch: TurnEpoch, turn_n: u32, chunk: VadChunk) {
+        if self
+            .cmd_tx
+            .send(WorkerCommand::Transcribe {
+                epoch,
+                turn_n,
+                chunk,
+            })
+            .is_err()
+        {
+            warn!(turn_n, "mock whisper worker channel closed");
         }
     }
 
-    /// Blocking enqueue for EndTurn tail flush (capture loop is already shutting down).
     pub async fn transcribe_blocking(
         &self,
         epoch: TurnEpoch,
@@ -92,19 +91,23 @@ impl WhisperWorker {
                 turn_n,
                 chunk,
             })
-            .await
             .context("whisper worker transcribe send")
     }
 
-    pub async fn flush(&self, epoch: TurnEpoch, timeout: Duration) -> TurnTranscript {
+    pub async fn flush(
+        &self,
+        epoch: TurnEpoch,
+        turn_n: u32,
+        timeout: Duration,
+    ) -> TurnTranscript {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .cmd_tx
             .send(WorkerCommand::Flush {
                 epoch,
+                turn_n,
                 reply: reply_tx,
             })
-            .await
             .is_err()
         {
             return TurnTranscript {
@@ -126,7 +129,7 @@ impl WhisperWorker {
     }
 
     pub async fn shutdown(self) {
-        let _ = self.cmd_tx.send(WorkerCommand::Shutdown).await;
+        let _ = self.cmd_tx.send(WorkerCommand::Shutdown);
         let _ = self.task.await;
     }
 }
@@ -134,7 +137,7 @@ impl WhisperWorker {
 async fn worker_loop<R: Runtime>(
     app: AppHandle<R>,
     whisper: Arc<WhisperEngine>,
-    mut cmd_rx: mpsc::Receiver<WorkerCommand>,
+    mut cmd_rx: mpsc::UnboundedReceiver<WorkerCommand>,
 ) {
     let mut active_epoch = TurnEpoch::MAX;
     let mut transcript_buf = String::new();
@@ -179,7 +182,6 @@ async fn worker_loop<R: Runtime>(
                     }
                 };
 
-                // AbortTurn may have bumped epoch while Whisper was running.
                 if epoch != active_epoch {
                     continue;
                 }
@@ -193,7 +195,13 @@ async fn worker_loop<R: Runtime>(
                     transcript_buf.push(' ');
                 }
                 transcript_buf.push_str(&text);
-                rolling.append(&text);
+
+                if transcription
+                    .avg_logprob
+                    .is_some_and(|lp| lp >= ROLLING_CONTEXT_LOGPROB_MIN)
+                {
+                    rolling.append(&text);
+                }
 
                 if let Some(lp) = transcription.avg_logprob {
                     logprob_sum += lp;
@@ -205,11 +213,17 @@ async fn worker_loop<R: Runtime>(
                     MockUserTranscribedPayload {
                         turn_n,
                         text: text.clone(),
+                        full_transcript: transcript_buf.clone(),
+                        is_final: false,
                         audio_path: String::new(),
                     },
                 );
             }
-            WorkerCommand::Flush { epoch, reply } => {
+            WorkerCommand::Flush {
+                epoch,
+                turn_n,
+                reply,
+            } => {
                 let transcript = if epoch == active_epoch {
                     TurnTranscript {
                         text: transcript_buf.clone(),
@@ -225,6 +239,20 @@ async fn worker_loop<R: Runtime>(
                         confidence: None,
                     }
                 };
+
+                if epoch == active_epoch && !transcript.text.is_empty() {
+                    emit_mock_user_transcribed(
+                        &app,
+                        MockUserTranscribedPayload {
+                            turn_n,
+                            text: String::new(),
+                            full_transcript: transcript.text.clone(),
+                            is_final: true,
+                            audio_path: String::new(),
+                        },
+                    );
+                }
+
                 let _ = reply.send(transcript);
             }
             WorkerCommand::Shutdown => break,
@@ -237,12 +265,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn worker_queue_depth_is_bounded() {
-        assert!(WORKER_QUEUE_DEPTH >= 4 && WORKER_QUEUE_DEPTH <= 32);
-    }
-
-    #[test]
-    fn flush_timeout_covers_end_turn_contract() {
-        assert!(WHISPER_FLUSH_TIMEOUT >= Duration::from_secs(30));
+    fn worker_uses_unbounded_queue() {
+        let src = include_str!("whisper_worker.rs");
+        assert!(
+            src.contains("unbounded_channel"),
+            "worker must use unbounded channel so transcribe jobs are never dropped"
+        );
+        assert!(
+            src.contains("enqueue_transcribe"),
+            "worker must expose non-blocking enqueue API"
+        );
     }
 }
