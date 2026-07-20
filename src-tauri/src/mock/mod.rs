@@ -18,3 +18,4 @@ pub mod rag;
 pub mod transcript;
 pub mod tts;
 pub mod turn_phase;
+pub mod whisper_worker;

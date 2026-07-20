@@ -13,7 +13,7 @@
 //!
 //! ## Silence debounce
 //!
-//! After a `DetectedQuestion` arrives the orchestrator waits 600ms (task 4.10).
+//! After a `DetectedQuestion` arrives the orchestrator waits 1500ms (task 4.10).
 //! If a new question arrives within that window the timer resets and the older
 //! question is discarded. This prevents double-firing on split utterances.
 
@@ -60,7 +60,7 @@ use crate::state::TurnCancelFlag;
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Wait this long after the last detected question before firing threads.
-const SILENCE_DEBOUNCE: Duration = Duration::from_millis(600);
+const SILENCE_DEBOUNCE: Duration = Duration::from_millis(1500);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Shared context passed to each thread
@@ -382,8 +382,8 @@ fn is_valid_question_source(source: crate::audio::pipeline::DetectedQuestionSour
 }
 
 /// Drain the channel for `window` duration, returning the last question seen.
-/// This implements the 600ms silence debounce — if the speaker adds more words
-/// within the window the stale partial question is discarded.
+/// If the speaker adds more words within the window the stale partial question
+/// is discarded in favour of the merged follow-up.
 async fn debounce(
     rx: &mut mpsc::Receiver<DetectedQuestion>,
     first: DetectedQuestion,

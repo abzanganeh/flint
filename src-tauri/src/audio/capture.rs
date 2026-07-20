@@ -591,11 +591,15 @@ pub(crate) fn find_mic_device(host: &cpal::Host) -> Result<Device> {
 
 /// Mic device for mock interview capture on Linux.
 ///
-/// Routes ALSA through the PipeWire/Pulse plugin (`pipewire` / `pulse` /
-/// `default`) so the physical USB mic stays available to browser clients
-/// (xdg-desktop-portal) while Flint records between `start_mock_turn` and
-/// `end_mock_turn`. Falls back to [`find_mic_device`] on other platforms or
-/// when no shareable ALSA plugin is listed.
+/// Sets `PULSE_SOURCE` to the desktop default input, then opens cpal's
+/// `default_input_device()` so capture goes through PipeWire without grabbing
+/// a raw `hw:` node (keeps xdg-desktop-portal mic sharing working between
+/// turns). Falls back to [`find_mic_device`] on other platforms or when
+/// `FLINT_MIC_SOURCE` is set.
+///
+/// Intentionally does **not** call `Host::input_devices()`: full ALSA plugin
+/// probing (dsnoop/jack/oss/dmix) can SIGFPE and kill the Tauri process on
+/// some Linux hosts — the same failure #43 removed from Health Check.
 pub(crate) fn find_mock_mic_device(host: &cpal::Host) -> Result<Device> {
     #[cfg(target_os = "linux")]
     {
@@ -746,24 +750,21 @@ fn echo_cancel_module_loaded_for_probe() -> bool {
             .any(|line| line.contains("module-echo-cancel"))
 }
 
-/// Prefer ALSA plugin devices that multiplex through PipeWire instead of raw
-/// `hw:` nodes that can block xdg-desktop-portal enumeration.
+/// Prefer the host default input after [`configure_pipewire_default_mic_source`].
+///
+/// Previously this scanned `host.input_devices()` for names `pipewire` /
+/// `pulse` / `default`. That enumeration probes every ALSA plugin and can
+/// SIGFPE (see Health Check comment in `check_system_audio_isolation`). With
+/// `PULSE_SOURCE` set, the default device already routes through PipeWire and
+/// remains shareable with portal clients.
 #[cfg(target_os = "linux")]
 fn find_shareable_alsa_input(host: &cpal::Host) -> Option<Device> {
-    let devs: Vec<Device> = host.input_devices().ok()?.collect();
-    for target in ["pipewire", "pulse", "default"] {
-        for dev in &devs {
-            let name = dev.name().unwrap_or_default().to_lowercase();
-            if name == target {
-                tracing::info!(
-                    device = %dev.name().unwrap_or_default(),
-                    "mock mic: using shareable PipeWire ALSA device"
-                );
-                return Some(dev.clone());
-            }
-        }
-    }
-    None
+    let dev = host.default_input_device()?;
+    info!(
+        device = %dev.name().unwrap_or_default(),
+        "mock mic: using default input (skip ALSA enumeration)"
+    );
+    Some(dev)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1150,6 +1151,27 @@ mod tests {
             body.matches("build_input_stream").count(),
             1,
             "phone mode must open exactly one cpal stream"
+        );
+    }
+
+    #[test]
+    fn mock_shareable_alsa_path_avoids_input_devices_enumeration() {
+        let src = include_str!("capture.rs");
+        let start = src
+            .find("fn find_shareable_alsa_input(host: &cpal::Host)")
+            .expect("find_shareable_alsa_input");
+        let end = src[start..]
+            .find("fn find_echo_cancel_device")
+            .map(|i| start + i)
+            .expect("find_echo_cancel_device after find_shareable_alsa_input");
+        let body = &src[start..end];
+        assert!(
+            !body.contains("input_devices()"),
+            "find_shareable_alsa_input must not enumerate ALSA plugins (SIGFPE risk)"
+        );
+        assert!(
+            body.contains("default_input_device()"),
+            "find_shareable_alsa_input should use default_input_device"
         );
     }
 

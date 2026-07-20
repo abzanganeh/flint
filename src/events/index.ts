@@ -336,7 +336,12 @@ export interface MockTurnPhaseEventPayload {
 
 export interface MockUserTranscribedEventPayload {
   turn_n: number;
+  /** Latest chunk text (debug); prefer full_transcript for display. */
   text: string;
+  /** Cumulative turn transcript — replace UI text with this. */
+  full_transcript: string;
+  /** True after EndTurn flush; no further live updates expected. */
+  is_final: boolean;
   audio_path: string;
 }
 

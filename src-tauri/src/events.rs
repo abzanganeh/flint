@@ -288,7 +288,12 @@ pub struct MockQuestionSpokenPayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct MockUserTranscribedPayload {
     pub turn_n: u32,
+    /// Text decoded from the latest VAD chunk (legacy / debugging).
     pub text: String,
+    /// Cumulative transcript for the turn so far — UI should display this.
+    pub full_transcript: String,
+    /// True on the authoritative flush after EndTurn; UI stops "live" updates.
+    pub is_final: bool,
     /// Absolute local path to the WAV file, or empty string if audio was not saved.
     pub audio_path: String,
 }
