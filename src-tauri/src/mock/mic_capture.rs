@@ -1,16 +1,8 @@
 //! Mic-only audio capture for mock interview answer recording.
 //!
-//! This is a lighter version of `audio/pipeline.rs` — it captures only the
-//! microphone (no system loopback), runs RNNoise + VAD + Whisper, and emits
-//! `MockUserTranscribed` events.  Audio samples are forwarded to the
-//! `TurnAudioWriter` so each answer is persisted as a WAV file.
-//!
-//! Lifecycle:
-//!   1. `MicCapture::start()` — spawns the async capture loop (no device open).
-//!   2. `MicCapture::start_turn()` — opens the cpal stream for one turn only.
-//!   3. Each VAD chunk that passes Whisper yields a `mock_user_transcribed` event.
-//!   4. `MicCapture::end_turn()` — drains frames, closes the stream, returns transcript.
-//!   5. `MicCapture::shutdown()` — tears down the capture loop.
+//! Capture (cpal → RNNoise → VAD) runs on a dedicated async loop that never
+//! awaits Whisper. Transcription is delegated to [`WhisperWorker`] so long
+//! answers cannot block frame drain or falsely trigger turn-level pause.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,13 +10,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Drop the first ~300 ms of mic frames after a Listening phase begins.
-///
-/// TTS playback ends just before the mic stream opens, but on Linux the speaker
-/// driver still has ~150-300 ms of decay buffered. RNNoise + Whisper would
-/// transcribe that tail as "user speech" and contaminate the answer transcript.
-/// The quiet window guarantees the first frames Whisper sees are real silence
-/// (or the genuine start of the user's reply).
 const POST_TTS_QUIET_MS: u64 = 300;
+
+/// Match live pipeline buffer depth (~10s) so brief Whisper backlog does not drop frames.
+const MOCK_FRAME_CHANNEL_DEPTH: usize = 1024;
 
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, StreamTrait};
@@ -38,53 +27,47 @@ use crate::audio::capture::{
     build_resampled_mono_stream, find_mock_mic_device, AudioSource, FRAME_SAMPLES,
 };
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
-use crate::audio::vad::{VadChunk, VadChunker};
-use crate::events::{
-    emit_mock_turn_phase, emit_mock_user_transcribed, MockTurnPhasePayload,
-    MockUserTranscribedPayload,
-};
+use crate::audio::vad::VadChunker;
+use crate::events::{emit_mock_turn_phase, MockTurnPhasePayload};
 use crate::transcription::engine::WhisperEngine;
-use crate::transcription::rolling_context::RollingTranscriptContext;
 
 use super::audio_writer::TurnAudioWriter;
 use super::turn_phase::{MockMicPhase, TurnSpeechTracker};
+use super::whisper_worker::{TurnEpoch, WhisperWorker, WHISPER_FLUSH_TIMEOUT};
 
 // ── Message types ─────────────────────────────────────────────────────────────
 
-/// Commands sent from commands.rs into the capture loop.
 pub enum MicCommand {
-    /// Open mic and wait for the user to start speaking (no REC/STT yet).
     StartListening {
         turn_n: u32,
         reply: oneshot::Sender<Result<()>>,
     },
-    /// Legacy alias — opens mic directly into answering (tests only).
     StartTurn {
         turn_n: u32,
         reply: oneshot::Sender<Result<()>>,
     },
-    /// Stop recording, flush audio, return transcript + WAV path + STT confidence via channel.
     EndTurn {
         reply: oneshot::Sender<(String, String, Option<f32>)>,
     },
-    /// Discard partial answer and return to listening for the same turn (M12).
-    AbortTurn { reply: oneshot::Sender<Result<()>> },
-    /// Shut down the capture task entirely.
+    AbortTurn {
+        reply: oneshot::Sender<Result<()>>,
+    },
     Shutdown,
 }
 
-/// Commands sent from the capture loop into the cpal OS thread.
 #[derive(Debug)]
 enum CpalControl {
-    Open { reply: oneshot::Sender<Result<()>> },
-    Close { reply: oneshot::Sender<()> },
+    Open {
+        reply: oneshot::Sender<Result<()>>,
+    },
+    Close {
+        reply: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
 // ── Public handle ─────────────────────────────────────────────────────────────
 
-/// Handle returned by `MicCapture::start()`.  Call [`MicCapture::shutdown`] to
-/// release resources when the mock session ends.
 pub struct MicCapture {
     cmd_tx: mpsc::Sender<MicCommand>,
     listen_tx: mpsc::Sender<u32>,
@@ -93,15 +76,10 @@ pub struct MicCapture {
 }
 
 impl MicCapture {
-    /// Clone of the channel the conductor uses to begin listening after TTS.
     pub fn listen_trigger(&self) -> mpsc::Sender<u32> {
         self.listen_tx.clone()
     }
 
-    /// Start the mic capture background task without opening the OS audio device.
-    ///
-    /// Must be called from within the tokio runtime (i.e. from an async fn).
-    /// The cpal stream is opened when listening begins for a turn.
     pub async fn start<R: Runtime>(
         app: AppHandle<R>,
         session_id: Uuid,
@@ -109,7 +87,7 @@ impl MicCapture {
         whisper: Arc<WhisperEngine>,
         mic_recording: Arc<AtomicBool>,
     ) -> Result<Self> {
-        let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>(512);
+        let (frame_tx, frame_rx) = mpsc::channel::<Vec<f32>>(MOCK_FRAME_CHANNEL_DEPTH);
         let (cmd_tx, cmd_rx) = mpsc::channel::<MicCommand>(16);
         let (listen_tx, listen_rx) = mpsc::channel::<u32>(8);
         let (cpal_tx, cpal_rx) = std::sync::mpsc::channel::<CpalControl>();
@@ -120,12 +98,13 @@ impl MicCapture {
             }
         });
 
+        let worker = WhisperWorker::start(app.clone(), whisper);
         let cpal_tx_for_loop = cpal_tx.clone();
         let task = tokio::spawn(capture_loop(
             app,
             session_id,
             audio_dir,
-            whisper,
+            Some(worker),
             frame_rx,
             cmd_rx,
             listen_rx,
@@ -141,7 +120,6 @@ impl MicCapture {
         })
     }
 
-    /// Open mic in listen mode for `turn_n` (no REC until speech is detected).
     pub async fn start_listening(&self, turn_n: u32) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
@@ -156,7 +134,6 @@ impl MicCapture {
             .context("StartListening reply channel closed")?
     }
 
-    /// Begin recording the user's answer for `turn_n` (legacy — auto flow uses listening).
     pub async fn start_turn(&self, turn_n: u32) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
@@ -169,16 +146,11 @@ impl MicCapture {
         reply_rx.await.context("StartTurn reply channel closed")?
     }
 
-    /// Stop recording and await the transcript + audio path + confidence for the turn.
     pub async fn end_turn(&self, timeout: Duration) -> Result<(String, String, Option<f32>)> {
         let reply_rx = self.send_end_turn().await?;
         await_end_turn_reply(reply_rx, timeout).await
     }
 
-    /// Send the `EndTurn` command and return the reply receiver without
-    /// awaiting it. Callers that hold a session-wide mutex use this to drop
-    /// the guard before awaiting the (potentially long) recording shutdown
-    /// so concurrent commands (e.g. `stop_mock`) are not blocked.
     pub async fn send_end_turn(&self) -> Result<oneshot::Receiver<(String, String, Option<f32>)>> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
@@ -188,7 +160,6 @@ impl MicCapture {
         Ok(reply_rx)
     }
 
-    /// Discard the in-progress answer and reopen listen mode for the active turn.
     pub async fn abort_turn(&self) -> Result<()> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
@@ -198,7 +169,6 @@ impl MicCapture {
         reply_rx.await.context("AbortTurn reply channel closed")?
     }
 
-    /// Shut down the capture loop and release any held audio resources.
     pub async fn shutdown(self) {
         let _ = self.cpal_tx.send(CpalControl::Shutdown);
         let _ = self.cmd_tx.send(MicCommand::Shutdown).await;
@@ -206,9 +176,6 @@ impl MicCapture {
     }
 }
 
-/// Await the reply from a previously-sent `EndTurn`. Pulled out of
-/// `MicCapture::end_turn` so callers that need to release a `Mutex` guard
-/// before awaiting can do so via [`MicCapture::send_end_turn`].
 pub async fn await_end_turn_reply(
     reply_rx: oneshot::Receiver<(String, String, Option<f32>)>,
     timeout: Duration,
@@ -312,17 +279,24 @@ async fn capture_loop<R: Runtime>(
     app: AppHandle<R>,
     session_id: Uuid,
     audio_dir: PathBuf,
-    whisper: Arc<WhisperEngine>,
+    mut worker: Option<WhisperWorker>,
     mut frame_rx: mpsc::Receiver<Vec<f32>>,
     mut cmd_rx: mpsc::Receiver<MicCommand>,
     mut listen_rx: mpsc::Receiver<u32>,
     cpal_tx: std::sync::mpsc::Sender<CpalControl>,
     mic_recording: Arc<AtomicBool>,
 ) {
+    let shutdown_worker = async |worker: &mut Option<WhisperWorker>| {
+        if let Some(w) = worker.take() {
+            w.shutdown().await;
+        }
+    };
+
     let mut rnnoise = match RNNoiseProcessor::new() {
         Ok(r) => r,
         Err(e) => {
             error!(error = %e, "failed to init RNNoise for mock capture");
+            shutdown_worker(&mut worker).await;
             return;
         }
     };
@@ -330,6 +304,7 @@ async fn capture_loop<R: Runtime>(
         Ok(d) => d,
         Err(e) => {
             error!(error = %e, "failed to init downsampler for mock capture");
+            shutdown_worker(&mut worker).await;
             return;
         }
     };
@@ -337,17 +312,17 @@ async fn capture_loop<R: Runtime>(
         Ok(v) => v,
         Err(e) => {
             error!(error = %e, "failed to init VAD for mock capture");
+            shutdown_worker(&mut worker).await;
             return;
         }
     };
 
+    let worker_ref = worker.as_ref().expect("whisper worker");
+
     let mut current_turn: Option<u32> = None;
+    let mut epoch: TurnEpoch = 0;
     let mut mock_phase = MockMicPhase::Off;
     let mut audio_writer: Option<TurnAudioWriter> = None;
-    let mut transcript_buf = String::new();
-    let mut rolling_context = String::new();
-    let mut logprob_sum: f32 = 0.0;
-    let mut logprob_count: u32 = 0;
     let mut stream_open = false;
     let mut speech_tracker = TurnSpeechTracker::default();
     let mut quiet_until: Option<Instant> = None;
@@ -358,6 +333,7 @@ async fn capture_loop<R: Runtime>(
                 if let Err(e) = begin_listening(
                     turn_n,
                     &app,
+                    worker_ref,
                     &cpal_tx,
                     &mut frame_rx,
                     &mut stream_open,
@@ -365,12 +341,9 @@ async fn capture_loop<R: Runtime>(
                     &mut downsampler,
                     &mut vad,
                     &mut current_turn,
+                    &mut epoch,
                     &mut mock_phase,
                     &mut audio_writer,
-                    &mut transcript_buf,
-                    &mut rolling_context,
-                    &mut logprob_sum,
-                    &mut logprob_count,
                     &mut speech_tracker,
                     &mic_recording,
                     &mut quiet_until,
@@ -384,6 +357,7 @@ async fn capture_loop<R: Runtime>(
                         let result = begin_listening(
                             turn_n,
                             &app,
+                            worker_ref,
                             &cpal_tx,
                             &mut frame_rx,
                             &mut stream_open,
@@ -391,12 +365,9 @@ async fn capture_loop<R: Runtime>(
                             &mut downsampler,
                             &mut vad,
                             &mut current_turn,
+                            &mut epoch,
                             &mut mock_phase,
                             &mut audio_writer,
-                            &mut transcript_buf,
-                            &mut rolling_context,
-                            &mut logprob_sum,
-                            &mut logprob_count,
                             &mut speech_tracker,
                             &mic_recording,
                             &mut quiet_until,
@@ -412,6 +383,7 @@ async fn capture_loop<R: Runtime>(
                         let result = begin_listening(
                             turn_n,
                             &app,
+                            worker_ref,
                             &cpal_tx,
                             &mut frame_rx,
                             &mut stream_open,
@@ -419,12 +391,9 @@ async fn capture_loop<R: Runtime>(
                             &mut downsampler,
                             &mut vad,
                             &mut current_turn,
+                            &mut epoch,
                             &mut mock_phase,
                             &mut audio_writer,
-                            &mut transcript_buf,
-                            &mut rolling_context,
-                            &mut logprob_sum,
-                            &mut logprob_count,
                             &mut speech_tracker,
                             &mic_recording,
                             &mut quiet_until,
@@ -444,66 +413,55 @@ async fn capture_loop<R: Runtime>(
                         let _ = reply.send(result);
                     }
                     MicCommand::EndTurn { reply } => {
-                        if mock_phase == MockMicPhase::Answering || mock_phase == MockMicPhase::Paused {
-                            if let Some(turn_n) = current_turn {
-                                drain_audio_frames(
-                                    &app,
-                                    &whisper,
-                                    turn_n,
-                                    &mut frame_rx,
-                                    Duration::from_millis(300),
-                                    &mut audio_writer,
-                                    &mut transcript_buf,
-                                    &mut rolling_context,
-                                    &mut logprob_sum,
-                                    &mut logprob_count,
-                                    &mut rnnoise,
-                                    &mut downsampler,
-                                    &mut vad,
-                                )
-                                .await;
-                            }
-                        }
-
                         if stream_open {
                             close_cpal_stream(&cpal_tx).await;
                             stream_open = false;
                         }
 
-                        if mock_phase == MockMicPhase::Answering || mock_phase == MockMicPhase::Paused {
+                        let (text, path, confidence) = if mock_phase.captures_speech() {
                             if let Some(turn_n) = current_turn {
-                                drain_audio_frames(
-                                    &app,
-                                    &whisper,
+                                drain_remaining_frames(
+                                    worker_ref,
+                                    epoch,
                                     turn_n,
                                     &mut frame_rx,
-                                    Duration::from_millis(150),
+                                    session_id,
+                                    &audio_dir,
+                                    &app,
+                                    &mut mock_phase,
                                     &mut audio_writer,
-                                    &mut transcript_buf,
-                                    &mut rolling_context,
-                                    &mut logprob_sum,
-                                    &mut logprob_count,
                                     &mut rnnoise,
                                     &mut downsampler,
                                     &mut vad,
-                                )
-                                .await;
-                            }
-                        }
+                                    &mut speech_tracker,
+                                    &mic_recording,
+                                    &mut quiet_until,
+                                );
 
-                        let writer = audio_writer.take();
-                        let path = writer
-                            .map(|w| w.finish().unwrap_or_default())
-                            .unwrap_or_default();
-                        let text = std::mem::take(&mut transcript_buf);
-                        let confidence = if logprob_count > 0 {
-                            Some(logprob_sum / logprob_count as f32)
+                                if let Some(tail) = vad.force_end_segment() {
+                                    let _ = worker_ref
+                                        .transcribe_blocking(epoch, turn_n, tail)
+                                        .await;
+                                }
+
+                                let transcript =
+                                    worker_ref.flush(epoch, WHISPER_FLUSH_TIMEOUT).await;
+                                let writer = audio_writer.take();
+                                let path = writer
+                                    .map(|w| w.finish().unwrap_or_default())
+                                    .unwrap_or_default();
+                                (transcript.text, path, transcript.confidence)
+                            } else {
+                                (String::new(), String::new(), None)
+                            }
                         } else {
-                            None
+                            let path = audio_writer
+                                .take()
+                                .map(|w| w.finish().unwrap_or_default())
+                                .unwrap_or_default();
+                            (String::new(), path, None)
                         };
-                        rolling_context.clear();
-                        logprob_sum = 0.0;
-                        logprob_count = 0;
+
                         current_turn = None;
                         mock_phase = MockMicPhase::Off;
                         speech_tracker.reset();
@@ -513,17 +471,16 @@ async fn capture_loop<R: Runtime>(
                     MicCommand::AbortTurn { reply } => {
                         let result = abort_active_turn(
                             &app,
+                            worker_ref,
                             &mut mock_phase,
                             &mut audio_writer,
-                            &mut transcript_buf,
-                            &mut rolling_context,
-                            &mut logprob_sum,
-                            &mut logprob_count,
                             &mut speech_tracker,
                             &mut vad,
                             current_turn,
+                            &mut epoch,
                             &mic_recording,
-                        );
+                        )
+                        .await;
                         let _ = reply.send(result);
                     }
                     MicCommand::Shutdown => {
@@ -539,26 +496,22 @@ async fn capture_loop<R: Runtime>(
             Some(frame) = frame_rx.recv(), if current_turn.is_some() => {
                 if let Some(turn_n) = current_turn {
                     process_mock_frame(
-                        &app,
-                        &whisper,
+                        worker_ref,
+                        epoch,
                         frame,
                         turn_n,
                         session_id,
                         &audio_dir,
+                        &app,
                         &mut mock_phase,
                         &mut audio_writer,
-                        &mut transcript_buf,
-                        &mut rolling_context,
-                        &mut logprob_sum,
-                        &mut logprob_count,
                         &mut rnnoise,
                         &mut downsampler,
                         &mut vad,
                         &mut speech_tracker,
                         &mic_recording,
                         &mut quiet_until,
-                    )
-                    .await;
+                    );
                 }
             }
             else => break,
@@ -568,12 +521,14 @@ async fn capture_loop<R: Runtime>(
     if stream_open {
         close_cpal_stream(&cpal_tx).await;
     }
+    shutdown_worker(&mut worker).await;
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn begin_listening<R: Runtime>(
     turn_n: u32,
     app: &AppHandle<R>,
+    worker: &WhisperWorker,
     cpal_tx: &std::sync::mpsc::Sender<CpalControl>,
     frame_rx: &mut mpsc::Receiver<Vec<f32>>,
     stream_open: &mut bool,
@@ -581,12 +536,9 @@ async fn begin_listening<R: Runtime>(
     downsampler: &mut Downsampler,
     vad: &mut VadChunker,
     current_turn: &mut Option<u32>,
+    epoch: &mut TurnEpoch,
     mock_phase: &mut MockMicPhase,
     audio_writer: &mut Option<TurnAudioWriter>,
-    transcript_buf: &mut String,
-    rolling_context: &mut String,
-    logprob_sum: &mut f32,
-    logprob_count: &mut u32,
     speech_tracker: &mut TurnSpeechTracker,
     mic_recording: &Arc<AtomicBool>,
     quiet_until: &mut Option<Instant>,
@@ -597,7 +549,6 @@ async fn begin_listening<R: Runtime>(
     }
 
     discard_stale_frames(frame_rx);
-
     open_cpal_stream(cpal_tx).await?;
     *stream_open = true;
 
@@ -611,13 +562,12 @@ async fn begin_listening<R: Runtime>(
         *vad = v;
     }
 
+    *epoch = epoch.saturating_add(1);
+    worker.reset_context(turn_n, *epoch).await?;
+
     *current_turn = Some(turn_n);
     *mock_phase = MockMicPhase::Listening;
     audio_writer.take();
-    transcript_buf.clear();
-    rolling_context.clear();
-    *logprob_sum = 0.0;
-    *logprob_count = 0;
     speech_tracker.reset();
     mic_recording.store(false, Ordering::SeqCst);
     *quiet_until = Some(Instant::now() + Duration::from_millis(POST_TTS_QUIET_MS));
@@ -634,17 +584,15 @@ async fn begin_listening<R: Runtime>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn abort_active_turn<R: Runtime>(
+async fn abort_active_turn<R: Runtime>(
     app: &AppHandle<R>,
+    worker: &WhisperWorker,
     mock_phase: &mut MockMicPhase,
     audio_writer: &mut Option<TurnAudioWriter>,
-    transcript_buf: &mut String,
-    rolling_context: &mut String,
-    logprob_sum: &mut f32,
-    logprob_count: &mut u32,
     speech_tracker: &mut TurnSpeechTracker,
     vad: &mut VadChunker,
     current_turn: Option<u32>,
+    epoch: &mut TurnEpoch,
     mic_recording: &Arc<AtomicBool>,
 ) -> Result<()> {
     if !mock_phase.allows_mid_answer_abort() {
@@ -653,14 +601,14 @@ fn abort_active_turn<R: Runtime>(
     let turn_n = current_turn.ok_or_else(|| anyhow::anyhow!("No active mock turn."))?;
 
     audio_writer.take();
-    transcript_buf.clear();
-    rolling_context.clear();
-    *logprob_sum = 0.0;
-    *logprob_count = 0;
     speech_tracker.reset();
     if let Ok(v) = VadChunker::new() {
         *vad = v;
     }
+
+    *epoch = epoch.saturating_add(1);
+    worker.reset_context(turn_n, *epoch).await?;
+
     *mock_phase = MockMicPhase::Listening;
     mic_recording.store(false, Ordering::SeqCst);
     emit_mock_turn_phase(
@@ -698,19 +646,16 @@ fn enter_answering<R: Runtime>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_mock_frame<R: Runtime>(
-    app: &AppHandle<R>,
-    whisper: &Arc<WhisperEngine>,
+fn process_mock_frame<R: Runtime>(
+    worker: &WhisperWorker,
+    epoch: TurnEpoch,
     frame: Vec<f32>,
     turn_n: u32,
     session_id: Uuid,
     audio_dir: &PathBuf,
+    app: &AppHandle<R>,
     mock_phase: &mut MockMicPhase,
     audio_writer: &mut Option<TurnAudioWriter>,
-    transcript_buf: &mut String,
-    rolling_context: &mut String,
-    logprob_sum: &mut f32,
-    logprob_count: &mut u32,
     rnnoise: &mut RNNoiseProcessor,
     downsampler: &mut Downsampler,
     vad: &mut VadChunker,
@@ -722,9 +667,6 @@ async fn process_mock_frame<R: Runtime>(
         return;
     }
 
-    // Drop frames captured during the post-TTS quiet window. Speakers may
-    // still be decaying for ~300 ms after the TTS subprocess exits; running
-    // RNNoise + VAD + Whisper on that tail produces phantom answers.
     if let Some(deadline) = *quiet_until {
         if Instant::now() < deadline {
             return;
@@ -746,8 +688,7 @@ async fn process_mock_frame<R: Runtime>(
         }
     };
 
-    let record_audio = *mock_phase == MockMicPhase::Answering;
-    if record_audio {
+    if mock_phase.captures_speech() {
         if let Some(w) = audio_writer {
             w.push_samples(&downsampled);
         }
@@ -792,22 +733,14 @@ async fn process_mock_frame<R: Runtime>(
             }
         }
 
-        if *mock_phase == MockMicPhase::Answering {
+        if mock_phase.captures_speech() {
             if let Some(vad_chunk) = chunk {
-                if let Some((text, lp)) =
-                    dispatch_chunk(app, whisper, vad_chunk, turn_n, rolling_context).await
-                {
-                    if !transcript_buf.is_empty() {
-                        transcript_buf.push(' ');
-                    }
-                    transcript_buf.push_str(&text);
-                    append_rolling_context(rolling_context, &text);
-                    *logprob_sum += lp;
-                    *logprob_count += 1;
-                }
+                worker.try_transcribe(epoch, turn_n, vad_chunk);
             }
 
-            if speech_tracker.should_pause(vad.ms_since_last_speech()) {
+            if *mock_phase == MockMicPhase::Answering
+                && speech_tracker.should_pause(vad.ms_since_last_speech())
+            {
                 *mock_phase = MockMicPhase::Paused;
                 emit_mock_turn_phase(
                     app,
@@ -822,152 +755,92 @@ async fn process_mock_frame<R: Runtime>(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn drain_audio_frames<R: Runtime>(
-    app: &AppHandle<R>,
-    whisper: &Arc<WhisperEngine>,
+fn drain_remaining_frames<R: Runtime>(
+    worker: &WhisperWorker,
+    epoch: TurnEpoch,
     turn_n: u32,
     frame_rx: &mut mpsc::Receiver<Vec<f32>>,
-    max_wait: Duration,
+    session_id: Uuid,
+    audio_dir: &PathBuf,
+    app: &AppHandle<R>,
+    mock_phase: &mut MockMicPhase,
     audio_writer: &mut Option<TurnAudioWriter>,
-    transcript_buf: &mut String,
-    rolling_context: &mut String,
-    logprob_sum: &mut f32,
-    logprob_count: &mut u32,
     rnnoise: &mut RNNoiseProcessor,
     downsampler: &mut Downsampler,
     vad: &mut VadChunker,
+    speech_tracker: &mut TurnSpeechTracker,
+    mic_recording: &Arc<AtomicBool>,
+    quiet_until: &mut Option<Instant>,
 ) {
-    let deadline = tokio::time::Instant::now() + max_wait;
-    while tokio::time::Instant::now() < deadline {
-        match tokio::time::timeout(Duration::from_millis(50), frame_rx.recv()).await {
-            Ok(Some(frame)) => {
-                process_audio_frame(
-                    app,
-                    whisper,
-                    frame,
-                    turn_n,
-                    audio_writer,
-                    transcript_buf,
-                    rolling_context,
-                    logprob_sum,
-                    logprob_count,
-                    rnnoise,
-                    downsampler,
-                    vad,
-                )
-                .await;
-            }
-            _ => break,
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn process_audio_frame<R: Runtime>(
-    app: &AppHandle<R>,
-    whisper: &Arc<WhisperEngine>,
-    frame: Vec<f32>,
-    turn_n: u32,
-    audio_writer: &mut Option<TurnAudioWriter>,
-    transcript_buf: &mut String,
-    rolling_context: &mut String,
-    logprob_sum: &mut f32,
-    logprob_count: &mut u32,
-    rnnoise: &mut RNNoiseProcessor,
-    downsampler: &mut Downsampler,
-    vad: &mut VadChunker,
-) {
-    if frame.len() != FRAME_SAMPLES {
-        return;
-    }
-
-    let mut proc = frame;
-    if let Err(e) = rnnoise.process_frame(&mut proc) {
-        warn!(error = %e, "mock mic RNNoise error");
-        return;
-    }
-
-    let downsampled = match downsampler.process(&proc) {
-        Ok(d) => d,
-        Err(e) => {
-            warn!(error = %e, "mock mic downsampler error");
-            return;
-        }
-    };
-
-    if let Some(w) = audio_writer {
-        w.push_samples(&downsampled);
-    }
-
-    for chunk_frame in downsampled.chunks(160) {
-        if let Some(chunk) = vad.process_frame(chunk_frame, AudioSource::Microphone) {
-            if let Some((text, lp)) =
-                dispatch_chunk(app, whisper, chunk, turn_n, rolling_context).await
-            {
-                if !transcript_buf.is_empty() {
-                    transcript_buf.push(' ');
-                }
-                transcript_buf.push_str(&text);
-                append_rolling_context(rolling_context, &text);
-                *logprob_sum += lp;
-                *logprob_count += 1;
-            }
-        }
-    }
-}
-
-/// Transcribe one VAD chunk using the rolling-context-aware engine, emit a
-/// `mock_user_transcribed` event, and return the recognised text alongside its
-/// average log-probability so the caller can track STT confidence for the turn.
-///
-/// Returns `None` on silence, engine error, or empty output.
-async fn dispatch_chunk<R: Runtime>(
-    app: &AppHandle<R>,
-    whisper: &Arc<WhisperEngine>,
-    chunk: VadChunk,
-    turn_n: u32,
-    rolling_context: &str,
-) -> Option<(String, f32)> {
-    let w = Arc::clone(whisper);
-    let ctx = rolling_context.to_string();
-    let result = tokio::task::spawn_blocking(move || w.transcribe_with_context(&chunk, &ctx)).await;
-
-    let transcription = match result {
-        Ok(Ok(Some(r))) => r,
-        Ok(Ok(None)) => return None,
-        Ok(Err(e)) => {
-            warn!(error = %e, "mock transcription error");
-            return None;
-        }
-        Err(e) => {
-            warn!(error = %e, "mock transcription task panicked");
-            return None;
-        }
-    };
-
-    let text = transcription.text.trim().to_string();
-    if text.is_empty() {
-        return None;
-    }
-
-    let avg_logprob = transcription.avg_logprob.unwrap_or(-0.5);
-
-    emit_mock_user_transcribed(
-        app,
-        MockUserTranscribedPayload {
+    while let Ok(frame) = frame_rx.try_recv() {
+        process_mock_frame(
+            worker,
+            epoch,
+            frame,
             turn_n,
-            text: text.clone(),
-            audio_path: String::new(),
-        },
-    );
-
-    Some((text, avg_logprob))
+            session_id,
+            audio_dir,
+            app,
+            mock_phase,
+            audio_writer,
+            rnnoise,
+            downsampler,
+            vad,
+            speech_tracker,
+            mic_recording,
+            quiet_until,
+        );
+    }
 }
 
-/// Keep rolling context aligned with the live pipeline rolling-context helper.
-fn append_rolling_context(context: &mut String, new_text: &str) {
-    let mut rolling = RollingTranscriptContext::default();
-    rolling.append(context);
-    rolling.append(new_text);
-    *context = rolling.as_str();
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mock_frame_channel_matches_live_depth() {
+        assert_eq!(MOCK_FRAME_CHANNEL_DEPTH, 1024);
+    }
+
+    #[test]
+    fn end_turn_uses_force_end_segment_in_protocol() {
+        let src = include_str!("mic_capture.rs");
+        let start = src
+            .find("MicCommand::EndTurn { reply }")
+            .expect("EndTurn handler");
+        let body = &src[start..start + 2500];
+        assert!(
+            body.contains("force_end_segment"),
+            "EndTurn must flush trailing VAD segment"
+        );
+        assert!(
+            body.contains("worker_ref.flush"),
+            "EndTurn must barrier-flush whisper worker"
+        );
+        assert!(
+            !body.contains("Duration::from_millis(300)"),
+            "EndTurn must not use legacy timing drain"
+        );
+    }
+
+    #[test]
+    fn hot_path_does_not_await_whisper() {
+        let src = include_str!("mic_capture.rs");
+        let start = src
+            .find("fn process_mock_frame")
+            .expect("process_mock_frame");
+        let end = src[start..]
+            .find("fn drain_remaining_frames")
+            .map(|i| start + i)
+            .expect("drain_remaining_frames");
+        let body = &src[start..end];
+        assert!(
+            !body.contains(".await"),
+            "process_mock_frame must stay synchronous"
+        );
+        assert!(
+            body.contains("try_transcribe"),
+            "process_mock_frame must enqueue STT without blocking"
+        );
+    }
 }

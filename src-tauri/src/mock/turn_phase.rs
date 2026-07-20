@@ -31,6 +31,11 @@ impl MockMicPhase {
     pub fn allows_mid_answer_abort(self) -> bool {
         matches!(self, Self::Answering | Self::Paused)
     }
+
+    /// WAV capture and STT continue during Paused — phase is UI-only.
+    pub fn captures_speech(self) -> bool {
+        matches!(self, Self::Answering | Self::Paused)
+    }
 }
 
 /// Tracks per-turn speech accumulation for the mock pause gate.
@@ -94,5 +99,12 @@ mod tests {
         assert!(!MockMicPhase::Listening.allows_mid_answer_abort());
         assert!(MockMicPhase::Answering.allows_mid_answer_abort());
         assert!(MockMicPhase::Paused.allows_mid_answer_abort());
+    }
+
+    #[test]
+    fn paused_still_captures_speech() {
+        assert!(MockMicPhase::Answering.captures_speech());
+        assert!(MockMicPhase::Paused.captures_speech());
+        assert!(!MockMicPhase::Listening.captures_speech());
     }
 }
