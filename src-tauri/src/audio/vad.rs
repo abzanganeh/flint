@@ -59,6 +59,11 @@ const MIN_SPEECH_FRAMES: u32 = MIN_SPEECH_MS / FRAME_MS; // = 10
 const MAX_SILENCE_GAP_MS: u32 = 600;
 const MAX_SILENCE_FRAMES: u32 = MAX_SILENCE_GAP_MS / FRAME_MS; // = 30
 
+/// System loopback (interviewer) channel — tolerate natural mid-sentence pauses
+/// (~500–800ms) without splitting one question into two Whisper passes.
+const SYSTEM_MAX_SILENCE_GAP_MS: u32 = 1_000;
+const SYSTEM_MAX_SILENCE_FRAMES: u32 = SYSTEM_MAX_SILENCE_GAP_MS / FRAME_MS;
+
 /// Maximum speech chunk duration before a mid-speech flush is forced.
 ///
 /// When two speakers talk continuously (or one person gives a long answer) with
@@ -151,6 +156,8 @@ pub struct VadChunker {
     last_speech_at: Option<Instant>,
     /// Force mid-utterance flush after this many speech frames (mock uses smaller value).
     max_chunk_frames: u32,
+    /// Consecutive silence frames required to end a segment (mic/default 600ms).
+    max_silence_frames: u32,
 }
 
 // `webrtc_vad::Vad` wraps a C pointer from bindgen, so it is not `Send` by
@@ -162,16 +169,23 @@ impl VadChunker {
     /// Create a VadChunker with exact §26 parameters.
     pub fn new() -> Result<Self> {
         let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
-        Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES))
+        Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES, MAX_SILENCE_FRAMES))
+    }
+
+    /// Live system loopback — longer silence gap so brief interviewer pauses
+    /// do not split one question across two transcript lines.
+    pub fn new_for_system() -> Result<Self> {
+        let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
+        Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES, SYSTEM_MAX_SILENCE_FRAMES))
     }
 
     /// Mock interview capture — same VAD thresholds, smaller max chunk for streaming STT.
     pub fn new_for_mock() -> Result<Self> {
         let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
-        Ok(Self::with_vad(vad, MOCK_MAX_CHUNK_FRAMES))
+        Ok(Self::with_vad(vad, MOCK_MAX_CHUNK_FRAMES, MAX_SILENCE_FRAMES))
     }
 
-    fn with_vad(vad: Vad, max_chunk_frames: u32) -> Self {
+    fn with_vad(vad: Vad, max_chunk_frames: u32, max_silence_frames: u32) -> Self {
         Self {
             vad,
             state: State::Idle,
@@ -184,6 +198,7 @@ impl VadChunker {
             pre_roll: VecDeque::new(),
             last_speech_at: None,
             max_chunk_frames,
+            max_silence_frames,
         }
     }
 
@@ -299,7 +314,7 @@ impl VadChunker {
                     self.trailing_silence_buf.extend_from_slice(frame);
                     self.silence_frames += 1;
 
-                    if self.silence_frames >= MAX_SILENCE_FRAMES {
+                    if self.silence_frames >= self.max_silence_frames {
                         self.finalise_segment()
                     } else {
                         None
@@ -483,7 +498,16 @@ mod tests {
         /// All timing parameters match production `new()` exactly.
         fn new_for_testing() -> Result<Self> {
             let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Quality);
-            Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES))
+            Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES, MAX_SILENCE_FRAMES))
+        }
+
+        fn new_for_testing_system() -> Result<Self> {
+            let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VadMode::Quality);
+            Ok(Self::with_vad(
+                vad,
+                MAX_CHUNK_FRAMES,
+                SYSTEM_MAX_SILENCE_FRAMES,
+            ))
         }
     }
 
@@ -545,6 +569,32 @@ mod tests {
             chunks.len(),
             0,
             "Expected 0 chunks for 140ms speech, got {}",
+            chunks.len()
+        );
+    }
+
+    /// System loopback chunker tolerates ~800ms intra-utterance pauses.
+    #[test]
+    fn system_vad_keeps_pause_under_one_second_in_one_chunk() {
+        let mut chunker = VadChunker::new_for_testing_system().unwrap();
+        let mut chunks: Vec<VadChunk> = Vec::new();
+
+        let speech1: Vec<Vec<f32>> = (0..SPEECH_FRAMES_200MS).map(speech_frame).collect();
+        let pause: Vec<Vec<f32>> = (0..40).map(|_| silence_frame()).collect(); // 800ms
+        let speech2: Vec<Vec<f32>> = (SPEECH_FRAMES_200MS..SPEECH_FRAMES_200MS * 2)
+            .map(speech_frame)
+            .collect();
+        let silence: Vec<Vec<f32>> = (0..55).map(|_| silence_frame()).collect(); // 1100ms
+
+        run_frames(&mut chunker, &speech1, AudioSource::System, &mut chunks);
+        run_frames(&mut chunker, &pause, AudioSource::System, &mut chunks);
+        run_frames(&mut chunker, &speech2, AudioSource::System, &mut chunks);
+        run_frames(&mut chunker, &silence, AudioSource::System, &mut chunks);
+
+        assert_eq!(
+            chunks.len(),
+            1,
+            "800ms pause should stay in one system chunk, got {}",
             chunks.len()
         );
     }

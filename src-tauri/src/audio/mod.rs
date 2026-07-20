@@ -1,6 +1,7 @@
 pub mod audit;
 pub mod capture;
 pub mod diarizer;
+pub mod live_whisper_worker;
 pub mod pipeline;
 pub mod rnnoise;
 pub mod speaker_classifier;

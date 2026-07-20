@@ -25,6 +25,9 @@ const MIN_WORDS: usize = 5;
 const LLM_VERIFY_COOLDOWN: Duration = Duration::from_secs(8);
 const UNKNOWN_CACHE: Duration = Duration::from_secs(30);
 const SILENCE_CONFIRM_MS: u64 = 1500;
+/// VAD-split fragments (e.g. "What parts of this stuff?") need longer silence
+/// before we treat them as a complete interviewer question.
+const FRAGMENT_SILENCE_CONFIRM_MS: u64 = 2_500;
 const CONFIDENCE_QUESTION: f32 = 0.9;
 const CONFIDENCE_AMBIGUOUS: f32 = 0.5;
 const CONFIDENCE_NOT_QUESTION: f32 = 0.1;
@@ -56,14 +59,29 @@ impl SystemTranscriptBuffer {
 
     pub fn append_chunk(&mut self, text: &str, chunk_id: Option<String>, label_source: &str) {
         let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            self.chunks.push(BufferedChunk {
-                chunk_id,
-                text: trimmed.to_string(),
-                label_source: label_source.to_string(),
-                excluded: false,
-            });
+        if trimmed.is_empty() {
+            return;
         }
+
+        if let Some(last) = self.chunks.last_mut() {
+            if !last.excluded && looks_like_continuation(&last.text, trimmed) {
+                last.text = format!("{} {}", last.text.trim_end(), trimmed);
+                if chunk_id.is_some() {
+                    last.chunk_id = chunk_id;
+                }
+                if label_source != "channel" {
+                    last.label_source = label_source.to_string();
+                }
+                return;
+            }
+        }
+
+        self.chunks.push(BufferedChunk {
+            chunk_id,
+            text: trimmed.to_string(),
+            label_source: label_source.to_string(),
+            excluded: false,
+        });
     }
 
     /// Exclude a chunk from the interviewer span after the user relabels it to
@@ -132,6 +150,57 @@ fn pass1_confidence(result: DetectionResult) -> f32 {
 
 fn word_count(text: &str) -> usize {
     text.split_whitespace().count()
+}
+
+/// True when the transcript looks like a VAD-split mid-sentence fragment rather
+/// than a self-contained question (e.g. "What parts of this stuff?").
+fn looks_like_vad_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let without_q = trimmed.trim_end_matches('?').trim();
+    let Some(last_token) = without_q.split_whitespace().last() else {
+        return false;
+    };
+    let last = last_token
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+
+    const DANGLING_TAIL_WORDS: &[&str] = &[
+        "stuff", "things", "this", "that", "the", "a", "an", "some", "any", "your", "our",
+        "my", "their", "its", "it", "of", "about", "for", "with", "in", "on", "at", "to",
+        "and", "or", "but", "so", "if", "when", "where", "which", "who", "what", "how",
+        "part", "parts", "kind", "kinds", "type", "types", "bit", "bits", "aspect", "aspects",
+        "area", "areas", "way", "ways", "piece", "pieces",
+    ];
+
+    DANGLING_TAIL_WORDS.contains(&last.as_str())
+}
+
+fn silence_required_for_candidate(text: &str) -> u64 {
+    if looks_like_vad_fragment(text) {
+        FRAGMENT_SILENCE_CONFIRM_MS
+    } else {
+        SILENCE_CONFIRM_MS
+    }
+}
+
+fn looks_like_continuation(prev: &str, next: &str) -> bool {
+    let next_trim = next.trim();
+    if next_trim.is_empty() {
+        return false;
+    }
+
+    let prev_trim = prev.trim();
+    let next_starts_lower = next_trim
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_lowercase());
+
+    looks_like_vad_fragment(prev_trim)
+        || (next_starts_lower && !prev_trim.ends_with(|c: char| ".!?".contains(c)))
 }
 
 fn is_generic_llm_response(response: &str) -> bool {
@@ -253,7 +322,8 @@ impl HybridQuestionDetector {
 
     fn plan_confirm(&mut self, silence_ms: u64) -> Option<ConfirmPlan> {
         let candidate = self.candidate.clone()?;
-        if silence_ms < SILENCE_CONFIRM_MS {
+        let required_silence = silence_required_for_candidate(&candidate.text);
+        if silence_ms < required_silence {
             return None;
         }
 
@@ -427,6 +497,36 @@ mod tests {
         assert!(buf.has_uncertain_speaker());
         buf.confirm_chunk("id-1", "llm");
         assert!(!buf.has_uncertain_speaker());
+    }
+
+    #[test]
+    fn system_buffer_coalesces_vad_split_continuation() {
+        let mut buf = SystemTranscriptBuffer::default();
+        buf.append_chunk("What parts of this stuff?", None, "channel");
+        buf.append_chunk("excite you the most.", None, "channel");
+        assert_eq!(
+            buf.accumulated_text(),
+            "What parts of this stuff? excite you the most."
+        );
+    }
+
+    #[test]
+    fn vad_fragment_detects_dangling_tail() {
+        assert!(looks_like_vad_fragment("What parts of this stuff?"));
+        assert!(!looks_like_vad_fragment("What motivates you most about this role?"));
+    }
+
+    #[test]
+    fn fragment_requires_longer_silence_before_confirm() {
+        let failover = mock_failover("YES");
+        let mut detector = HybridQuestionDetector::new(failover, &prompts_dir()).unwrap();
+
+        assert!(detector
+            .ingest_transcript("what parts of this stuff", SILENCE_CONFIRM_MS)
+            .is_none());
+        assert!(detector
+            .ingest_transcript("what parts of this stuff", FRAGMENT_SILENCE_CONFIRM_MS)
+            .is_some());
     }
 
     #[test]

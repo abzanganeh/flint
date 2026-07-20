@@ -40,6 +40,9 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use uuid::Uuid;
 
 use crate::audio::capture::{AudioFrame, AudioSource};
+use crate::audio::live_whisper_worker::{
+    LiveWhisperJob, LiveWhisperJobMeta, LiveWhisperOutcome, LiveWhisperWorker,
+};
 use crate::audio::rnnoise::{Downsampler, RNNoiseProcessor};
 use crate::audio::vad::{VadChunker, WHISPER_MIN_SEGMENT_MS};
 use crate::events::{
@@ -345,7 +348,7 @@ impl ChannelProcessor {
         Ok(Self {
             rnnoise: None,
             downsampler: Downsampler::new()?,
-            vad: VadChunker::new()?,
+            vad: VadChunker::new_for_system()?,
         })
     }
 }
@@ -359,9 +362,9 @@ impl ChannelProcessor {
 /// `system_rx` and `mic_rx` are the receiving ends of the mpsc channels
 /// created by the caller before passing the senders to `AudioCapture::start`.
 ///
-/// Whisper inference runs in `tokio::task::spawn_blocking` so it does not
-/// block the async executor. All other processing is synchronous and fast
-/// enough to run inline (RNNoise < 5ms, VAD < 1ms per frame).
+/// Whisper inference runs on a background worker so VAD frame processing is
+/// never stalled by decode latency. All other per-frame work is synchronous
+/// and fast enough to run inline (RNNoise < 5ms, VAD < 1ms per frame).
 ///
 /// The function returns when both input channels are closed (i.e. when
 /// `AudioCapture::stop()` has been called and all senders have dropped).
@@ -389,32 +392,91 @@ pub async fn run_audio_pipeline(
     let near_duplicate = SyncMutex::new(NearDuplicateTracker::new());
     let phone_heuristic = SyncMutex::new(PhoneHeuristicState::new());
     let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
+    let (whisper_worker, mut whisper_results) = LiveWhisperWorker::start(Arc::clone(&whisper));
 
     loop {
-        // No `biased` — fair scheduling prevents MIC starvation under heavy
-        // SYSTEM load (e.g. continuous YouTube audio).
-        let frame = tokio::select! {
+        tokio::select! {
+            result = whisper_results.recv() => {
+                if let Some((meta, outcome)) = result {
+                    if let Err(e) = handle_transcription_result(
+                        meta,
+                        outcome,
+                        &app_handle,
+                        session_id,
+                        &hybrid,
+                        &system_buffer,
+                        &question_tx,
+                        &persistence,
+                        &dedup,
+                        &near_duplicate,
+                        &phone_heuristic,
+                        &mic_quality,
+                        &audit,
+                        echo_suppression_enabled,
+                        phone_mode_manual_only,
+                        &diarizer,
+                        &rolling_contexts,
+                        &speaker_classifier,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "transcription result handler error — continuing");
+                    }
+                }
+            }
             f = system_rx.recv() => match f {
-                Some(frame) => frame,
+                Some(frame) => {
+                    if let Err(e) = process_frame(
+                        frame,
+                        &mut sys_proc,
+                        &app_handle,
+                        &whisper_worker,
+                        session_id,
+                        &hybrid,
+                        &system_buffer,
+                        &question_tx,
+                        &rolling_contexts,
+                        phone_mode_manual_only,
+                        &diarizer,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "audio pipeline frame error — continuing");
+                    }
+                }
                 None => break,
             },
             f = mic_rx.recv() => match f {
-                Some(frame) => frame,
+                Some(frame) => {
+                    if let Err(e) = process_frame(
+                        frame,
+                        &mut mic_proc,
+                        &app_handle,
+                        &whisper_worker,
+                        session_id,
+                        &hybrid,
+                        &system_buffer,
+                        &question_tx,
+                        &rolling_contexts,
+                        phone_mode_manual_only,
+                        &diarizer,
+                    )
+                    .await
+                    {
+                        tracing::warn!(error = %e, "audio pipeline frame error — continuing");
+                    }
+                }
                 None => break,
             },
-        };
+        }
+    }
 
-        let proc = match frame.source {
-            AudioSource::System => &mut sys_proc,
-            AudioSource::Microphone => &mut mic_proc,
-        };
-
-        if let Err(e) = process_frame(
-            frame,
-            proc,
+    while let Some((meta, outcome)) = whisper_results.recv().await {
+        if let Err(e) = handle_transcription_result(
+            meta,
+            outcome,
             &app_handle,
             session_id,
-            &whisper,
             &hybrid,
             &system_buffer,
             &question_tx,
@@ -432,9 +494,11 @@ pub async fn run_audio_pipeline(
         )
         .await
         {
-            tracing::warn!(error = %e, "audio pipeline frame error — continuing");
+            tracing::warn!(error = %e, "transcription drain error — continuing");
         }
     }
+
+    whisper_worker.shutdown().await?;
 
     tracing::info!(session_id = %session_id, "audio pipeline loop exited");
     Ok(())
@@ -449,22 +513,14 @@ async fn process_frame(
     mut frame: AudioFrame,
     proc: &mut ChannelProcessor,
     app_handle: &AppHandle,
+    whisper_worker: &LiveWhisperWorker,
     session_id: Uuid,
-    whisper: &Arc<WhisperEngine>,
     hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
     system_buffer: &Arc<SyncMutex<SystemTranscriptBuffer>>,
     question_tx: &mpsc::Sender<DetectedQuestion>,
-    persistence: &Arc<SessionPersistence>,
-    dedup: &SyncMutex<CrossChannelDedup>,
-    near_duplicate: &SyncMutex<NearDuplicateTracker>,
-    phone_heuristic: &SyncMutex<PhoneHeuristicState>,
-    mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
-    audit: &Arc<AudioAuditCounters>,
-    echo_suppression_enabled: bool,
+    rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
     phone_mode_manual_only: bool,
     diarizer: &Option<Arc<SyncMutex<DiarizerManager>>>,
-    rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
-    speaker_classifier: &Option<Arc<SpeakerClassifier>>,
 ) -> Result<()> {
     let source = frame.source;
 
@@ -518,29 +574,62 @@ async fn process_frame(
         return Ok(());
     }
 
-    // ── Step 4a: Whisper (blocking — runs off the async executor) ─────────
+    // ── Step 4a: enqueue Whisper (background worker — never blocks VAD) ───
     let chunk_duration_ms = chunk.duration_ms;
-    // Sampled here (before Whisper) rather than after transcription — the
-    // phone-mode pause estimate below must not be inflated by inference
-    // latency. RMS is computed from the raw utterance buffer since `chunk`
-    // is moved into the blocking closure below and unavailable afterward.
     let chunk_ready_at = Instant::now();
     let chunk_rms_dbfs = rms_dbfs(&chunk.samples);
+    let frame_timestamp_ms = frame.timestamp.elapsed().as_millis() as i64;
     let rolling_context = {
         let guard = rolling_contexts
             .lock()
             .map_err(|_| anyhow::anyhow!("rolling context mutex poisoned"))?;
         guard.context_for(source)
     };
-    let whisper = Arc::clone(whisper);
-    let transcription = tokio::task::spawn_blocking(move || {
-        whisper.transcribe_with_context(&chunk, &rolling_context)
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Whisper task panicked: {e}"))??;
 
-    let Some(mut result) = transcription else {
-        return Ok(()); // silence or hallucination — discarded by engine
+    whisper_worker.enqueue(LiveWhisperJob {
+        meta: LiveWhisperJobMeta {
+            source,
+            frame_timestamp_ms,
+            chunk_ready_at,
+            chunk_rms_dbfs,
+            chunk_duration_ms,
+        },
+        chunk,
+        rolling_context,
+    });
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_transcription_result(
+    meta: LiveWhisperJobMeta,
+    outcome: LiveWhisperOutcome,
+    app_handle: &AppHandle,
+    session_id: Uuid,
+    hybrid: &Arc<AsyncMutex<HybridQuestionDetector>>,
+    system_buffer: &Arc<SyncMutex<SystemTranscriptBuffer>>,
+    question_tx: &mpsc::Sender<DetectedQuestion>,
+    persistence: &Arc<SessionPersistence>,
+    dedup: &SyncMutex<CrossChannelDedup>,
+    near_duplicate: &SyncMutex<NearDuplicateTracker>,
+    phone_heuristic: &SyncMutex<PhoneHeuristicState>,
+    mic_quality: &Arc<SyncMutex<MicQualityMonitor>>,
+    audit: &Arc<AudioAuditCounters>,
+    echo_suppression_enabled: bool,
+    phone_mode_manual_only: bool,
+    diarizer: &Option<Arc<SyncMutex<DiarizerManager>>>,
+    rolling_contexts: &Arc<SyncMutex<ChannelRollingContexts>>,
+    speaker_classifier: &Option<Arc<SpeakerClassifier>>,
+) -> Result<()> {
+    let source = meta.source;
+    let chunk_duration_ms = meta.chunk_duration_ms;
+    let chunk_ready_at = meta.chunk_ready_at;
+    let chunk_rms_dbfs = meta.chunk_rms_dbfs;
+    let timestamp = meta.frame_timestamp_ms;
+
+    let LiveWhisperOutcome::Transcribed(mut result) = outcome else {
+        return Ok(());
     };
 
     // M13 S2: live sanitiser — strip hallucinated profanity / known stock
@@ -736,8 +825,6 @@ async fn process_frame(
         _ => AudioSource::Microphone,
     };
 
-    let timestamp = frame.timestamp.elapsed().as_millis() as i64;
-
     if phone_mode_manual_only {
         if let Some(d) = diarizer {
             if let Ok(mut guard) = d.lock() {
@@ -871,10 +958,13 @@ async fn process_frame(
         buf.accumulated_text()
     };
 
-    let post_silence_ms = proc.vad.ms_since_last_speech();
+    // Whisper runs inline and stalls VAD frame processing, so
+    // `ms_since_last_speech()` here includes inference latency — not real
+    // conversational silence. Stage/update the candidate only; confirmation
+    // happens on subsequent live silence ticks via `check_silence`.
     let plan = {
         let mut guard = hybrid.lock().await;
-        guard.ingest_transcript(&accumulated, post_silence_ms)
+        guard.ingest_transcript(&accumulated, 0)
     };
     let dispatched =
         dispatch_confirm_plan(plan, hybrid, app_handle, question_tx, session_id).await?;
