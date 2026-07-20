@@ -169,11 +169,11 @@ fn looks_like_vad_fragment(text: &str) -> bool {
         .to_lowercase();
 
     const DANGLING_TAIL_WORDS: &[&str] = &[
-        "stuff", "things", "this", "that", "the", "a", "an", "some", "any", "your", "our",
-        "my", "their", "its", "it", "of", "about", "for", "with", "in", "on", "at", "to",
-        "and", "or", "but", "so", "if", "when", "where", "which", "who", "what", "how",
-        "part", "parts", "kind", "kinds", "type", "types", "bit", "bits", "aspect", "aspects",
-        "area", "areas", "way", "ways", "piece", "pieces",
+        "stuff", "things", "this", "that", "the", "a", "an", "some", "any", "your", "our", "my",
+        "their", "its", "it", "of", "about", "for", "with", "in", "on", "at", "to", "and", "or",
+        "but", "so", "if", "when", "where", "which", "who", "what", "how", "part", "parts", "kind",
+        "kinds", "type", "types", "bit", "bits", "aspect", "aspects", "area", "areas", "way",
+        "ways", "piece", "pieces",
     ];
 
     DANGLING_TAIL_WORDS.contains(&last.as_str())
@@ -194,10 +194,7 @@ fn looks_like_continuation(prev: &str, next: &str) -> bool {
     }
 
     let prev_trim = prev.trim();
-    let next_starts_lower = next_trim
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_lowercase());
+    let next_starts_lower = next_trim.chars().next().is_some_and(|c| c.is_lowercase());
 
     looks_like_vad_fragment(prev_trim)
         || (next_starts_lower && !prev_trim.ends_with(|c: char| ".!?".contains(c)))
@@ -513,7 +510,9 @@ mod tests {
     #[test]
     fn vad_fragment_detects_dangling_tail() {
         assert!(looks_like_vad_fragment("What parts of this stuff?"));
-        assert!(!looks_like_vad_fragment("What motivates you most about this role?"));
+        assert!(!looks_like_vad_fragment(
+            "What motivates you most about this role?"
+        ));
     }
 
     #[test]

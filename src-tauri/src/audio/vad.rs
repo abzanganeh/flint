@@ -176,13 +176,21 @@ impl VadChunker {
     /// do not split one question across two transcript lines.
     pub fn new_for_system() -> Result<Self> {
         let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
-        Ok(Self::with_vad(vad, MAX_CHUNK_FRAMES, SYSTEM_MAX_SILENCE_FRAMES))
+        Ok(Self::with_vad(
+            vad,
+            MAX_CHUNK_FRAMES,
+            SYSTEM_MAX_SILENCE_FRAMES,
+        ))
     }
 
     /// Mock interview capture — same VAD thresholds, smaller max chunk for streaming STT.
     pub fn new_for_mock() -> Result<Self> {
         let vad = Vad::new_with_rate_and_mode(SampleRate::Rate16kHz, VAD_MODE);
-        Ok(Self::with_vad(vad, MOCK_MAX_CHUNK_FRAMES, MAX_SILENCE_FRAMES))
+        Ok(Self::with_vad(
+            vad,
+            MOCK_MAX_CHUNK_FRAMES,
+            MAX_SILENCE_FRAMES,
+        ))
     }
 
     fn with_vad(vad: Vad, max_chunk_frames: u32, max_silence_frames: u32) -> Self {

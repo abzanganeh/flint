@@ -82,21 +82,22 @@ async fn worker_loop(
         } = job;
         let w = Arc::clone(&whisper);
 
-        let outcome =
-            match tokio::task::spawn_blocking(move || w.transcribe_with_context(&chunk, &rolling_context))
-                .await
-            {
-                Ok(Ok(Some(result))) => LiveWhisperOutcome::Transcribed(result),
-                Ok(Ok(None)) => LiveWhisperOutcome::Empty,
-                Ok(Err(e)) => {
-                    warn!(error = %e, source = ?meta.source, "live whisper transcription error");
-                    LiveWhisperOutcome::Failed
-                }
-                Err(e) => {
-                    warn!(error = %e, source = ?meta.source, "live whisper task panicked");
-                    LiveWhisperOutcome::Failed
-                }
-            };
+        let outcome = match tokio::task::spawn_blocking(move || {
+            w.transcribe_with_context(&chunk, &rolling_context)
+        })
+        .await
+        {
+            Ok(Ok(Some(result))) => LiveWhisperOutcome::Transcribed(result),
+            Ok(Ok(None)) => LiveWhisperOutcome::Empty,
+            Ok(Err(e)) => {
+                warn!(error = %e, source = ?meta.source, "live whisper transcription error");
+                LiveWhisperOutcome::Failed
+            }
+            Err(e) => {
+                warn!(error = %e, source = ?meta.source, "live whisper task panicked");
+                LiveWhisperOutcome::Failed
+            }
+        };
 
         if result_tx.send((meta, outcome)).is_err() {
             break;
@@ -106,8 +107,6 @@ async fn worker_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn worker_uses_unbounded_queue() {
         let src = include_str!("live_whisper_worker.rs");

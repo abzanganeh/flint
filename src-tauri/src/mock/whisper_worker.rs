@@ -32,7 +32,10 @@ pub struct TurnTranscript {
 }
 
 enum WorkerCommand {
-    ResetContext { turn_n: u32, epoch: TurnEpoch },
+    ResetContext {
+        turn_n: u32,
+        epoch: TurnEpoch,
+    },
     Transcribe {
         epoch: TurnEpoch,
         turn_n: u32,
@@ -94,12 +97,7 @@ impl WhisperWorker {
             .context("whisper worker transcribe send")
     }
 
-    pub async fn flush(
-        &self,
-        epoch: TurnEpoch,
-        turn_n: u32,
-        timeout: Duration,
-    ) -> TurnTranscript {
+    pub async fn flush(&self, epoch: TurnEpoch, turn_n: u32, timeout: Duration) -> TurnTranscript {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -262,8 +260,6 @@ async fn worker_loop<R: Runtime>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn worker_uses_unbounded_queue() {
         let src = include_str!("whisper_worker.rs");

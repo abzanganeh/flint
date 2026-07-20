@@ -57,12 +57,8 @@ pub enum MicCommand {
 
 #[derive(Debug)]
 enum CpalControl {
-    Open {
-        reply: oneshot::Sender<Result<()>>,
-    },
-    Close {
-        reply: oneshot::Sender<()>,
-    },
+    Open { reply: oneshot::Sender<Result<()>> },
+    Close { reply: oneshot::Sender<()> },
     Shutdown,
 }
 
