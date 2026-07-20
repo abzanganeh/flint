@@ -398,7 +398,7 @@ pub async fn run_audio_pipeline(
     let (whisper_worker, mut whisper_results) =
         LiveWhisperWorker::start(Arc::clone(&whisper), Arc::clone(&whisper_pending));
 
-    let mut dispatch_whisper_result = |meta: LiveWhisperJobMeta, outcome: LiveWhisperOutcome| {
+    let dispatch_whisper_result = |meta: LiveWhisperJobMeta, outcome: LiveWhisperOutcome| {
         async {
             let result = handle_transcription_result(
                 meta,
