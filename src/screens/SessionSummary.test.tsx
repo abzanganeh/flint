@@ -53,4 +53,37 @@ describe("SessionSummary", () => {
     });
     expect(screen.getByText(/No session to summarise\./)).toBeTruthy();
   });
+
+  it("shows prepare for next round when callback is provided", async () => {
+    mockGenerate.mockResolvedValue(
+      JSON.stringify({
+        date: "Jul 20",
+        domain: "job interview",
+        role: "Engineer",
+        company: "DAT",
+        questions_count: 5,
+        topics_covered: ["motivation"],
+        confidence_distribution: { high: 3, medium: 2, low: 0 },
+        key_moments: [],
+        follow_up_actions: ["Prep system design with Jacob"],
+        one_line_summary: "Solid recruiter screen.",
+      }),
+    );
+
+    const onPrepare = vi.fn();
+    render(
+      <SessionSummary
+        sessionId="sess-dat"
+        onDone={() => undefined}
+        onPrepareNextRound={onPrepare}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-summary-prepare-next")).toBeTruthy();
+    });
+
+    screen.getByTestId("session-summary-prepare-next").click();
+    expect(onPrepare).toHaveBeenCalledTimes(1);
+  });
 });

@@ -75,6 +75,28 @@ pub fn supplemental_questions_for_round(round_type: &str) -> Vec<BankQuestionEnt
             ),
             BankQuestionEntry::new("What questions do you have for me?", vec!["general".into()]),
         ],
+        "technical" => vec![
+            BankQuestionEntry::new(
+                "Walk me through a recent technical project you owned end to end.",
+                vec!["technical".into(), "self-assessment".into()],
+            ),
+            BankQuestionEntry::new(
+                "How would you design a system to handle high read traffic?",
+                vec!["technical".into()],
+            ),
+            BankQuestionEntry::new(
+                "Describe a challenging bug you debugged in production.",
+                vec!["technical".into(), "competency".into()],
+            ),
+            BankQuestionEntry::new(
+                "How do you approach trade-offs between speed and correctness?",
+                vec!["technical".into(), "behavioral".into()],
+            ),
+            BankQuestionEntry::new(
+                "Explain a piece of your codebase or architecture in detail.",
+                vec!["technical".into()],
+            ),
+        ],
         "hiring_manager" => vec![
             BankQuestionEntry::new(
                 "How do you like to work with your manager?",
@@ -196,9 +218,17 @@ mod tests {
     }
 
     #[test]
+    fn supplemental_questions_technical_are_tagged() {
+        let entries = supplemental_questions_for_round("technical");
+        assert_eq!(entries.len(), 5);
+        assert!(entries
+            .iter()
+            .all(|e| e.tags.iter().any(|t| t == "technical")));
+    }
+
+    #[test]
     fn supplemental_questions_unknown_or_empty_round_type_is_empty() {
         assert!(supplemental_questions_for_round("").is_empty());
-        assert!(supplemental_questions_for_round("technical").is_empty());
         assert!(supplemental_questions_for_round("not-a-real-round").is_empty());
     }
 }

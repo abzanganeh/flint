@@ -225,6 +225,7 @@ pub fn run() {
             commands::get_session_focus,
             commands::save_session_focus,
             commands::infer_round_type_from_brief,
+            commands::ingest_round_debrief,
             commands::set_phone_call_mode,
             commands::list_question_bank_tags,
             commands::get_focus_tag_catalog,

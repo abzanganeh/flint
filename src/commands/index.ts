@@ -834,6 +834,22 @@ export const saveSessionFocus = (
   focus: SessionFocusDto,
 ): Promise<void> => invoke<void>("save_session_focus", { sessionId, focus });
 
+export interface IngestRoundDebriefResult {
+  chunksAdded: number;
+}
+
+/** Append post-round debrief notes into session RAG (REHEARSING only). */
+export const ingestRoundDebrief = (
+  sessionId: string,
+  roundType: string,
+  debrief: string,
+): Promise<IngestRoundDebriefResult> =>
+  invoke<IngestRoundDebriefResult>("ingest_round_debrief", {
+    sessionId,
+    roundType,
+    debrief,
+  });
+
 /** Heuristic suggestion from recruiter brief text; null when no keywords match. */
 export const inferRoundTypeFromBrief = (
   recruiterBrief: string,

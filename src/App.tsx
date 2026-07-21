@@ -11,6 +11,7 @@ import {
   getSessionFocus,
   importFromSmartResume,
   reopenSession,
+  reopenPastSession,
   restoreDraftSession,
   returnToSessionDesign,
   startLivePreview,
@@ -811,6 +812,20 @@ function App() {
             setSessionId(null);
             setScreen("session-list");
           }}
+          onPrepareNextRound={
+            sessionId
+              ? () => {
+                  void (async () => {
+                    try {
+                      await reopenPastSession(sessionId);
+                      await routeAfterDigestOrLive(sessionId);
+                    } catch (err: unknown) {
+                      setImportError(String(err));
+                    }
+                  })();
+                }
+              : undefined
+          }
         />
       </Shell>
     );
