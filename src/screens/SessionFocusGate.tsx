@@ -4,6 +4,7 @@ import {
   getFocusTagCatalog,
   getSessionFocus,
   inferRoundTypeFromBrief,
+  ingestRoundDebrief,
   saveSessionFocus,
   type FocusTagCatalogEntry,
   type SessionFocusDto,
@@ -23,6 +24,16 @@ const ROUND_TYPES = [
   { value: "final", label: "Final / executive round" },
 ] as const;
 
+const ROUND_ORDER = ROUND_TYPES.map((t) => t.value);
+
+function suggestNextRound(current: string): string {
+  const idx = ROUND_ORDER.indexOf(current);
+  if (idx >= 0 && idx < ROUND_ORDER.length - 1) {
+    return ROUND_ORDER[idx + 1] ?? "";
+  }
+  return "";
+}
+
 const emptyFocus = (): SessionFocusDto => ({
   focusName: "",
   focusTags: [],
@@ -35,6 +46,7 @@ const emptyFocus = (): SessionFocusDto => ({
 
 export default function SessionFocusGate({ sessionId, onComplete }: Props) {
   const [focus, setFocus] = useState<SessionFocusDto>(emptyFocus);
+  const [debriefNotes, setDebriefNotes] = useState("");
   const [catalog, setCatalog] = useState<FocusTagCatalogEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -49,8 +61,16 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
         getSessionFocus(sessionId),
         getFocusTagCatalog(sessionId),
       ]);
-      setFocus(focusData);
+      let loadedFocus = focusData;
+      if (focusData.needsFocusRefresh && focusData.roundType) {
+        const nextRound = suggestNextRound(focusData.roundType);
+        if (nextRound) {
+          loadedFocus = { ...focusData, roundType: nextRound };
+        }
+      }
+      setFocus(loadedFocus);
       setCatalog(tagCatalog);
+      setDebriefNotes("");
       roundTypeTouchedRef.current = false;
     } catch (e) {
       setError(String(e));
@@ -94,6 +114,10 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
     setSaving(true);
     setError(null);
     try {
+      const debrief = debriefNotes.trim();
+      if (debrief.length > 0) {
+        await ingestRoundDebrief(sessionId, focus.roundType, debrief);
+      }
       await saveSessionFocus(sessionId, {
         ...focus,
         focusConfirmedAt: Math.floor(Date.now() / 1000),
@@ -106,6 +130,8 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
       setSaving(false);
     }
   };
+
+  const nextRoundPrep = focus.needsFocusRefresh;
 
   if (loading) {
     return (
@@ -126,11 +152,32 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
       }}
       data-testid="session-focus-gate"
     >
-      <h1 style={{ fontSize: 22, marginBottom: 8 }}>Session focus</h1>
+      <h1 style={{ fontSize: 22, marginBottom: 8 }}>
+        {nextRoundPrep ? "Prepare for your next round" : "Session focus"}
+      </h1>
       <p style={{ color: "#94a3b8", fontSize: 14, lineHeight: 1.6, marginBottom: 24 }}>
-        Narrow rehearsal and mock questions to what this interview round covers. Live sessions
-        always use the full bank — no surprises during the real call.
+        {nextRoundPrep
+          ? "Update the interview round, paste what you learned from the last call, and narrow rehearsal questions for the next conversation."
+          : "Narrow rehearsal and mock questions to what this interview round covers. Live sessions always use the full bank — no surprises during the real call."}
       </p>
+
+      {nextRoundPrep && (
+        <div
+          data-testid="session-focus-next-round-banner"
+          style={{
+            background: "#312e8122",
+            border: "1px solid #4338ca",
+            borderRadius: 6,
+            padding: "10px 12px",
+            color: "#c4b5fd",
+            fontSize: 13,
+            marginBottom: 16,
+          }}
+        >
+          Your last live session finished. Confirm the next round type and optional debrief
+          notes — debrief text is added to session RAG for rehearsal and live answers.
+        </div>
+      )}
 
       {error && (
         <div
@@ -254,7 +301,7 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
         </div>
       </div>
 
-      <label style={{ display: "block", marginBottom: 24 }}>
+      <label style={{ display: "block", marginBottom: 16 }}>
         <span style={{ display: "block", fontSize: 12, color: "#64748b", marginBottom: 6 }}>
           Notes (optional)
         </span>
@@ -265,6 +312,22 @@ export default function SessionFocusGate({ sessionId, onComplete }: Props) {
           style={{ ...inputStyle, resize: "vertical" }}
         />
       </label>
+
+      {nextRoundPrep && (
+        <label style={{ display: "block", marginBottom: 24 }}>
+          <span style={{ display: "block", fontSize: 12, color: "#64748b", marginBottom: 6 }}>
+            Round debrief (optional)
+          </span>
+          <textarea
+            data-testid="session-focus-debrief"
+            value={debriefNotes}
+            onChange={(e) => setDebriefNotes(e.target.value)}
+            rows={4}
+            placeholder="What happened in the last round? Topics asked, interviewer names, take-home details, areas to prep…"
+            style={{ ...inputStyle, resize: "vertical" }}
+          />
+        </label>
+      )}
 
       <button
         type="button"

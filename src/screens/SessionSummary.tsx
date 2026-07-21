@@ -18,6 +18,7 @@ interface SessionEssence {
 interface Props {
   sessionId?: string | null;
   onDone: () => void;
+  onPrepareNextRound?: () => void;
 }
 
 function parseEssence(raw: string): SessionEssence | null {
@@ -53,7 +54,7 @@ function isSoftUnavailableSummary(essence: SessionEssence): boolean {
   );
 }
 
-export function SessionSummary({ sessionId, onDone }: Props) {
+export function SessionSummary({ sessionId, onDone, onPrepareNextRound }: Props) {
   const [essence, setEssence] = useState<SessionEssence | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -212,6 +213,16 @@ export function SessionSummary({ sessionId, onDone }: Props) {
             }}
           >
             Retry summary
+          </button>
+        )}
+        {onPrepareNextRound && sessionId && (
+          <button
+            type="button"
+            className="ss-done-btn ss-prepare-next-btn"
+            data-testid="session-summary-prepare-next"
+            onClick={onPrepareNextRound}
+          >
+            Prepare for next round
           </button>
         )}
         <button className="ss-done-btn" onClick={onDone}>

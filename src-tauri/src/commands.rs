@@ -2553,6 +2553,105 @@ pub async fn infer_round_type_from_brief(
     Ok(crate::session::round_questions::infer_round_type(&recruiter_brief).map(|s| s.to_string()))
 }
 
+fn round_type_display_label(round_type: &str) -> &str {
+    crate::session::round_questions::ROUND_TYPES
+        .iter()
+        .find(|(id, _)| *id == round_type)
+        .map(|(_, label)| *label)
+        .unwrap_or(round_type)
+}
+
+/// Append post-round debrief notes into session RAG for the next rehearsal/live pass.
+///
+/// Valid from: `REHEARSING` only (after `reopen_past_session`).
+#[tauri::command]
+pub async fn ingest_round_debrief(
+    state: State<'_, AppState>,
+    session_id: String,
+    round_type: String,
+    debrief: String,
+) -> Result<AppendResearchResultDto, String> {
+    let sid = validate_session_id(&state, &session_id).await?;
+
+    {
+        let machine = state.state_machine.lock().await;
+        if *machine.current() != SessionState::Rehearsing {
+            return Err(format!(
+                "ingest_round_debrief is only valid from REHEARSING (current: {})",
+                machine.current()
+            ));
+        }
+    }
+
+    let debrief = debrief.trim().to_string();
+    if debrief.is_empty() {
+        return Ok(AppendResearchResultDto { chunks_added: 0 });
+    }
+
+    let round_label = if round_type.trim().is_empty() {
+        "Previous round".to_string()
+    } else {
+        round_type_display_label(round_type.trim()).to_string()
+    };
+    let block = format!("[ROUND DEBRIEF — {round_label}]\n{debrief}");
+
+    let existing_text = state
+        .persistence
+        .get_session_context(sid)
+        .map_err(|e| e.to_string())?;
+    let merged = if existing_text.trim().is_empty() {
+        block.clone()
+    } else {
+        format!("{existing_text}\n\n{block}")
+    };
+    state
+        .persistence
+        .store_context_text(sid, &merged)
+        .map_err(|e| e.to_string())?;
+
+    let raw_chunks = chunk_text(&block, 200, 50);
+    if raw_chunks.is_empty() {
+        return Ok(AppendResearchResultDto { chunks_added: 0 });
+    }
+
+    let embedder = state
+        .wait_for_embedder(std::time::Duration::from_secs(30))
+        .await
+        .map_err(|e| format!("Embedding unavailable: {e}"))?;
+
+    let raw_owned = raw_chunks.clone();
+    let embeddings = tokio::task::spawn_blocking(move || {
+        let refs: Vec<&str> = raw_owned.iter().map(|s| s.as_str()).collect();
+        embedder.embed_batch(&refs)
+    })
+    .await
+    .map_err(|e| format!("Embedder task panicked: {e}"))?
+    .map_err(|e| format!("Embedding failed: {e}"))?;
+
+    let ingest_chunks: Vec<Chunk> = raw_chunks
+        .into_iter()
+        .zip(embeddings)
+        .map(|(text, embedding)| Chunk {
+            id: Uuid::new_v4(),
+            text,
+            embedding,
+            session_id: sid,
+        })
+        .collect();
+    let count = ingest_chunks.len();
+
+    state
+        .vector_store
+        .ingest(sid, ingest_chunks)
+        .await
+        .map_err(|e| format!("Failed to ingest round debrief into RAG: {e}"))?;
+
+    info!(session_id = %sid, chunks_added = count, "round debrief appended to context");
+    Ok(AppendResearchResultDto {
+        chunks_added: count,
+    })
+}
+
 /// Toggle phone-call mode for the active session.
 ///
 /// Can be called any time before LIVE. The flag is read by `start_session`
@@ -6788,10 +6887,28 @@ mod round_type_merge_tests {
         )
         .unwrap();
 
-        merge_supplemental_round_questions(&db, sid, "technical").unwrap();
+        merge_supplemental_round_questions(&db, sid, "not-a-real-round").unwrap();
 
         let entries = db.load_question_bank_entries(sid).unwrap();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn merge_technical_round_adds_five_supplemental_questions() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Tech", "interview", "swe")
+            .unwrap();
+        db.store_question_bank_entries(
+            sid,
+            &[BankQuestionEntry::new("Existing question.", vec![])],
+        )
+        .unwrap();
+
+        merge_supplemental_round_questions(&db, sid, "technical").unwrap();
+
+        let entries = db.load_question_bank_entries(sid).unwrap();
+        assert_eq!(entries.len(), 1 + 5);
     }
 }
 

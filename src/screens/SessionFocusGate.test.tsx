@@ -7,6 +7,7 @@ vi.mock("../commands", () => ({
   getFocusTagCatalog: vi.fn(),
   getSessionFocus: vi.fn(),
   inferRoundTypeFromBrief: vi.fn(),
+  ingestRoundDebrief: vi.fn(),
   saveSessionFocus: vi.fn(),
 }));
 
@@ -186,5 +187,70 @@ describe("SessionFocusGate round-type selector", () => {
         }),
       );
     });
+  });
+});
+
+describe("SessionFocusGate next-round prep", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows debrief field and suggests the next round after a live session", async () => {
+    const { getFocusTagCatalog, getSessionFocus } = await import("../commands");
+    vi.mocked(getSessionFocus).mockResolvedValue({
+      ...emptyFocus(),
+      roundType: "recruiter_screen",
+      needsFocusRefresh: true,
+      focusTags: ["motivation"],
+      focusConfirmedAt: 1,
+    });
+    vi.mocked(getFocusTagCatalog).mockResolvedValue(catalog);
+
+    render(<SessionFocusGate sessionId="s1" onComplete={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-focus-next-round-banner")).toBeTruthy();
+    });
+    expect(screen.getByTestId("session-focus-debrief")).toBeTruthy();
+    expect(
+      (screen.getByTestId("session-focus-round-type") as HTMLSelectElement).value,
+    ).toBe("technical");
+  });
+
+  it("ingests debrief before saving focus when debrief text is present", async () => {
+    const { getFocusTagCatalog, getSessionFocus, ingestRoundDebrief, saveSessionFocus } =
+      await import("../commands");
+    vi.mocked(getSessionFocus).mockResolvedValue({
+      ...emptyFocus(),
+      roundType: "recruiter_screen",
+      needsFocusRefresh: true,
+    });
+    vi.mocked(getFocusTagCatalog).mockResolvedValue(catalog);
+    vi.mocked(ingestRoundDebrief).mockResolvedValue({ chunksAdded: 2 });
+    vi.mocked(saveSessionFocus).mockResolvedValue(undefined);
+
+    render(<SessionFocusGate sessionId="s1" onComplete={() => {}} />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("session-focus-debrief")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("session-focus-debrief"), {
+      target: { value: "Jacob runs system design next week." },
+    });
+    fireEvent.click(screen.getByTestId("focus-tag-chip-technical"));
+    fireEvent.click(screen.getByTestId("session-focus-continue"));
+
+    await waitFor(() => {
+      expect(ingestRoundDebrief).toHaveBeenCalledWith(
+        "s1",
+        "technical",
+        "Jacob runs system design next week.",
+      );
+    });
+    expect(saveSessionFocus).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ needsFocusRefresh: false }),
+    );
   });
 });
