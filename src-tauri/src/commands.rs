@@ -6887,10 +6887,28 @@ mod round_type_merge_tests {
         )
         .unwrap();
 
-        merge_supplemental_round_questions(&db, sid, "technical").unwrap();
+        merge_supplemental_round_questions(&db, sid, "not-a-real-round").unwrap();
 
         let entries = db.load_question_bank_entries(sid).unwrap();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn merge_technical_round_adds_five_supplemental_questions() {
+        let db = new_db();
+        let sid = Uuid::new_v4();
+        db.create_session_row(sid, "Tech", "interview", "swe")
+            .unwrap();
+        db.store_question_bank_entries(
+            sid,
+            &[BankQuestionEntry::new("Existing question.", vec![])],
+        )
+        .unwrap();
+
+        merge_supplemental_round_questions(&db, sid, "technical").unwrap();
+
+        let entries = db.load_question_bank_entries(sid).unwrap();
+        assert_eq!(entries.len(), 1 + 5);
     }
 }
 
