@@ -52,6 +52,15 @@ export interface PrimaryRestoredEventPayload {
   provider: string;
 }
 
+export interface TranscriptionFailoverTriggeredEventPayload {
+  from: string;
+  to: string;
+}
+
+export interface TranscriptionPrimaryRestoredEventPayload {
+  provider: string;
+}
+
 export interface TokenUsageUpdateEventPayload {
   input: number;
   output: number;
@@ -211,6 +220,28 @@ export const onPrimaryRestored = (
 ): Promise<UnlistenFn> =>
   listen<PrimaryRestoredEventPayload>("primary_restored", (event) =>
     handler(event.payload),
+  );
+
+/**
+ * STT-side failover event — emitted when the transcription router falls
+ * back from Deepgram to local Whisper. Distinct from the LLM
+ * `failover_triggered` event so the UI can surface a separate indicator.
+ */
+export const onTranscriptionFailoverTriggered = (
+  handler: (payload: TranscriptionFailoverTriggeredEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<TranscriptionFailoverTriggeredEventPayload>(
+    "transcription_failover_triggered",
+    (event) => handler(event.payload),
+  );
+
+/** STT-side primary-restored event — the cloud primary is usable again. */
+export const onTranscriptionPrimaryRestored = (
+  handler: (payload: TranscriptionPrimaryRestoredEventPayload) => void,
+): Promise<UnlistenFn> =>
+  listen<TranscriptionPrimaryRestoredEventPayload>(
+    "transcription_primary_restored",
+    (event) => handler(event.payload),
   );
 
 export const onTokenUsageUpdate = (

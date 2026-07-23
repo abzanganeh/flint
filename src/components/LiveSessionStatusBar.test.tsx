@@ -6,6 +6,7 @@ import LiveSessionStatusBar from "./LiveSessionStatusBar";
 const signalQuestionEnded = vi.fn();
 const getInterviewerSpanPreview = vi.fn();
 const getProviderPriority = vi.fn();
+const getTranscriptionProviderPreference = vi.fn();
 const setLastManualQuestion = vi.fn();
 const pushNotification = vi.fn();
 
@@ -13,6 +14,7 @@ vi.mock("../commands", () => ({
   signalQuestionEnded: (...args: unknown[]) => signalQuestionEnded(...args),
   getInterviewerSpanPreview: (...args: unknown[]) => getInterviewerSpanPreview(...args),
   getProviderPriority: () => getProviderPriority(),
+  getTranscriptionProviderPreference: () => getTranscriptionProviderPreference(),
 }));
 
 vi.mock("../store/ui", () => ({
@@ -47,6 +49,14 @@ vi.mock("../events", () => ({
     handlers.threadStatus = handler;
     return Promise.resolve(() => undefined);
   },
+  onTranscriptionFailoverTriggered: (handler: (payload: unknown) => void) => {
+    handlers.transcriptionFailover = handler;
+    return Promise.resolve(() => undefined);
+  },
+  onTranscriptionPrimaryRestored: (handler: (payload: unknown) => void) => {
+    handlers.transcriptionRestored = handler;
+    return Promise.resolve(() => undefined);
+  },
 }));
 
 vi.mock("../hooks/useTranscriptionStream", () => ({
@@ -59,6 +69,7 @@ describe("LiveSessionStatusBar", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getProviderPriority.mockResolvedValue(["groq", "deepseek"]);
+    getTranscriptionProviderPreference.mockResolvedValue("whisper");
     signalQuestionEnded.mockResolvedValue(undefined);
     getInterviewerSpanPreview.mockResolvedValue({
       text: "Tell me about yourself.",
@@ -133,6 +144,35 @@ describe("LiveSessionStatusBar", () => {
     expect(signalQuestionEnded).toHaveBeenCalledWith("session-1");
     expect(screen.getByTestId("live-q-button").className).toContain("live-q-button--flash");
     expect(screen.getByTestId("live-q-button").textContent).toContain("Ask now");
+  });
+
+  it("hides the transcription badge when Whisper is the preference", async () => {
+    getTranscriptionProviderPreference.mockResolvedValue("whisper");
+    render(<LiveSessionStatusBar sessionId="session-1" />);
+    await waitFor(() => expect(getInterviewerSpanPreview).toHaveBeenCalled());
+    expect(screen.queryByTestId("live-transcription-badge")).toBeNull();
+  });
+
+  it("shows the transcription badge and flips to local on Deepgram failover", async () => {
+    getTranscriptionProviderPreference.mockResolvedValue("deepgram");
+    render(<LiveSessionStatusBar sessionId="session-1" />);
+    await waitFor(() => {
+      expect(screen.getByTestId("live-transcription-badge").textContent).toContain(
+        "Deepgram",
+      );
+    });
+    await act(async () => {
+      handlers.transcriptionFailover?.({ from: "deepgram", to: "whisper" });
+    });
+    expect(screen.getByTestId("live-transcription-badge").textContent).toContain(
+      "Deepgram unavailable",
+    );
+    await act(async () => {
+      handlers.transcriptionRestored?.({ provider: "deepgram" });
+    });
+    expect(screen.getByTestId("live-transcription-badge").textContent).toContain(
+      "Deepgram",
+    );
   });
 
   it("surfaces backend errors when signalQuestionEnded fails", async () => {

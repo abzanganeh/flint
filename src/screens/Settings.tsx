@@ -29,8 +29,16 @@ import {
 import { useUiZoom } from "../hooks/useUiZoom";
 import { UI_ZOOM_DEFAULT, UI_ZOOM_MAX, UI_ZOOM_MIN } from "../lib/uiZoomPreference";
 import ProviderSettings from "./ProviderSettings";
+import TranscriptionSettings from "./TranscriptionSettings";
 
-type Tab = "api-keys" | "usage-cap" | "account" | "privacy" | "session-focus" | "features";
+type Tab =
+  | "api-keys"
+  | "usage-cap"
+  | "account"
+  | "privacy"
+  | "session-focus"
+  | "features"
+  | "transcription";
 
 interface Props {
   onBack?: () => void;
@@ -809,6 +817,7 @@ const TAB_LABELS: Record<Tab, string> = {
   account: "Account",
   "session-focus": "Session Focus",
   "api-keys": "API Keys",
+  transcription: "Transcription",
   "usage-cap": "Usage Cap",
   privacy: "Privacy",
   features: "Features",
@@ -850,6 +859,7 @@ export default function Settings({
 
       <div className="settings-screen__panel" role="tabpanel">
         {activeTab === "api-keys" && <ProviderSettings />}
+        {activeTab === "transcription" && <TranscriptionSettings />}
         {activeTab === "usage-cap" && <CostCapTab />}
         {activeTab === "account" && (
           <AccountTab onLoggedOut={onLoggedOut} onRetestMic={onRetestMic} />

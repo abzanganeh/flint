@@ -11,7 +11,7 @@ import {
   type ConfiguredProviderDto,
 } from "../commands";
 
-interface ProviderRow {
+export interface ProviderRow {
   provider: ApiKeyProvider;
   label: string;
   placeholder: string;
@@ -81,12 +81,12 @@ const WEB_PROVIDERS: ProviderRow[] = [
   },
 ];
 
-interface ProviderEntryProps {
+export interface ProviderEntryProps {
   row: ProviderRow;
   onKeyChanged?: () => void;
 }
 
-function ProviderEntry({ row, onKeyChanged }: ProviderEntryProps) {
+export function ProviderEntry({ row, onKeyChanged }: ProviderEntryProps) {
   const [keyPresent, setKeyPresent] = useState<boolean | null>(null);
   const [input, setInput] = useState("");
   const [editing, setEditing] = useState(false);
