@@ -3814,22 +3814,33 @@ mod tests {
     #[test]
     fn transcription_provider_preference_defaults_to_whisper() {
         let db = new_db();
-        assert_eq!(db.get_transcription_provider_preference().unwrap(), "whisper");
+        assert_eq!(
+            db.get_transcription_provider_preference().unwrap(),
+            "whisper"
+        );
     }
 
     #[test]
     fn transcription_provider_preference_round_trips_deepgram() {
         let db = new_db();
-        db.set_transcription_provider_preference("deepgram").unwrap();
-        assert_eq!(db.get_transcription_provider_preference().unwrap(), "deepgram");
+        db.set_transcription_provider_preference("deepgram")
+            .unwrap();
+        assert_eq!(
+            db.get_transcription_provider_preference().unwrap(),
+            "deepgram"
+        );
     }
 
     #[test]
     fn transcription_provider_preference_whisper_deletes_row() {
         let db = new_db();
-        db.set_transcription_provider_preference("deepgram").unwrap();
+        db.set_transcription_provider_preference("deepgram")
+            .unwrap();
         db.set_transcription_provider_preference("whisper").unwrap();
-        assert_eq!(db.get_transcription_provider_preference().unwrap(), "whisper");
+        assert_eq!(
+            db.get_transcription_provider_preference().unwrap(),
+            "whisper"
+        );
     }
 
     #[test]
@@ -3839,7 +3850,10 @@ mod tests {
         let db = new_db();
         db.set_app_preference("transcription_provider_preference", "garbage")
             .unwrap();
-        assert_eq!(db.get_transcription_provider_preference().unwrap(), "whisper");
+        assert_eq!(
+            db.get_transcription_provider_preference().unwrap(),
+            "whisper"
+        );
     }
 
     #[test]

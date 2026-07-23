@@ -235,10 +235,7 @@ impl TranscriptionProvider for DeepgramTranscriptionProvider {
             bail!("Deepgram API error {status}: {snippet}");
         }
 
-        let text = response
-            .text()
-            .await
-            .context("Deepgram body read failed")?;
+        let text = response.text().await.context("Deepgram body read failed")?;
 
         Self::parse_response(&text, chunk.source, chunk.duration_ms)
     }
@@ -368,7 +365,9 @@ mod tests {
         let body = r#"{not valid json"#;
         let err = DeepgramTranscriptionProvider::parse_response(body, AudioSource::System, 500)
             .expect_err("malformed JSON must fail");
-        assert!(err.to_string().contains("Deepgram response JSON parse failed"));
+        assert!(err
+            .to_string()
+            .contains("Deepgram response JSON parse failed"));
     }
 
     #[test]
@@ -427,7 +426,10 @@ mod tests {
             .await;
 
         let p = provider(server.uri(), Duration::from_secs(2));
-        let out = p.transcribe(chunk_with_speech(500), String::new()).await.unwrap();
+        let out = p
+            .transcribe(chunk_with_speech(500), String::new())
+            .await
+            .unwrap();
         assert!(out.is_none());
     }
 

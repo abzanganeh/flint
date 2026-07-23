@@ -425,8 +425,7 @@ mod tests {
             calls: Arc::clone(&l_calls),
             text: "local".to_string(),
         });
-        let router =
-            TranscriptionRouter::with_primary(primary_dyn, local, mock_app_handle());
+        let router = TranscriptionRouter::with_primary(primary_dyn, local, mock_app_handle());
 
         // Force a failover.
         let _ = router.transcribe(silent_chunk(), String::new()).await;
@@ -453,8 +452,7 @@ mod tests {
             calls: Arc::new(AtomicUsize::new(0)),
             text: "local".to_string(),
         });
-        let router =
-            TranscriptionRouter::with_primary(primary_ok, local, mock_app_handle());
+        let router = TranscriptionRouter::with_primary(primary_ok, local, mock_app_handle());
         assert!(!router.is_using_local());
         router.probe_primary_once().await;
         // Still on primary, no state change, no primary calls made by the probe.

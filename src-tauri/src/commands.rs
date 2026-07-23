@@ -23,9 +23,9 @@ use crate::calibration::{
 };
 use crate::digest::extract_digest;
 use crate::dto::{
-    AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto,
-    HardwareProfileDto, HeadphoneGateStatusDto, HealthCheckResultDto, LiveReadinessReportDto,
-    DeepgramReadinessDto, MicCalibrationStatusDto, OpenSessionLimitsDto,
+    AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DeepgramReadinessDto,
+    DigestDto, HardwareProfileDto, HeadphoneGateStatusDto, HealthCheckResultDto,
+    LiveReadinessReportDto, MicCalibrationStatusDto, OpenSessionLimitsDto,
     RecordingConsentStatusDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
     SmartResumeImportDto, UserDto, WebSourceDto,
 };
@@ -2120,9 +2120,7 @@ fn build_transcription_router(
         .get_transcription_provider_preference()
         .map_err(|e| e.to_string())?;
 
-    let router = if preference == "deepgram"
-        && keychain::is_deepgram_consent_accepted()
-    {
+    let router = if preference == "deepgram" && keychain::is_deepgram_consent_accepted() {
         match keychain::get_api_key("deepgram") {
             Ok(key) => match DeepgramTranscriptionProvider::new(key, DeepgramConfig::default()) {
                 Ok(dg) => {
