@@ -11,6 +11,6 @@
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {},
+  "open_prs": { "flint": "https://github.com/abzanganeh/flint/pull/52" },
   "notes": "Deepgram opt-in STT provider, consent-gated, Whisper-fallback. Batch-per-VAD-chunk against /v1/listen, not streaming."
 }
