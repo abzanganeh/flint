@@ -1,3 +1,4 @@
+pub mod deepgram;
 pub mod detector;
 pub mod engine;
 pub mod hybrid;
