@@ -25,8 +25,9 @@ use crate::digest::extract_digest;
 use crate::dto::{
     AppendResearchResultDto, CalibrationResultDto, ConfiguredProviderDto, DigestDto,
     HardwareProfileDto, HeadphoneGateStatusDto, HealthCheckResultDto, LiveReadinessReportDto,
-    MicCalibrationStatusDto, OpenSessionLimitsDto, RecordingConsentStatusDto, SessionConfigDto,
-    SessionContextFieldsDto, SessionSnapshotDto, SmartResumeImportDto, UserDto, WebSourceDto,
+    DeepgramReadinessDto, MicCalibrationStatusDto, OpenSessionLimitsDto,
+    RecordingConsentStatusDto, SessionConfigDto, SessionContextFieldsDto, SessionSnapshotDto,
+    SmartResumeImportDto, UserDto, WebSourceDto,
 };
 use crate::events::{
     emit_calibration_mic_complete, emit_calibration_system_complete, emit_mock_coach_feedback,
@@ -70,10 +71,12 @@ use crate::session::recovery;
 use crate::session::state::SessionState;
 use crate::smart_resume;
 use crate::state::{AppState, LivePreviewTaskHandles, LiveTaskHandles, MockTaskHandles};
+use crate::transcription::deepgram::{DeepgramConfig, DeepgramTranscriptionProvider};
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{HybridQuestionDetector, SystemTranscriptBuffer};
 use crate::transcription::prompt::{build_whisper_initial_prompt, FALLBACK_WHISPER_INITIAL_PROMPT};
 use crate::transcription::provider::{TranscriptionProvider, WhisperTranscriptionProvider};
+use crate::transcription::router::TranscriptionRouter;
 
 const GENERIC_AUTH_ERROR: &str = "Authentication failed. Please try again.";
 const KEYCHAIN_SAVE_ERROR: &str = "Could not save credentials. Please try again.";
@@ -478,6 +481,91 @@ pub async fn accept_recording_consent(
         .persistence
         .set_recording_consent_accepted(sid)
         .map_err(|e| e.to_string())
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Deepgram STT provider — preference, consent, defense-in-depth gate
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Enforce that the user's transcription preference is actually usable
+/// before a `READY -> LIVE` transition. Whisper always passes. Deepgram
+/// requires both (a) a stored API key and (b) accepted consent — the same
+/// two things the Settings UI checks, re-verified here so a compromised or
+/// out-of-date frontend cannot bypass the gate.
+fn require_transcription_provider_ready(state: &AppState) -> Result<(), String> {
+    let preference = state
+        .persistence
+        .get_transcription_provider_preference()
+        .map_err(|e| e.to_string())?;
+    if preference != "deepgram" {
+        return Ok(());
+    }
+    if !keychain::is_deepgram_consent_accepted() {
+        return Err(
+            "Deepgram is selected but the disclosure has not been accepted. \
+             Please review and accept the Deepgram disclosure in Settings, \
+             or switch back to Whisper."
+                .to_string(),
+        );
+    }
+    keychain::get_api_key("deepgram").map_err(|_| {
+        "Deepgram is selected but no Deepgram API key is stored. \
+         Please add your Deepgram key in Settings, or switch back to Whisper."
+            .to_string()
+    })?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_transcription_provider_preference(
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    state
+        .persistence
+        .get_transcription_provider_preference()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn set_transcription_provider_preference(
+    state: State<'_, AppState>,
+    provider: String,
+) -> Result<(), String> {
+    let normalized = provider.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "whisper" => state
+            .persistence
+            .set_transcription_provider_preference("whisper")
+            .map_err(|e| e.to_string()),
+        "deepgram" => {
+            if !keychain::is_deepgram_consent_accepted() {
+                return Err(
+                    "Cannot enable Deepgram: the disclosure has not been accepted.".to_string(),
+                );
+            }
+            keychain::get_api_key("deepgram").map_err(|_| {
+                "Cannot enable Deepgram: no Deepgram API key is stored.".to_string()
+            })?;
+            state
+                .persistence
+                .set_transcription_provider_preference("deepgram")
+                .map_err(|e| e.to_string())
+        }
+        other => Err(format!("Unknown transcription provider: {other}")),
+    }
+}
+
+#[tauri::command]
+pub fn get_deepgram_consent_status() -> DeepgramReadinessDto {
+    DeepgramReadinessDto {
+        consent_accepted: keychain::is_deepgram_consent_accepted(),
+        api_key_present: keychain::get_api_key("deepgram").is_ok(),
+    }
+}
+
+#[tauri::command]
+pub fn accept_deepgram_consent() -> Result<(), String> {
+    keychain::set_deepgram_consent_accepted().map_err(|_| KEYCHAIN_SAVE_ERROR.to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -2010,6 +2098,56 @@ fn init_whisper_engine(
         })
 }
 
+/// Build the [`TranscriptionRouter`] used by the live audio pipeline.
+///
+/// Whisper is always constructed as the local fallback. If the user's
+/// preference is `"deepgram"` AND both a stored API key and accepted
+/// consent are present, Deepgram is attached as the router's primary and
+/// the background health-ping loop is started. Any missing prerequisite
+/// silently degrades to Whisper-only — the `require_transcription_provider_ready`
+/// gate is the layer responsible for user-facing errors when preference and
+/// prerequisites disagree at LIVE-start time.
+fn build_transcription_router(
+    app: &AppHandle,
+    state: &AppState,
+    whisper: Arc<WhisperEngine>,
+) -> Result<Arc<TranscriptionRouter<tauri::Wry>>, String> {
+    let local: Arc<dyn TranscriptionProvider> =
+        Arc::new(WhisperTranscriptionProvider::new(whisper));
+
+    let preference = state
+        .persistence
+        .get_transcription_provider_preference()
+        .map_err(|e| e.to_string())?;
+
+    let router = if preference == "deepgram"
+        && keychain::is_deepgram_consent_accepted()
+    {
+        match keychain::get_api_key("deepgram") {
+            Ok(key) => match DeepgramTranscriptionProvider::new(key, DeepgramConfig::default()) {
+                Ok(dg) => {
+                    let primary: Arc<dyn TranscriptionProvider> = Arc::new(dg);
+                    TranscriptionRouter::with_primary(primary, local, app.clone())
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Deepgram provider construction failed — routing to Whisper only"
+                    );
+                    TranscriptionRouter::whisper_only(local, app.clone())
+                }
+            },
+            Err(_) => TranscriptionRouter::whisper_only(local, app.clone()),
+        }
+    } else {
+        TranscriptionRouter::whisper_only(local, app.clone())
+    };
+
+    let router = Arc::new(router);
+    router.start_ping_loop();
+    Ok(router)
+}
+
 fn whisper_cache_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".cache").join("whisper")
@@ -3338,6 +3476,7 @@ pub async fn start_session(
     let sid = validate_session_id(&state, &session_id).await?;
 
     require_recording_consent(state.inner(), sid).await?;
+    require_transcription_provider_ready(state.inner())?;
 
     if !keychain::is_rehearsal_completed() {
         return Err("Complete rehearsal before starting a live session.".to_string());
@@ -3396,7 +3535,8 @@ pub async fn start_session(
     let whisper = init_whisper_engine(&profile, initial_prompt)
         .map_err(|e| start_session_step_err("whisper init", e))?;
     let transcriber: Arc<dyn TranscriptionProvider> =
-        Arc::new(WhisperTranscriptionProvider::new(whisper));
+        build_transcription_router(&app, state.inner(), whisper)
+            .map_err(|e| start_session_step_err("transcription router", e))?;
 
     // ── 2. Failover stack (needed by hybrid detector) ─────────────────────
     let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
@@ -3696,7 +3836,8 @@ pub async fn start_live_preview(
     let whisper = init_whisper_engine(&profile, initial_prompt)
         .map_err(|e| start_session_step_err("whisper init", e))?;
     let transcriber: Arc<dyn TranscriptionProvider> =
-        Arc::new(WhisperTranscriptionProvider::new(whisper));
+        build_transcription_router(&app, state.inner(), whisper)
+            .map_err(|e| start_session_step_err("transcription router", e))?;
 
     // ── 2. Failover stack — kept alive in LivePreviewTaskHandles so
     // commit_live_preview reuses it instead of re-validating API keys ─────
@@ -3831,6 +3972,7 @@ pub async fn commit_live_preview(
     let sid = validate_session_id(&state, &session_id).await?;
 
     require_recording_consent(state.inner(), sid).await?;
+    require_transcription_provider_ready(state.inner())?;
 
     {
         let machine = state.state_machine.lock().await;

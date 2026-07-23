@@ -555,6 +555,17 @@ pub struct RecordingConsentStatusDto {
     pub accepted_at: Option<i64>,
 }
 
+/// Combined key + consent readiness for the Deepgram STT provider.
+/// The Settings UI enables the Deepgram radio option only when both fields
+/// are `true`; the backend re-checks them defensively before every
+/// `READY -> LIVE` transition.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepgramReadinessDto {
+    pub consent_accepted: bool,
+    pub api_key_present: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalibrationResultDto {

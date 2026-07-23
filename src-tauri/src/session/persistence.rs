@@ -2440,6 +2440,35 @@ impl SessionPersistence {
         self.delete_app_preference(Self::HEADPHONE_GATE_OVERRIDE_KEY)
     }
 
+    const TRANSCRIPTION_PROVIDER_PREFERENCE_KEY: &'static str = "transcription_provider_preference";
+
+    /// Load the user's preferred transcription provider (`"whisper"` or
+    /// `"deepgram"`). Unknown / missing values fall back to `"whisper"` so a
+    /// corrupted or partially-migrated preference never routes live audio to
+    /// a cloud provider without an explicit opt-in.
+    pub fn get_transcription_provider_preference(&self) -> Result<String> {
+        let raw = self.get_app_preference(Self::TRANSCRIPTION_PROVIDER_PREFERENCE_KEY)?;
+        Ok(match raw.as_deref() {
+            Some("deepgram") => "deepgram".to_string(),
+            _ => "whisper".to_string(),
+        })
+    }
+
+    /// Persist the user's transcription provider choice.
+    ///
+    /// Callers are responsible for validating `provider` (in particular
+    /// that consent + API key exist when persisting `"deepgram"`); this
+    /// method only writes what it is given.
+    pub fn set_transcription_provider_preference(&self, provider: &str) -> Result<()> {
+        if provider == "whisper" {
+            // Whisper is the default — drop the row rather than storing it
+            // so a future default change automatically re-applies.
+            self.delete_app_preference(Self::TRANSCRIPTION_PROVIDER_PREFERENCE_KEY)?;
+            return Ok(());
+        }
+        self.set_app_preference(Self::TRANSCRIPTION_PROVIDER_PREFERENCE_KEY, provider)
+    }
+
     pub fn get_recording_consent_accepted_at(&self, session_id: Uuid) -> Result<Option<i64>> {
         let conn = self.db.lock().expect("session persistence mutex poisoned");
         let sid = session_id.to_string();
@@ -3780,6 +3809,37 @@ mod tests {
         assert!(db.get_headphone_gate_override().unwrap());
         db.clear_headphone_gate_override().unwrap();
         assert!(!db.get_headphone_gate_override().unwrap());
+    }
+
+    #[test]
+    fn transcription_provider_preference_defaults_to_whisper() {
+        let db = new_db();
+        assert_eq!(db.get_transcription_provider_preference().unwrap(), "whisper");
+    }
+
+    #[test]
+    fn transcription_provider_preference_round_trips_deepgram() {
+        let db = new_db();
+        db.set_transcription_provider_preference("deepgram").unwrap();
+        assert_eq!(db.get_transcription_provider_preference().unwrap(), "deepgram");
+    }
+
+    #[test]
+    fn transcription_provider_preference_whisper_deletes_row() {
+        let db = new_db();
+        db.set_transcription_provider_preference("deepgram").unwrap();
+        db.set_transcription_provider_preference("whisper").unwrap();
+        assert_eq!(db.get_transcription_provider_preference().unwrap(), "whisper");
+    }
+
+    #[test]
+    fn transcription_provider_preference_unknown_value_falls_back_to_whisper() {
+        // A stray/corrupted preference value must never leak audio to a
+        // cloud provider — the getter always maps unknown to "whisper".
+        let db = new_db();
+        db.set_app_preference("transcription_provider_preference", "garbage")
+            .unwrap();
+        assert_eq!(db.get_transcription_provider_preference().unwrap(), "whisper");
     }
 
     #[test]

@@ -197,6 +197,10 @@ pub fn run() {
             commands::run_live_readiness_check,
             commands::get_recording_consent_status,
             commands::accept_recording_consent,
+            commands::get_transcription_provider_preference,
+            commands::set_transcription_provider_preference,
+            commands::get_deepgram_consent_status,
+            commands::accept_deepgram_consent,
             // Session design (Phase 2 / Phase 5.5.1)
             commands::create_session,
             commands::ingest_context,
