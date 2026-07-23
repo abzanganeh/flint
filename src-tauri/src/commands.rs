@@ -73,6 +73,7 @@ use crate::state::{AppState, LivePreviewTaskHandles, LiveTaskHandles, MockTaskHa
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{HybridQuestionDetector, SystemTranscriptBuffer};
 use crate::transcription::prompt::{build_whisper_initial_prompt, FALLBACK_WHISPER_INITIAL_PROMPT};
+use crate::transcription::provider::{TranscriptionProvider, WhisperTranscriptionProvider};
 
 const GENERIC_AUTH_ERROR: &str = "Authentication failed. Please try again.";
 const KEYCHAIN_SAVE_ERROR: &str = "Could not save credentials. Please try again.";
@@ -3394,6 +3395,8 @@ pub async fn start_session(
     let initial_prompt = resolve_whisper_initial_prompt(state.inner(), sid).await;
     let whisper = init_whisper_engine(&profile, initial_prompt)
         .map_err(|e| start_session_step_err("whisper init", e))?;
+    let transcriber: Arc<dyn TranscriptionProvider> =
+        Arc::new(WhisperTranscriptionProvider::new(whisper));
 
     // ── 2. Failover stack (needed by hybrid detector) ─────────────────────
     let (failover, local_provider, context_window) = build_failover_stack(&app, &state, true)
@@ -3486,7 +3489,7 @@ pub async fn start_session(
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
         sid,
-        whisper,
+        transcriber,
         hybrid,
         Arc::clone(&system_transcript_buffer),
         question_tx.clone(),
@@ -3692,6 +3695,8 @@ pub async fn start_live_preview(
     let initial_prompt = resolve_whisper_initial_prompt(state.inner(), sid).await;
     let whisper = init_whisper_engine(&profile, initial_prompt)
         .map_err(|e| start_session_step_err("whisper init", e))?;
+    let transcriber: Arc<dyn TranscriptionProvider> =
+        Arc::new(WhisperTranscriptionProvider::new(whisper));
 
     // ── 2. Failover stack — kept alive in LivePreviewTaskHandles so
     // commit_live_preview reuses it instead of re-validating API keys ─────
@@ -3737,7 +3742,7 @@ pub async fn start_live_preview(
     let pipeline = tokio::spawn(run_audio_pipeline(
         app.clone(),
         sid,
-        whisper,
+        transcriber,
         hybrid,
         Arc::clone(&system_transcript_buffer),
         question_tx.clone(),
