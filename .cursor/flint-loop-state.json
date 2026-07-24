@@ -1,16 +1,21 @@
 {
   "current_milestone": "deepgram-stt-provider",
-  "milestone_status": "in_progress",
+  "milestone_status": "ci_green",
   "milestone_branch": { "flint": "feature/deepgram-stt-provider" },
   "current_slice": 6,
   "completed_slices": [1, 2, 3, 4, 5, 6],
   "current_task_id": "deepgram-s6-pr-ci",
-  "milestone_pr_open": true,
-  "loop_stopped": false,
-  "ci_fix_attempts": 0,
+  "loop_stopped": true,
+  "ci_fix_attempts": 1,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": { "flint": "https://github.com/abzanganeh/flint/pull/52" },
-  "notes": "Deepgram opt-in STT provider, consent-gated, Whisper-fallback. Batch-per-VAD-chunk against /v1/listen, not streaming."
+  "open_prs": { "52": "merged" },
+  "manual_gate_backlog": [],
+  "agent_ladder": {
+    "simple": "composer-2.5-fast",
+    "medium": "cursor-grok-4.5-high-fast",
+    "complex": "claude-sonnet-5-thinking-high"
+  },
+  "notes": "Milestone complete. PR #52 merged (squash) to main at 72b9d8a. All CI green on PR and post-merge main push (fmt, clippy, vitest, cargo test x3 platforms, llvm-cov). One cargo fmt fix during PR CI."
 }
