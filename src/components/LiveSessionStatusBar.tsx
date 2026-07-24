@@ -3,13 +3,17 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getInterviewerSpanPreview,
   getProviderPriority,
+  getTranscriptionProviderPreference,
   signalQuestionEnded,
+  type TranscriptionProvider,
 } from "../commands";
 import {
   onAnswerToken,
   onFailoverTriggered,
   onPrimaryRestored,
   onThreadStatus,
+  onTranscriptionFailoverTriggered,
+  onTranscriptionPrimaryRestored,
   onTurnStarted,
 } from "../events";
 import { useTranscriptionStream } from "../hooks/useTranscriptionStream";
@@ -50,6 +54,9 @@ const LiveSessionStatusBar = ({
 }: LiveSessionStatusBarProps) => {
   const [activeProvider, setActiveProvider] = useState("groq");
   const [failoverActive, setFailoverActive] = useState(false);
+  const [transcriptionPreference, setTranscriptionPreference] =
+    useState<TranscriptionProvider>("whisper");
+  const [transcriptionFallbackActive, setTranscriptionFallbackActive] = useState(false);
   const [detectionPhase, setDetectionPhase] = useState<DetectionPhase>("listening");
   const [spanText, setSpanText] = useState("");
   const [uncertainSpeaker, setUncertainSpeaker] = useState(false);
@@ -78,6 +85,9 @@ const LiveSessionStatusBar = ({
         if (order[0]) setActiveProvider(order[0]);
       })
       .catch(() => undefined);
+    void getTranscriptionProviderPreference()
+      .then(setTranscriptionPreference)
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -97,6 +107,12 @@ const LiveSessionStatusBar = ({
       onPrimaryRestored(({ provider }) => {
         setActiveProvider(provider);
         setFailoverActive(false);
+      }),
+      onTranscriptionFailoverTriggered(() => {
+        setTranscriptionFallbackActive(true);
+      }),
+      onTranscriptionPrimaryRestored(() => {
+        setTranscriptionFallbackActive(false);
       }),
       onTurnStarted(({ question }) => {
         setDetectionPhase("detected");
@@ -248,6 +264,28 @@ const LiveSessionStatusBar = ({
             <span className={providerDotClass} />
             {providerDisplayName(activeProvider)}
           </span>
+          {transcriptionPreference === "deepgram" && (
+            <span
+              className="live-provider-badge"
+              data-testid="live-transcription-badge"
+              title={
+                transcriptionFallbackActive
+                  ? "Deepgram unreachable — transcription running locally on Whisper"
+                  : "Cloud transcription (Deepgram) is active"
+              }
+            >
+              <span
+                className={
+                  transcriptionFallbackActive
+                    ? "live-provider-badge__dot live-provider-badge__dot--amber"
+                    : "live-provider-badge__dot"
+                }
+              />
+              {transcriptionFallbackActive
+                ? "Transcription: local (Deepgram unavailable)"
+                : "Transcription: Deepgram"}
+            </span>
+          )}
           <span className="live-detection-indicator" data-testid="live-detection-indicator">
             <span className={detectionDotClass} />
             {detectionLabel}

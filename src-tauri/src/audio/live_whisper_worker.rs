@@ -15,7 +15,8 @@ use tracing::warn;
 
 use crate::audio::capture::AudioSource;
 use crate::audio::vad::VadChunk;
-use crate::transcription::engine::{TranscriptionResult, WhisperEngine};
+use crate::transcription::engine::TranscriptionResult;
+use crate::transcription::provider::TranscriptionProvider;
 
 #[derive(Debug, Clone)]
 pub struct LiveWhisperJobMeta {
@@ -50,7 +51,7 @@ pub struct LiveWhisperWorker {
 
 impl LiveWhisperWorker {
     pub fn start(
-        whisper: Arc<WhisperEngine>,
+        transcriber: Arc<dyn TranscriptionProvider>,
         pending: Arc<AtomicUsize>,
     ) -> (
         Self,
@@ -59,7 +60,7 @@ impl LiveWhisperWorker {
         let (job_tx, job_rx) = mpsc::unbounded_channel();
         let (result_tx, result_rx) = mpsc::unbounded_channel();
         let pending_worker = Arc::clone(&pending);
-        let task = tokio::spawn(worker_loop(whisper, job_rx, result_tx));
+        let task = tokio::spawn(worker_loop(transcriber, job_rx, result_tx));
         (
             Self {
                 job_tx,
@@ -93,7 +94,7 @@ impl LiveWhisperWorker {
 }
 
 async fn worker_loop(
-    whisper: Arc<WhisperEngine>,
+    transcriber: Arc<dyn TranscriptionProvider>,
     mut job_rx: mpsc::UnboundedReceiver<LiveWhisperJob>,
     result_tx: mpsc::UnboundedSender<(LiveWhisperJobMeta, LiveWhisperOutcome)>,
 ) {
@@ -103,21 +104,12 @@ async fn worker_loop(
             chunk,
             rolling_context,
         } = job;
-        let w = Arc::clone(&whisper);
 
-        let outcome = match tokio::task::spawn_blocking(move || {
-            w.transcribe_with_context(&chunk, &rolling_context)
-        })
-        .await
-        {
-            Ok(Ok(Some(result))) => LiveWhisperOutcome::Transcribed(result),
-            Ok(Ok(None)) => LiveWhisperOutcome::Empty,
-            Ok(Err(e)) => {
-                warn!(error = %e, source = ?meta.source, "live whisper transcription error");
-                LiveWhisperOutcome::Failed
-            }
+        let outcome = match transcriber.transcribe(chunk, rolling_context).await {
+            Ok(Some(result)) => LiveWhisperOutcome::Transcribed(result),
+            Ok(None) => LiveWhisperOutcome::Empty,
             Err(e) => {
-                warn!(error = %e, source = ?meta.source, "live whisper task panicked");
+                warn!(error = %e, source = ?meta.source, "live transcription error");
                 LiveWhisperOutcome::Failed
             }
         };

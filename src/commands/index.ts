@@ -774,7 +774,8 @@ export type ApiKeyProvider =
   | "openrouter"
   | "openai"
   | "anthropic"
-  | "tavily";
+  | "tavily"
+  | "deepgram";
 
 export type PrimaryLlmProvider = "groq" | "openai" | "anthropic" | "deepseek";
 
@@ -802,6 +803,40 @@ export const isProviderKeyPresent = (provider: ApiKeyProvider): Promise<boolean>
  */
 export const clearProviderKey = (provider: ApiKeyProvider): Promise<void> =>
   invoke<void>("clear_provider_key", { provider });
+
+// ── Transcription provider selection (Whisper local / Deepgram cloud) ──────
+
+export type TranscriptionProvider = "whisper" | "deepgram";
+
+export interface DeepgramReadinessDto {
+  consentAccepted: boolean;
+  apiKeyPresent: boolean;
+}
+
+/** User's currently selected transcription provider. Default `"whisper"`. */
+export const getTranscriptionProviderPreference = (): Promise<TranscriptionProvider> =>
+  invoke<TranscriptionProvider>("get_transcription_provider_preference");
+
+/**
+ * Persist the user's transcription provider choice. The backend rejects
+ * `"deepgram"` unless both the API key and the consent flag are present,
+ * so callers should render an inline error if this rejects.
+ */
+export const setTranscriptionProviderPreference = (
+  provider: TranscriptionProvider,
+): Promise<void> =>
+  invoke<void>("set_transcription_provider_preference", { provider });
+
+/** Whether both prerequisites for enabling Deepgram are met on this device. */
+export const getDeepgramConsentStatus = (): Promise<DeepgramReadinessDto> =>
+  invoke<DeepgramReadinessDto>("get_deepgram_consent_status");
+
+/**
+ * Record that the user has read and accepted the Deepgram cloud
+ * transcription disclosure. Persisted in the OS keychain.
+ */
+export const acceptDeepgramConsent = (): Promise<void> =>
+  invoke<void>("accept_deepgram_consent");
 
 // ── Phase 5.5.3 — Question bank ──────────────────────────────────────────────
 

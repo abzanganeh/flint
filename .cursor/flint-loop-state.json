@@ -1,27 +1,16 @@
 {
-  "current_milestone": "m10-dat-interview-reliability",
+  "current_milestone": "deepgram-stt-provider",
   "milestone_status": "in_progress",
-  "milestone_branch": { "flint": "feature/m10-dat-interview-reliability" },
-  "current_slice": 5,
-  "completed_slices": [1, 2, 3, 4, 5],
-  "current_task_id": "m10-dat-s5-q-unification",
+  "milestone_branch": { "flint": "feature/deepgram-stt-provider" },
+  "current_slice": 6,
+  "completed_slices": [1, 2, 3, 4, 5, 6],
+  "current_task_id": "deepgram-s6-pr-ci",
+  "milestone_pr_open": true,
   "loop_stopped": false,
   "ci_fix_attempts": 0,
   "max_ci_fix_attempts": 6,
   "task_attempts": 0,
   "max_task_attempts": 3,
-  "open_prs": {},
-  "manual_gate_backlog": [
-    {
-      "gate": "DAT-style noisy headset live retest",
-      "doc": "tests/manual-qa/M10_LIVE_RELIABILITY.md",
-      "notes": "Rehearse → Test Live Session → commit live → real Zoom call; verify preview text absent from first Ctrl+Q and latest Q uses backend buffer"
-    }
-  ],
-  "agent_ladder": {
-    "simple": "composer-2.5-fast",
-    "medium": "cursor-grok-4.5-high-fast",
-    "complex": "claude-sonnet-5-thinking-high"
-  },
-  "notes": "Fixes from Jul 20 DAT interview post-mortem: preview buffer reset, Q/Ctrl+Q unification, whisper backlog gate, uncertain-speaker auto-detect block."
+  "open_prs": { "flint": "https://github.com/abzanganeh/flint/pull/52" },
+  "notes": "Deepgram opt-in STT provider, consent-gated, Whisper-fallback. Batch-per-VAD-chunk against /v1/listen, not streaming."
 }

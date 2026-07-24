@@ -9,7 +9,7 @@
 //! Downsampler::process()              — 480 @ 48kHz → 160 @ 16kHz
 //! VadChunker::process_frame()         — accumulates speech, emits VadChunk on silence gap
 //!     ↓ VadChunk (variable length, 16kHz PCM mono)
-//! WhisperEngine::transcribe_with_context() — rolling ~40-word prior per channel
+//! TranscriptionProvider::transcribe() — Whisper or Deepgram, per user preference
 //!     ↓ TranscriptionResult
 //! emit transcription_chunk            — immediately, before question detection
 //! QuestionDetector::detect()          — System channel only
@@ -57,10 +57,10 @@ use crate::audio::diarizer::{DiarizerManager, SpeakerRole};
 use crate::audio::speaker_classifier::{ClassificationRequest, SpeakerClassifier};
 use crate::audio::speaker_heuristic::{rms_dbfs, PhoneHeuristicState};
 use crate::session::persistence::{SessionPersistence, TranscriptChunk};
-use crate::transcription::engine::WhisperEngine;
 use crate::transcription::hybrid::{
     finalize_confirmation, ConfirmPlan, HybridQuestionDetector, SystemTranscriptBuffer,
 };
+use crate::transcription::provider::TranscriptionProvider;
 use crate::transcription::rolling_context::ChannelRollingContexts;
 use crate::transcription::sanitizer::sanitize_live_transcript;
 use crate::transcription::speaker_suspicion::{self, NearDuplicateTracker, SuspicionReason};
@@ -373,7 +373,7 @@ impl ChannelProcessor {
 pub async fn run_audio_pipeline(
     app_handle: AppHandle,
     session_id: Uuid,
-    whisper: Arc<WhisperEngine>,
+    transcriber: Arc<dyn TranscriptionProvider>,
     hybrid: Arc<AsyncMutex<HybridQuestionDetector>>,
     system_buffer: Arc<SyncMutex<SystemTranscriptBuffer>>,
     question_tx: mpsc::Sender<DetectedQuestion>,
@@ -396,7 +396,7 @@ pub async fn run_audio_pipeline(
     let phone_heuristic = SyncMutex::new(PhoneHeuristicState::new());
     let rolling_contexts = Arc::new(SyncMutex::new(ChannelRollingContexts::default()));
     let (whisper_worker, mut whisper_results) =
-        LiveWhisperWorker::start(Arc::clone(&whisper), Arc::clone(&whisper_pending));
+        LiveWhisperWorker::start(Arc::clone(&transcriber), Arc::clone(&whisper_pending));
 
     let dispatch_whisper_result = |meta: LiveWhisperJobMeta, outcome: LiveWhisperOutcome| async {
         let result = handle_transcription_result(

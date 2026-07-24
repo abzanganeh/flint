@@ -17,6 +17,7 @@ const AUTH_REFRESH_ENTRY: &str = "auth_token_refresh";
 const AUTH_EXPIRES_ENTRY: &str = "auth_token_expires_at";
 const LEGAL_CONSENT_ENTRY: &str = "legal_consent_accepted";
 const REHEARSAL_COMPLETED_ENTRY: &str = "rehearsal_completed";
+const DEEPGRAM_CONSENT_ENTRY: &str = "deepgram_transcription_consent_accepted";
 const OAUTH_PKCE_VERIFIER_ENTRY: &str = "oauth_pkce_verifier";
 
 /// Every LLM provider that may have an API key stored under
@@ -29,6 +30,7 @@ pub const KNOWN_API_PROVIDERS: &[&str] = &[
     "openai",
     "anthropic",
     "tavily",
+    "deepgram",
 ];
 
 const READ_CREDENTIALS_MSG: &str = "Could not read credentials. Please log in again.";
@@ -130,6 +132,23 @@ pub fn is_rehearsal_completed() -> bool {
         .unwrap_or(false)
 }
 
+/// Record the user's explicit consent to send audio to Deepgram's cloud.
+///
+/// This is a separate consent from the general recording-consent gate — it
+/// specifically discloses that a third-party service (Deepgram) will receive
+/// audio bytes including other participants' voices, which is a different
+/// privacy contract than the fully-local Whisper path.
+pub fn set_deepgram_consent_accepted() -> Result<()> {
+    store_password(DEEPGRAM_CONSENT_ENTRY, &SecretString::new("1".into()))
+}
+
+/// Whether the user has accepted the Deepgram cloud-transcription disclosure.
+pub fn is_deepgram_consent_accepted() -> bool {
+    get_password(DEEPGRAM_CONSENT_ENTRY)
+        .map(|v| v.expose_secret() == "1")
+        .unwrap_or(false)
+}
+
 /// Remove all auth token entries from the OS keychain.
 pub fn clear_auth_token() -> Result<()> {
     delete_password(AUTH_ACCESS_ENTRY)?;
@@ -175,6 +194,7 @@ pub fn clear_account_secrets() -> Result<()> {
         OAUTH_PKCE_VERIFIER_ENTRY,
         LEGAL_CONSENT_ENTRY,
         REHEARSAL_COMPLETED_ENTRY,
+        DEEPGRAM_CONSENT_ENTRY,
     ])
 }
 
@@ -189,6 +209,7 @@ pub fn clear_all_user_secrets() -> Result<()> {
         AUTH_EXPIRES_ENTRY,
         LEGAL_CONSENT_ENTRY,
         REHEARSAL_COMPLETED_ENTRY,
+        DEEPGRAM_CONSENT_ENTRY,
     ];
     let api_entries: Vec<String> = KNOWN_API_PROVIDERS
         .iter()

@@ -67,6 +67,23 @@ pub struct PrimaryRestoredPayload {
     pub provider: String,
 }
 
+/// Emitted when the transcription router falls back from a cloud primary
+/// (Deepgram) to local Whisper. Distinct from the LLM `failover_triggered`
+/// event so the UI can surface an STT-specific indicator without conflating
+/// it with an LLM outage.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptionFailoverTriggeredPayload {
+    pub from: String,
+    pub to: String,
+}
+
+/// Emitted when the transcription router's background health probe finds
+/// the cloud primary usable again.
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptionPrimaryRestoredPayload {
+    pub provider: String,
+}
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenUsageUpdatePayload {
@@ -205,6 +222,20 @@ pub fn emit_failover_triggered<R: Runtime>(app: &AppHandle<R>, payload: Failover
 
 pub fn emit_primary_restored<R: Runtime>(app: &AppHandle<R>, payload: PrimaryRestoredPayload) {
     let _ = app.emit("primary_restored", payload);
+}
+
+pub fn emit_transcription_failover_triggered<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: TranscriptionFailoverTriggeredPayload,
+) {
+    let _ = app.emit("transcription_failover_triggered", payload);
+}
+
+pub fn emit_transcription_primary_restored<R: Runtime>(
+    app: &AppHandle<R>,
+    payload: TranscriptionPrimaryRestoredPayload,
+) {
+    let _ = app.emit("transcription_primary_restored", payload);
 }
 
 pub fn emit_token_usage_update<R: Runtime>(app: &AppHandle<R>, payload: TokenUsageUpdatePayload) {
